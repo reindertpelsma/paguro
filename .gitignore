@@ -1,0 +1,8 @@
+/target
+*.efi
+*.ko
+*.o
+*.mod*
+.*.cmd
+Module.symvers
+modules.order

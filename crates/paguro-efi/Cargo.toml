@@ -1,0 +1,25 @@
+[package]
+name = "paguro-efi"
+description = "The UEFI loader: verify, ratchet, unlock, chainload the UKI (DESIGN.md §4.1)"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "paguro"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+paguro-core.workspace = true
+paguro-crypto.workspace = true
+uefi = { version = "0.41", features = ["logger", "panic_handler"] }
+log = { version = "0.4", default-features = false }
+# The UEFI target is soft-float with SSE/AVX disabled; sha2's SIMD backends
+# do not compile there. Feature unification applies this to paguro-crypto too.
+sha2 = { workspace = true, features = ["force-soft"] }
+
+[lints]
+workspace = true

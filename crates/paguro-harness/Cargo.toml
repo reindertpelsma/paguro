@@ -1,0 +1,13 @@
+[package]
+name = "paguro-harness"
+description = "The storage torture harness — the first artifact to build (DESIGN.md §1b, §11)"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+paguro-core.workspace = true
+
+[lints]
+workspace = true

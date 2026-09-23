@@ -1,0 +1,10 @@
+[package]
+name = "paguro-core"
+description = "Pure, dependency-free logic shared by paguro-efi, the kernel module and userspace"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true

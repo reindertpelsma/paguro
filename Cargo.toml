@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/paguro-core",
+    "crates/paguro-crypto",
+    "crates/paguro-efi",
+    "crates/paguro-initrd",
+    "crates/paguro-win",
+    "crates/paguro-harness",
+]
+# paguro-efi only builds for x86_64-unknown-uefi; see its README.
+default-members = [
+    "crates/paguro-core",
+    "crates/paguro-crypto",
+    "crates/paguro-initrd",
+    "crates/paguro-win",
+    "crates/paguro-harness",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.0"
+publish = false
+rust-version = "1.85"
+
+[workspace.dependencies]
+paguro-core = { path = "crates/paguro-core" }
+paguro-crypto = { path = "crates/paguro-crypto" }
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+indexing_slicing = "warn"
+
+[profile.release]
+panic = "abort"
+lto = true
