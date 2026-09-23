@@ -40,20 +40,27 @@ NTFS can be driven into an unrecoverable state, the design stops there.
 | `crates/paguro-efi` | the loader: the four-stage contract | §4.1 | UEFI (`x86_64-unknown-uefi`) |
 | `crates/paguro-initrd` | build the views, write seals, record PCRs | §4.3, §6 | the initrd |
 | `crates/paguro-win` | Restart into Linux, pre-flight, repair hook | §4.6, §7 | Windows |
-| `crates/paguro-harness` | the storage torture harness; today a model check of the range test | §11 | Linux host |
-| `kernel/paguro-mod` | the enforcement module (Rust-for-Linux) | §4.3 | Linux kernel |
+| `crates/paguro-harness` | the storage torture harness; today a model check of the range test and a C-vs-Rust differential test | §11 | Linux host |
+| `kernel/dm-paguro` | the enforcement module: a device-mapper target (C) | §4.3 | Linux kernel |
 | `windows/minifilter` | clean refusals in the guest (C/WDK) | §4.4 | Windows kernel |
 
-**The trusted core is one module we write**, a few hundred lines. Its runtime
-logic is `paguro-core/src/range.rs`, included into the kernel module by path, so
-the code the kernel runs is the code CI tests.
+**The trusted core is one module we write**, a few hundred lines of C. Its
+runtime logic, `pg_range.c`, is compiled into userspace too and
+differential-tested against the Rust specification `paguro-core/src/range.rs`;
+the module itself is loaded in a throwaway QEMU VM in CI and exercised with real
+I/O.
+
+**Language rule: Rust by default, C where the platform's interface is C** — the
+device-mapper target and the Windows minifilter. Both are thin; the logic they
+run is specified and tested in Rust.
 
 ## Build
 
 ```sh
 cargo test                                                     # all pure logic
-cargo run -p paguro-harness -- 1000000                         # range model check
+cargo run -p paguro-harness -- 1000000                         # model + C-vs-Rust checks
 cargo build -p paguro-efi --target x86_64-unknown-uefi         # the loader
+make -C kernel/dm-paguro && kernel/dm-paguro/test/vm-test.sh   # module, in a VM
 ```
 
 Boot the loader under OVMF (it stops at the unimplemented stage 1):
@@ -82,4 +89,5 @@ qemu-system-x86_64 -machine q35 -m 256 -nographic -net none \
 
 ## Licence
 
-Not chosen yet. The kernel module is GPL-2.0 (a kernel requirement).
+Not chosen yet. The kernel module is GPL-2.0 (a kernel requirement); `pg_range.[ch]`
+are dual GPL-2.0 OR MIT so they can be shared with userspace.

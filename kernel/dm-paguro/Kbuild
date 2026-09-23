@@ -1,0 +1,2 @@
+obj-m := dm-paguro.o
+dm-paguro-y := dm-paguro-main.o pg_range.o

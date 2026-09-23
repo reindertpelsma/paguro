@@ -4,9 +4,9 @@
 //! `EIO`; everything else passes through. There is deliberately nothing else in
 //! the request path — no NTFS parsing, no `$Bitmap` tracking, no cryptography.
 //!
-//! This file is **self-contained** (no `use` of other crate modules, no
-//! dependencies) because the kernel module includes it by `#[path]`: out-of-tree
-//! Rust kernel modules cannot depend on crates.
+//! This is the **executable specification** for the kernel module's C
+//! implementation (`kernel/dm-paguro/pg_range.c`); `paguro-harness`
+//! differential-tests the two against each other on every CI run.
 
 /// A half-open sector range `[start, end)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

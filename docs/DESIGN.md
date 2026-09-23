@@ -133,6 +133,24 @@ That is the risk that survives, and it is not a technical one.
 
 ---
 
+### Closest prior art
+
+Each part has a precedent; no project found combines even two of them.
+
+| Project | Shares | Lacks |
+|---|---|---|
+| **Ventoy** | maps a fragmented file's extents to a block device with a `dm-linear` table (`vtoydm`) — paguro's view A mechanism | boots one OS from removable media; nothing else writes the disk meanwhile, so nothing needs protecting |
+| **Wubi / WubiUEFI** | Linux in a file inside NTFS, no repartitioning, UEFI via shim | loop-over-NTFS I/O path, no BitLocker, no enforcement; dormant |
+| guides for booting the physical Windows partition in QEMU/KVM | the same native Windows as a VM | ad hoc; activation and BitLocker left unsolved; Linux is not also on that disk |
+| **Parallels / VMware Fusion "Boot Camp VM"** | one Windows install, both native and virtualised — the closest commercial analogue | macOS host; reactivation friction; gone with Apple Silicon |
+| **WinBoat + Helios**, WinApps, Cassowary, dockur | RemoteApp windows, paravirtual GPU without VFIO | a *freshly provisioned* Windows, not the user's own |
+| `dislocker`, `cryptsetup bitlk` | BitLocker unlock outside Windows | userspace only; no pre-boot (EFI-stage) implementation found |
+
+What appears new is the combination: an EFI-stage BitLocker unlock, a kernel
+module that polices the image's extents against a concurrent OS rather than just
+mapping them, and one already-encrypted, already-activated Windows installation
+reachable natively and as a VM without ever changing its boot path.
+
 ### The solvable counterweight
 
 **A partition puts its risk in one bounded operation at install time**, which

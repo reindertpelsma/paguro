@@ -1,0 +1,23 @@
+insmod /dm-paguro.ko || bad "insmod"
+dd if=/dev/zero of=/tmp/img bs=512 count=4096 2>/dev/null
+LOOP=$(losetup -f); losetup $LOOP /tmp/img
+# protect sectors [1000, 2000) of the loop device
+echo "0 4096 paguro $LOOP 0 1 1000 1000" | dmsetup create pv || bad "dmsetup create"
+dmsetup mknodes
+D=/dev/mapper/pv
+dd if=$D of=/dev/null bs=512 count=8 iflag=direct 2>/tmp/e && ok "read outside range" || { bad "read outside range"; cat /tmp/e; }
+dd if=$D of=/dev/null bs=512 skip=1000 count=1 iflag=direct 2>/dev/null && bad "read inside range succeeded" || ok "read inside range refused"
+dd if=$D of=/dev/null bs=512 skip=1999 count=1 iflag=direct 2>/dev/null && bad "read last protected sector" || ok "last protected sector refused"
+dd if=$D of=/dev/null bs=512 skip=2000 count=1 iflag=direct 2>/dev/null && ok "first sector after range readable" || bad "sector 2000 refused"
+echo PAGURO | dd of=$D bs=512 seek=3000 count=1 conv=sync,fsync oflag=direct 2>/dev/null && ok "write outside range" || bad "write outside range"
+dd if=/tmp/img bs=512 skip=3000 count=1 2>/dev/null | grep -q PAGURO && ok "write reached the device" || bad "write did not reach device"
+yes EVIL | head -c 5120 > /tmp/evil
+# ONE 5 KiB direct write covering sectors 995..1004: a single bio straddling the edge
+dd if=/tmp/evil of=$D bs=5120 count=1 seek=$((995*512)) oflag=direct,seek_bytes conv=fsync 2>/dev/null && bad "straddling write succeeded" || ok "straddling write refused"
+dd if=/tmp/img bs=512 skip=995 count=10 2>/dev/null | grep -q EVIL && bad "straddling write partially landed" || ok "no sector of the straddling write landed"
+echo "status: $(dmsetup status pv)"
+echo "table:  $(dmsetup table pv)"
+echo "0 4096 paguro $LOOP 0 1 5 0" | dmsetup create bad0 2>/dev/null && bad "zero-length range accepted" || ok "zero-length range rejected"
+dmsetup remove pv && ok "dmsetup remove"
+[ $fail = 0 ] && echo "RESULT: ALL PASS" || echo "RESULT: FAILURES"
+poweroff -f
