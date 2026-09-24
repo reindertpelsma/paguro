@@ -192,11 +192,9 @@ path, so it inherits a `DeviceHandle`. `WriteBlocks` returns
 The third row is what makes stock distribution images bootable unchanged at the
 boot-loader level. What a stock image still needs, stated plainly:
 
-- **one package in the image** (`paguro`, built per distribution release): the
-  `dm-paguro` module for that release's kernel, signed with the paguro key
-  already enrolled in MOK for `paguro.efi` (DKMS as the fallback when a kernel
-  update outruns the prebuilt module), and the initramfs-tools/dracut hook that
-  reads the handoff and builds the views. A
+- **one package in the image** (`paguro`, §11.6): `dm-paguro` as DKMS source,
+  built on the machine against whatever kernel is installed, and the
+  initramfs-tools/dracut hook that reads the handoff and builds the views. A
   stock initramfs cannot find a root inside a VHD inside NTFS on its own;
 - **GRUB's writes fail**: `save_env`/`recordfail` meet a write-protected disk
   and GRUB carries on (to be confirmed per distribution, §11);
@@ -582,9 +580,8 @@ paguro install <distro>              (Windows, admin)
   up:
   - **the copy source is an overlay**, not the bare squashfs. Our layer holds
     **only paguro's own packages**, installed as real packages (registered with
-    dpkg/rpm, so the target upgrades them): `paguro` — the `dm-paguro` module
-    built for that distribution release's kernel, and the initramfs-tools /
-    dracut hook that adds it — and the Windows VM stack (QEMU, OVMF, our VM
+    dpkg/rpm, so the target upgrades them): `paguro` (§11.6) and the Windows
+    VM stack (QEMU, OVMF, our VM
     integration). **No firmware and no drivers from us**: choosing those is the
     installer's job (§11.5). Installers copy from the squashfs *file*, not from
     the running root (Calamares `unpackfs`, Ubuntu's layered squashfs via
@@ -655,6 +652,40 @@ What this reaches, by installer: Ubuntu's "install third-party drivers"
 (NVIDIA and other proprietary drivers, chosen by modalias); Debian's
 `isenkram`/firmware checks; Calamares' driver modules. Installers that install
 all firmware unconditionally (Fedora's `linux-firmware`) need nothing.
+
+### 11.6 The `paguro` package: source, built on the machine — DRAFT
+
+**We ship source, never binaries per kernel.** The package carries
+`dm-paguro` as a DKMS module and depends on the distribution's compiler and its
+kernel-headers package for the installed kernel flavour (`linux-headers-*`,
+`kernel-devel`, `linux-headers`). DKMS builds it in the target during the
+install and again on every kernel install, so custom and self-built kernels
+work whenever their headers are present. What we maintain is **source
+compatibility across kernel versions** (`#if LINUX_VERSION_CODE` in the glue
+only — the core has no kernel dependency), checked in CI against the kernels
+of every supported distribution plus mainline and `linux-next`.
+
+The per-distribution part is packaging, not builds: one `deb`, one `rpm`, one
+Arch package, each a thin wrapper around the same source and hooks.
+
+**A kernel update must never produce an unbootable entry.** The initramfs hook
+**fails the initramfs build** if `dm-paguro.ko` is missing for that kernel, so a
+DKMS build failure fails the kernel package's install loudly and the previous
+kernel stays the default, instead of an initramfs that cannot find its root.
+Ordering: DKMS runs before initramfs generation (`/etc/kernel/postinst.d/dkms`
+before `initramfs-tools`; dracut and `kernel-install` plugins likewise).
+
+**Secure Boot: the module is signed with a key made on the machine.** Under
+lockdown an unsigned module is refused, and the root cannot mount. DKMS's own
+signing key (generated at install) is enrolled in MOK:
+
+- WSL2 has no efivarfs, so `mokutil` cannot run at install time. The Windows
+  tool writes shim's `MokNew`/`MokAuth` variables itself
+  (`SetFirmwareEnvironmentVariable`), queuing the DKMS key together with
+  paguro's own certificate, so the first boot shows **one** MokManager
+  enrolment.
+- The private key lives in the image and is sealed like the design's other
+  MOK key (DESIGN §6, "Keeping the MOK private key out of Windows' reach").
 
 ### 11.3 Guest agent (VM mode growth) — OPEN
 
