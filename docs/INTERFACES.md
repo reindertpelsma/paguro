@@ -192,9 +192,11 @@ path, so it inherits a `DeviceHandle`. `WriteBlocks` returns
 The third row is what makes stock distribution images bootable unchanged at the
 boot-loader level. What a stock image still needs, stated plainly:
 
-- **one package in the image** (`paguro-initramfs`): the `dm-paguro` module
-  (DKMS, MOK-signed like any DKMS module under Secure Boot) and the
-  initramfs-tools/dracut hook that reads the handoff and builds the views. A
+- **one package in the image** (`paguro`, built per distribution release): the
+  `dm-paguro` module for that release's kernel, signed with the paguro key
+  already enrolled in MOK for `paguro.efi` (DKMS as the fallback when a kernel
+  update outruns the prebuilt module), and the initramfs-tools/dracut hook that
+  reads the handoff and builds the views. A
   stock initramfs cannot find a root inside a VHD inside NTFS on its own;
 - **GRUB's writes fail**: `save_env`/`recordfail` meet a write-protected disk
   and GRUB carries on (to be confirmed per distribution, §11);
@@ -547,7 +549,7 @@ installer can see is the one we attach.
 
 ```text
 paguro install <distro>              (Windows, admin)
-  1. collect the host hardware manifest            (§11.5)
+  1. export the host hardware                     (§11.5)
   2. create the file      fixed VHD, diskpart `create vdisk type=fixed`
                           (works on Home; no Hyper-V module)
   3. wsl --mount --vhd --bare   the VHD is the only extra disk in WSL2
@@ -565,8 +567,9 @@ paguro install <distro>              (Windows, admin)
   6. write paguro.ini, PaguroConfigHash, the bootstrap Boot#### entry
 ```
 
-- `paguro-initramfs` is installed in the chroot like any package, so the driver
-  is in the image from its first boot — no injection problem.
+- The `paguro` package reaches the target like any package the installer
+  copies, so the driver is in the image from its first boot — no injection
+  problem.
 - The same path makes an existing WSL distribution bootable: its rootfs is the
   source in step 4.
 - **Why the ISO and not a bootstrap tool.** The install is the distribution's
@@ -577,10 +580,13 @@ paguro install <distro>              (Windows, admin)
   Every installer copies a filesystem and then generates the initramfs, so the
   adapter puts paguro's pieces where that copy and that generation pick them
   up:
-  - **the copy source is an overlay**, not the bare squashfs: our layer holds
-    `paguro-initramfs` installed as a real package (registered with dpkg/rpm,
-    so the target can upgrade it) and the firmware/driver packages chosen from
-    the manifest (§11.5). Installers copy from the squashfs *file*, not from
+  - **the copy source is an overlay**, not the bare squashfs. Our layer holds
+    **only paguro's own packages**, installed as real packages (registered with
+    dpkg/rpm, so the target upgrades them): `paguro` — the `dm-paguro` module
+    built for that distribution release's kernel, and the initramfs-tools /
+    dracut hook that adds it — and the Windows VM stack (QEMU, OVMF, our VM
+    integration). **No firmware and no drivers from us**: choosing those is the
+    installer's job (§11.5). Installers copy from the squashfs *file*, not from
     the running root (Calamares `unpackfs`, Ubuntu's layered squashfs via
     `curtin`, Anaconda from the live base device), so the adapter points the
     installer's source at the overlay mount rather than relying on the
@@ -610,44 +616,45 @@ paguro install <distro>              (Windows, admin)
 The loader has no ISO support: ISOs are opened in WSL2 at install time, and
 Linux can still mount one from a claimed file with `isofs`.
 
-### 11.5 Host hardware manifest — DRAFT
+### 11.5 Host hardware export — DRAFT
 
-Inside WSL2 the installer sees Hyper-V's synthetic hardware, not the machine,
-so it would install the wrong drivers and firmware. The Windows tool therefore
-describes the real machine, and the chroot installs for that.
+Inside WSL2 the installer's hardware detection sees Hyper-V's synthetic
+devices, not the machine. **paguro does not pick drivers or firmware**; it makes
+the installer's own detection see the real machine, by exporting it from
+Windows.
 
 **Collected on Windows** (SetupAPI, present devices only; SMBIOS through
-`GetSystemFirmwareTable`), written as `/etc/paguro/host-hardware.json` in the
-image:
+`GetSystemFirmwareTable`; CPUID), written to `host-hardware.json` and kept in
+the image at `/etc/paguro/host-hardware.json`:
 
 ```json
 { "version": 1,
-  "cpu":  { "vendor": "GenuineIntel", "family": 6, "model": 170 },
-  "dmi":  { "sys_vendor": "…", "product_name": "…", "board_name": "…" },
-  "pci":  [ { "vendor": "8086", "device": "51f0", "subvendor": "8086",
-              "subdevice": "0094", "class": "028000" } ],
-  "usb":  [ { "vendor": "8087", "product": "0033", "class": "e0" } ],
-  "acpi": [ "PNP0C50", "INT33D2" ],
-  "windows_drivers": [ { "hwid": "PCI\\VEN_8086&DEV_51F0…", "inf": "netwtw10.inf",
-                         "provider": "Intel" } ] }
+  "cpu":     { "vendor": "GenuineIntel", "family": 6, "model": 170, "stepping": 4 },
+  "dmi":     { "sys_vendor": "…", "product_name": "…", "board_vendor": "…",
+               "board_name": "…", "bios_vendor": "…", "bios_version": "…" },
+  "pci":     [ { "vendor": "10de", "device": "28a0", "subvendor": "1043",
+                 "subdevice": "1f3a", "class": "030000" } ],
+  "usb":     [ { "vendor": "8087", "product": "0033", "class": "e0" } ],
+  "acpi":    [ "PNP0C50", "INT33D2" ],
+  "storage": [ { "bus": "nvme", "model": "…", "size": 1024209543168 } ] }
 ```
 
-**Used in the chroot:**
+**Presented to the installer as a synthetic sysfs**, generated from the export
+at `/run/paguro/hostsys`: one directory per device with the `modalias`,
+`vendor`, `device`, `subsystem_*` and `class` files a real `/sys` has, plus
+`class/dmi/id/*`. Detection tools are pointed at it where they support a root
+(Ubuntu's `ubuntu-drivers` honours `UBUNTU_DRIVERS_SYS_DIR`); where a tool only
+reads `/sys`, the adapter bind-mounts the synthetic devices over the paths that
+tool reads, inside the installer's container only. The container's own `/sys`
+stays real, so udev, systemd and the installer's disk handling are untouched.
 
-1. Convert every entry to a kernel **modalias** (`pci:v00008086d000051F0sv…`,
-   `usb:v8087p0033…`, `acpi:PNP0C50:`, `dmi:…`) — the same strings the target
-   kernel would see in `/sys`.
-2. Match them against the target kernel's `modules.alias` → the modules this
-   machine needs → `modinfo -F firmware` → the firmware files → the packages
-   that ship them (`apt-file`/Debian's `isenkram` tables, `dnf provides`).
-3. Out-of-tree drivers by rule: NVIDIA GPU → the distribution's NVIDIA driver
-   (`ubuntu-drivers`, RPM Fusion `akmod`), Broadcom Wi-Fi → `wl`, and so on.
+The CPU needs nothing: WSL2 passes CPUID through, so `/proc/cpuinfo` already
+names the real processor and microcode selection works as is.
 
-**Priority is first-boot essentials: network (Wi-Fi and Ethernet firmware) and
-display.** Everything else the distribution's own tools can fix on the first
-native boot, when the real hardware is present — but only if the network came
-up. The manifest stays in the image so first-boot tooling can compare it with
-what it finds.
+What this reaches, by installer: Ubuntu's "install third-party drivers"
+(NVIDIA and other proprietary drivers, chosen by modalias); Debian's
+`isenkram`/firmware checks; Calamares' driver modules. Installers that install
+all firmware unconditionally (Fedora's `linux-firmware`) need nothing.
 
 ### 11.3 Guest agent (VM mode growth) — OPEN
 
