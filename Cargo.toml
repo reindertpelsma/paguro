@@ -9,6 +9,8 @@ members = [
     "crates/paguro-win",
     "crates/paguro-harness",
     "crates/paguro-theme",
+    "crates/paguro-ui",
+    "crates/paguro-ui-preview",
     "test/qemu/runner",
 ]
 # paguro-efi only builds for x86_64-unknown-uefi; see its README.
@@ -20,6 +22,8 @@ default-members = [
     "crates/paguro-win",
     "crates/paguro-harness",
     "crates/paguro-theme",
+    "crates/paguro-ui",
+    "crates/paguro-ui-preview",
     "test/qemu/runner",
 ]
 
@@ -34,6 +38,7 @@ paguro-core = { path = "crates/paguro-core" }
 paguro-crypto = { path = "crates/paguro-crypto" }
 paguro-boot = { path = "crates/paguro-boot" }
 paguro-theme = { path = "crates/paguro-theme" }
+paguro-ui = { path = "crates/paguro-ui" }
 sha2 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
 
@@ -47,3 +52,17 @@ indexing_slicing = "warn"
 panic = "abort"
 lto = true
 
+# The golden and property tests render full frames (up to 3840×2160) and
+# hash them: unoptimised, that takes minutes.
+[profile.dev.package.paguro-ui]
+opt-level = 2
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3

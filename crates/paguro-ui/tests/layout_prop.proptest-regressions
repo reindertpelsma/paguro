@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d2fc68848edb6b982730b04e134a18583695cd1fa46b5fa7a2ad0c3bb8736378 # shrinks to w = 653, h = 798, screen = SelectTarget(TargetList { items: [Target { name: " m _--_AAa0 _aAAA0aa-a0_a_0A_ a0-AA ", bytes: 14987992754028544, kind: EfiFile }, Target { name: "", bytes: 0, kind: Disk }, Target { name: "", bytes: 0, kind: Disk }, Target { name: "", bytes: 0, kind: Disk }, Target { name: "", bytes: 0, kind: Disk }, Target { name: "", bytes: 0, kind: Disk }, Target { name: "", bytes: 0, kind: Disk }, Target { name: "", bytes: 0, kind: Disk }], count: 1 }), keys = [], theme = 1, toast = None

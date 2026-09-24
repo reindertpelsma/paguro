@@ -334,6 +334,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "paguro-ui"
+version = "0.0.0"
+dependencies = [
+ "hmac",
+ "paguro-boot",
+ "paguro-core",
+ "paguro-crypto",
+ "paguro-theme",
+ "png",
+ "proptest",
+ "sha2",
+]
+
+[[package]]
+name = "paguro-ui-preview"
+version = "0.0.0"
+dependencies = [
+ "paguro-boot",
+ "paguro-ui",
+ "png",
+]
+
+[[package]]
 name = "paguro-win"
 version = "0.0.0"
 dependencies = [

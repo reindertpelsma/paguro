@@ -1,0 +1,15 @@
+[package]
+name = "paguro-ui-preview"
+description = "Render the loader's screens to PNG on the host, for theme authors (INTERFACES.md §13)"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+paguro-boot.workspace = true
+paguro-ui.workspace = true
+png = "0.18"
+
+[lints]
+workspace = true
