@@ -19,10 +19,12 @@
 //! | [`ini`]     | §6 — the frozen `paguro.ini` grammar             |
 //! | [`seal`]    | §6 — the `*_seal.bin` file layouts               |
 //! | [`fve`]     | §6 — bounded walk over BitLocker FVE metadata    |
+//! | [`bde`]     | §6 — BitLocker volume header, metadata cross-check, protectors, sector map |
 #![no_std]
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::indexing_slicing))]
 
+pub mod bde;
 pub mod bootstrap;
 pub mod bytes;
 pub mod config;
