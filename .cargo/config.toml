@@ -1,0 +1,8 @@
+# The UEFI targets are soft-float with SSE/NEON disabled: the `aes` crate's
+# AES-NI / ARMv8 backends do not compile there. Force its constant-time
+# fixsliced software backend (paguro-crypto's BitLocker XTS and CCM).
+[target.x86_64-unknown-uefi]
+rustflags = ["--cfg", 'aes_backend="soft"']
+
+[target.aarch64-unknown-uefi]
+rustflags = ["--cfg", 'aes_backend="soft"']

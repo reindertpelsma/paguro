@@ -15,6 +15,8 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod bitlocker;
+
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 

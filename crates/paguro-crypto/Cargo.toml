@@ -9,6 +9,13 @@ rust-version.workspace = true
 [dependencies]
 sha2.workspace = true
 hmac.workspace = true
+# BitLocker: AES-CCM key unwrap and XTS-AES data units (DESIGN.md §4.1:
+# "SHA-256, AES-XTS, AES-CCM and HMAC").
+aes = { version = "0.9", default-features = false, features = ["zeroize"] }
+ccm = { version = "0.6", default-features = false }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
