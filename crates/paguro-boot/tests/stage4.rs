@@ -34,7 +34,9 @@ fn tmp(name: &str) -> PathBuf {
     let base = std::env::var_os("PAGURO_TEST_TMP")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    let d = base.join(format!("paguro-s4-{}-{name}", std::process::id()));
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = base.join(format!("paguro-s4-{}-{name}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -43,6 +45,9 @@ fn tmp(name: &str) -> PathBuf {
 /// A 36 MiB GPT disk whose ESP holds `\EFI\BOOT\BOOTX64.EFI` (= `efi`) and
 /// `\probe.txt`, as a fixed VHD.
 fn payload_vhd(d: &Path, efi: &[u8]) -> Option<Vec<u8>> {
+    if !tools() {
+        return None;
+    }
     let fat = d.join("esp.fat");
     if !ok(Command::new("mkfs.vfat")
         .args(["-F", "32", "-S", "512", "-s", "1", "-C"])
@@ -103,6 +108,9 @@ struct Built {
 }
 
 fn build(name: &str, fill: impl FnOnce(&Path)) -> Option<Built> {
+    if !tools() {
+        return None;
+    }
     let d = tmp(name);
     let ntfs = d.join("ntfs.img");
     std::fs::File::create(&ntfs)
@@ -516,4 +524,26 @@ fn mount_ntfs(img: &Path, mnt: &Path) -> bool {
 
 fn umount(mnt: &Path) -> bool {
     ok(privileged("umount").arg(mnt))
+}
+
+/// Every tool these tests build disks with; without one they are skipped.
+fn tools() -> bool {
+    let missing: Vec<&str> = [
+        "mkfs.vfat",
+        "mmd",
+        "mcopy",
+        "sgdisk",
+        "qemu-img",
+        "mkntfs",
+        "ntfs-3g",
+        "ntfscat",
+        "ntfsinfo",
+    ]
+    .into_iter()
+    .filter(|t| !ok(Command::new("sh").arg("-c").arg(format!("command -v {t}"))))
+    .collect();
+    if !missing.is_empty() {
+        eprintln!("{missing:?} unavailable: skipped");
+    }
+    missing.is_empty()
 }

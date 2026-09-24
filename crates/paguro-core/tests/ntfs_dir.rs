@@ -27,7 +27,10 @@ fn tmp(name: &str) -> PathBuf {
     let base = std::env::var_os("PAGURO_TEST_TMP")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    let d = base.join(format!("paguro-ntfsdir-{}-{name}", std::process::id()));
+    // Tests run in parallel: every call gets its own directory.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = base.join(format!("paguro-ntfsdir-{}-{name}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -37,6 +40,12 @@ fn tmp(name: &str) -> PathBuf {
 /// with ntfs-3g, let `fill` write into the mount point, unmount, and return
 /// the image. `None` when the tools or FUSE are unavailable.
 fn volume(name: &str, mib: u64, cluster: u32, fill: impl FnOnce(&Path)) -> Option<Vec<u8>> {
+    for t in ["mkntfs", "ntfs-3g", "ntfsls", "ntfscat"] {
+        if !ok(Command::new("sh").arg("-c").arg(format!("command -v {t}"))) {
+            eprintln!("{t} unavailable: skipped");
+            return None;
+        }
+    }
     let d = tmp(name);
     let img = d.join("vol.img");
     let f = std::fs::File::create(&img).unwrap();
