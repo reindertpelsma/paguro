@@ -801,6 +801,80 @@ virtio-serial channel `org.paguro.agent.0`; length-prefixed messages; the host
 never trusts a reported extent without claiming it first and verifying it
 against the on-disk MFT after a guest volume flush.
 
+## 13. Loader UI and theme — DRAFT
+
+### 13.1 Compiled in, extensible at build time
+
+The loader parses no display data at run time (DESIGN §4.2 "Theme — compiled
+in"): a display-parser bug would run under the identity PCR 4 attests, in the
+process about to receive the volume key. **Extensibility lives at build time
+instead.** A theme is a directory:
+
+```text
+themes/<name>/
+  theme.toml      colours, fonts and sizes, spacing, and per-screen layout:
+                  which element goes where (anchors, margins, alignment,
+                  max widths), which images appear, options such as
+                  show-logo / show-hints / bullet character
+  images/*.png    logo, background, icons (any size; scaled variants chosen
+                  per resolution)
+  fonts/*.ttf     rasterised at build time for the sizes the theme uses
+  strings/<lang>.toml   every user-visible string
+```
+
+`build.rs` (host `std`, free to use PNG, TOML and TTF crates) validates the
+theme and emits Rust statics: pre-decoded pixels, pre-rasterised glyph alpha
+maps, a layout table and the strings. **The loader binary contains no PNG,
+TOML or font parser.** Choosing a theme or language is a build option
+(`PAGURO_THEME`, `PAGURO_LANG`), which rides on the per-region builds DESIGN
+§4.2 already plans. A theme that fails validation fails the build.
+
+Changing the look means shipping a binary, so PCR 4 moves and machines re-seal
+through the repair hook — deliberately (DESIGN §4.2).
+
+### 13.2 Rendering
+
+- Pure `no_std` core: `(Screen, UiState, Theme, resolution) → draw list`
+  (rectangles, image blits, glyph runs), then a software rasteriser into any
+  `Canvas` (a byte buffer). The firmware adapter only blits the canvas to the
+  GOP framebuffer, or falls back to text output when there is no GOP.
+- Resolution-independent layout: a scale factor from the framebuffer height;
+  the whole UI is checked to fit from 800×600 to 3840×2160.
+- Accessibility variants (high contrast, large text) are alternate themes or
+  theme options chosen by a keypress at run time — both compiled in.
+
+### 13.3 Text entry
+
+Every text field (passphrase, PIN, recovery key, recovery path) supports:
+
+| Key | Effect |
+|---|---|
+| printable | insert at the cursor |
+| Backspace / Delete | delete before / after the cursor |
+| ← / → / Home / End | move the cursor |
+| **Insert** | toggle showing the secret in clear; off again on leaving the field |
+| Enter / Esc | submit / back (Esc always leads somewhere) |
+
+Secret fields show one bullet per character while hidden; the buffer lives in
+caller memory and is zeroised on every exit. The 48-digit recovery key is
+grouped in sixes as typed and accepts digits only.
+
+### 13.4 Recovery: telling the loader where Linux is
+
+Recovery never reads `paguro.ini` (DESIGN §4.1), so what it boots is chosen
+on screen:
+
+1. **volume** — a list of the NTFS volumes found on every disk (label, size,
+   disk), each unlocked with the usual rungs;
+2. **what to boot** — the entries found by convention in `\paguro\` on that
+   volume, or a path typed into a text field;
+3. if the choice is a **disk** (`efi_disk`), it is also the root;
+   if it is a **UEFI image on NTFS** (`efi_file`), the root hint is picked:
+   the only root candidate in `\paguro\` if there is exactly one, otherwise a
+   list, otherwise none — and the initrd then asks.
+
+The screen says the boot is unattested (DESIGN §4.1).
+
 ## 12. Testing contract
 
 Each interface ships with:
