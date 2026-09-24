@@ -29,6 +29,9 @@ use zeroize::Zeroize;
 
 use crate::platform::{Platform, PlatformError};
 
+/// Submissions of one command while the TPM answers "retry".
+const MAX_ATTEMPTS: u32 = 8;
+
 pub type Digest32 = [u8; 32];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,13 +231,33 @@ impl<'p, P: Platform> Tpm<'p, P> {
     }
 
     /// Send the command in `self.cmd[..n]`; returns the response length.
+    ///
+    /// A `TPM_RC_RETRY`/`YIELDED`/`TESTING` response means the command was not
+    /// executed and must be resubmitted unchanged (TPM 2.0 Part 1, §12.2.3):
+    /// the reference implementation answers the first DA-protected
+    /// authorisation after Startup with `TPM_RC_RETRY` while it records
+    /// `daUsed` in NV. The identical bytes are sent again, a bounded number of
+    /// times; the last response is returned either way.
     fn transact(&mut self, n: usize) -> Result<usize, TpmFail> {
         let cmd = self.cmd.get(..n).ok_or(TpmFail::Marshal)?;
-        let len = self.p.tpm_submit(cmd, &mut self.resp)?;
-        if len > self.resp.len() {
-            return Err(TpmFail::Protocol(TpmError::TooLarge));
+        let mut attempts = 0;
+        loop {
+            let len = self.p.tpm_submit(cmd, &mut self.resp)?;
+            if len > self.resp.len() {
+                return Err(TpmFail::Protocol(TpmError::TooLarge));
+            }
+            attempts += 1;
+            let code = self
+                .resp
+                .get(6..10)
+                .filter(|_| len >= 10)
+                .and_then(|b| b.try_into().ok())
+                .map(u32::from_be_bytes);
+            match code {
+                Some(rc) if attempts < MAX_ATTEMPTS && t::classify(rc) == t::RcClass::Retry => {}
+                _ => return Ok(len),
+            }
         }
-        Ok(len)
     }
 
     /// Build + send a command whose params are `self.params[..pn]`.

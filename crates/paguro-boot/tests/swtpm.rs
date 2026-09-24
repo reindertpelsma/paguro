@@ -21,6 +21,11 @@ struct Swtpm {
     dir: PathBuf,
     sock: UnixStream,
     rng: u64,
+    /// Answer the next command with this code `TPM_RC_RETRY` without sending
+    /// it, as a TPM does that must first commit DA state to NV.
+    retry_once: Option<u32>,
+    /// Command codes as submitted by the client, in order.
+    submitted: Vec<u32>,
 }
 
 impl Drop for Swtpm {
@@ -69,6 +74,8 @@ fn start() -> Option<Swtpm> {
                 dir,
                 sock: s,
                 rng: 0,
+                retry_once: None,
+                submitted: Vec::new(),
             });
         }
         if t0.elapsed() > Duration::from_secs(10) {
@@ -131,6 +138,14 @@ impl Platform for Swtpm {
         Ok(())
     }
     fn tpm_submit(&mut self, cmd: &[u8], resp: &mut [u8]) -> Result<usize, PlatformError> {
+        let code = u32::from_be_bytes(cmd[6..10].try_into().unwrap());
+        self.submitted.push(code);
+        if self.retry_once == Some(code) {
+            self.retry_once = None;
+            let r = [0x80, 0x01, 0, 0, 0, 10, 0, 0, 0x09, 0x22];
+            resp[..10].copy_from_slice(&r);
+            return Ok(10);
+        }
         let r = self.raw(cmd);
         resp.get_mut(..r.len())
             .ok_or(PlatformError::TooLarge)?
@@ -331,6 +346,33 @@ fn pin_bypass_policy_against_swtpm() {
     assert_eq!(e.class(), RcClass::PolicyFail, "{e:?}");
 }
 
+/// `TPM_RC_RETRY` means "not executed, send it again" (Part 1 §12.2.3); libtpms
+/// 0.9 answers the first DA-protected authorisation after Startup with it.
+/// Injected here so the resubmission is tested whatever the swtpm version.
+#[test]
+fn a_retry_response_is_resubmitted() {
+    let Some(mut t) = start() else { return };
+    let d = [0x5e; 32];
+    let obj = seal(&mut t, [0; 32], None, &[7; 32], &d);
+    t.retry_once = Some(cc::UNSEAL);
+    t.submitted.clear();
+    let mut out = [0u8; 32];
+    Tpm::new(&mut t)
+        .unseal(
+            obj.private(),
+            obj.public(),
+            seal::PCR_MASK_V1,
+            None,
+            &[7; 32],
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(out, d);
+    let unseals = t.submitted.iter().filter(|&&c| c == cc::UNSEAL).count();
+    // Two, or three where the swtpm itself answers the first one "retry".
+    assert!(unseals >= 2, "the refused Unseal was sent again");
+}
+
 #[test]
 fn every_transient_handle_is_flushed() {
     let Some(mut t) = start() else { return };
@@ -361,5 +403,4 @@ fn every_transient_handle_is_flushed() {
         0,
         "transient objects leaked"
     );
-    let _ = cc::UNSEAL;
 }
