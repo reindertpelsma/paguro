@@ -2,8 +2,8 @@
 //! contract of DESIGN.md §4.1, and every branch in it is a mock boot test.
 
 use paguro_core::bootstrap;
-use paguro_core::config::{self, Config, Expose, Image, MAX_IMAGES};
-use paguro_core::guid::{EFI_GLOBAL_VARIABLE, PAGURO_VENDOR, PCR12_EVENT_TAG};
+use paguro_core::config::{self, Config, Efi, Entry, MAX_ENTRIES};
+use paguro_core::guid::{EFI_GLOBAL_VARIABLE, Guid, PAGURO_VENDOR, PCR12_EVENT_TAG};
 use paguro_core::handoff::{self, Handoff, ImageId, Pcrs, Rung, state};
 use paguro_core::ini;
 use paguro_core::seal::{self, Kind, Seal, Sealed};
@@ -40,6 +40,7 @@ macro_rules! go {
 
 #[derive(Clone, Copy)]
 struct BootstrapData {
+    volume: Guid,
     salt: [u8; 16],
     wrapped: [u8; 32],
 }
@@ -189,23 +190,38 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         let ini_len = go!(self.stage1(ini, var));
         let ini_bytes: &[u8] = ini_len.and_then(|n| ini.get(..n)).unwrap_or(&[]);
 
-        // Seal files: bounded reads; presence of tpm_seal.bin picks the taint.
+        // 2 — parse; or recovery / first boot, which cap.
+        self.st.tpm = self.p.tpm_present();
+        let mut cfg = go!(self.stage2(ini_bytes));
+        let entry: Option<Entry<'_>> = cfg.as_ref().and_then(|c| c.default_entry()).copied();
+
+        // The chosen volume: the entry's, the bootstrap payload's on a first
+        // boot, or (recovery) whichever enumeration finds. Its seal files are
+        // read from its own directory; presence of tpm_seal.bin picks the taint.
+        let target = match self.st.mode {
+            Mode::Normal => entry.map(|e| e.volume),
+            Mode::FirstBoot => self.st.bootstrap.map(|b| b.volume),
+            Mode::Recovery(_) => None,
+        };
         let mut seal_len = [None; 4];
-        for ((kind, buf), len) in Kind::ALL
-            .iter()
-            .zip(seals.iter_mut())
-            .zip(seal_len.iter_mut())
-        {
-            *len = match self.p.read_esp_file(kind.file_name(), buf) {
-                Ok(n) => n,
-                Err(e) => {
-                    self.log(format_args!(
-                        "paguro: {} unreadable: {e:?}",
-                        kind.file_name()
-                    ));
-                    None
-                }
-            };
+        let mut seals_for = None;
+        if let Some(g) = target {
+            self.read_seals(&g, seals, &mut seal_len);
+            seals_for = Some(g);
+        }
+        if self.st.mode == Mode::Normal {
+            let tpm_seal_present = seal_len.first().copied().flatten().is_some();
+            go!(self.ratchet(ini_bytes, tpm_seal_present));
+        }
+
+        // 3 — B, S, recorded PCRs, the volume, the rungs.
+        self.load_secrets()?;
+        let (part, kind) = go!(self.select_volume(target, gpt, var));
+        if self.st.mode != Mode::Normal {
+            cfg = None;
+        }
+        if seals_for != Some(part.guid) {
+            self.read_seals(&part.guid, seals, &mut seal_len);
         }
         let tpm_seal_present = seal_len.first().copied().flatten().is_some();
         let seals: &[[u8; seal::MAX_FILE]; 4] = seals;
@@ -221,19 +237,12 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             };
             match seal::read(*kind, buf.get(..n).unwrap_or(&[])) {
                 Ok(s) => *out = Some(s),
-                Err(e) => self.log(format_args!("paguro: {} refused: {e:?}", kind.file_name())),
+                Err(e) => self.log(format_args!(
+                    "paguro: {}\\{} refused: {e:?}",
+                    part.guid,
+                    kind.file_name()
+                )),
             }
-        }
-
-        // 2 — parse, then the ratchet; or recovery / first boot, which cap.
-        self.st.tpm = self.p.tpm_present();
-        let mut cfg = go!(self.stage2(ini_bytes, tpm_seal_present));
-
-        // 3 — B, S, recorded PCRs, the volume, the rungs.
-        self.load_secrets()?;
-        let (part, kind) = go!(self.select_volume(cfg.as_ref(), gpt, var));
-        if self.st.mode != Mode::Normal {
-            cfg = None;
         }
         self.v.open(self.p, &part, kind)?;
         let rung = match kind {
@@ -259,8 +268,9 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
 
         // 4 — locate, degrade gates, provision, handoff, chain.
         *located = Located::new();
-        self.v.locate(self.p, cfg.as_ref(), located)?;
-        if located.image_count == 0 {
+        let entry = cfg.as_ref().and(entry);
+        self.v.locate(self.p, entry.as_ref(), located)?;
+        if !located.bootable() {
             self.p.prompt(&Screen::NoInstallation, &mut []);
             return Err(BootError::NoVolume);
         }
@@ -277,7 +287,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         }
 
         let mut prov = Provision::new();
-        let gen_len = if rung == Rung::Bootstrap {
+        let gen_len = if rung == Rung::Bootstrap && self.st.mode == Mode::FirstBoot {
             self.provision(&part, located, gen_ini, fvek_blob, created, &mut prov)
         } else {
             None
@@ -303,9 +313,17 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             "paguro: handoff published ({n} bytes, rung {rung:?})"
         ));
         handoff.zeroize();
-        self.p
-            .load_start_image(located.chain())
-            .map_err(BootError::Platform)?;
+        if located.efi_file.is_some() {
+            // An efi_file: LoadImage(SourceBuffer), never a jump.
+            let image = self.v.efi_image(self.p)?;
+            self.p
+                .load_start_image_buffer(image)
+                .map_err(BootError::Platform)?;
+        } else {
+            self.p
+                .load_start_image(located.chain())
+                .map_err(BootError::Platform)?;
+        }
         Ok(Step::Go(Outcome::Started(rung)))
     }
 
@@ -333,6 +351,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         match bootstrap::parse_optional_data(lo.optional_data) {
             Ok(bs) => {
                 self.st.bootstrap = Some(BootstrapData {
+                    volume: bs.volume,
                     salt: *bs.salt,
                     wrapped: *bs.wrapped_vmk,
                 });
@@ -413,11 +432,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
     // -----------------------------------------------------------------------
     // Stage 2: behind stage 1; small.
 
-    fn stage2<'i>(
-        &mut self,
-        ini: &'i [u8],
-        tpm_seal_present: bool,
-    ) -> Result<Step<Option<Config<'i>>>, BootError> {
+    fn stage2<'i>(&mut self, ini: &'i [u8]) -> Result<Step<Option<Config<'i>>>, BootError> {
         match self.st.mode {
             Mode::Recovery(reason) => {
                 self.enter_recovery(reason)?;
@@ -448,9 +463,16 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             }
         };
         self.log(format_args!(
-            "paguro: stage2 ok ({} images)",
-            cfg.image_count
+            "paguro: stage2 ok ({} entries, default {})",
+            cfg.entry_count,
+            cfg.default_entry().map_or("", |e| e.name)
         ));
+        Ok(Step::Go(Some(cfg)))
+    }
+
+    /// Normal mode: PCR 12 must be zero; then the load taint, or the sentinel
+    /// when the chosen volume has no `tpm_seal.bin`.
+    fn ratchet(&mut self, ini: &[u8], tpm_seal_present: bool) -> Result<Step<()>, BootError> {
         if self.st.tpm {
             if !self.pcr12_is_zero() {
                 self.log(format_args!(
@@ -462,7 +484,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
                 {
                     Input::Recover => {
                         self.enter_recovery(RecoveryReason::Pcr12NotZero)?;
-                        Ok(Step::Go(None))
+                        Ok(Step::Go(()))
                     }
                     _ => Ok(Step::Done(self.start_windows_no_var())),
                 };
@@ -477,7 +499,27 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
                 self.cap("no tpm_seal.bin")?;
             }
         }
-        Ok(Step::Go(Some(cfg)))
+        Ok(Step::Go(()))
+    }
+
+    /// Bounded reads of `volume`'s seal files; unreadable counts as absent.
+    fn read_seals(
+        &mut self,
+        volume: &Guid,
+        bufs: &mut [[u8; seal::MAX_FILE]; 4],
+        lens: &mut [Option<usize>; 4],
+    ) {
+        for ((kind, buf), len) in Kind::ALL.iter().zip(bufs.iter_mut()).zip(lens.iter_mut()) {
+            let mut path = [0u8; names::SEAL_PATH_MAX];
+            let path = names::seal_path(volume, *kind, &mut path);
+            *len = match self.p.read_esp_file(path, buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    self.log(format_args!("paguro: {path} unreadable: {e:?}"));
+                    None
+                }
+            };
+        }
     }
 
     fn pcr12_is_zero(&mut self) -> bool {
@@ -590,22 +632,25 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         Ok(())
     }
 
+    /// The chosen entry's volume (normal) or the bootstrap payload's (first
+    /// boot), on any disk; otherwise, or when it is missing and the user
+    /// recovers, whatever enumeration finds.
     fn select_volume(
         &mut self,
-        cfg: Option<&Config<'_>>,
+        target: Option<Guid>,
         gpt: &mut volume::GptScratch,
         var: &mut [u8],
     ) -> Result<Step<(Partition, VolumeKind)>, BootError> {
-        if let (Mode::Normal, Some(c)) = (self.st.mode, cfg) {
-            if let Some(part) = volume::find_partition(self.p, gpt, &c.volume)? {
+        if let (Mode::Normal | Mode::FirstBoot, Some(id)) = (self.st.mode, target) {
+            if let Some(part) = volume::find_partition(self.p, gpt, &id)? {
                 let kind = volume::probe(self.p, &part, &mut gpt.block)?;
-                self.log(format_args!("paguro: volume {} ({kind:?})", part.guid));
+                self.log(format_args!(
+                    "paguro: volume {} ({kind:?}) on disk {}",
+                    part.guid, part.disk
+                ));
                 return Ok(Step::Go((part, kind)));
             }
-            self.log(format_args!(
-                "paguro: configured volume {} not found",
-                c.volume
-            ));
+            self.log(format_args!("paguro: configured volume {id} not found"));
             match self
                 .p
                 .prompt(&Screen::Notice(Notice::VolumeMissing), &mut [])
@@ -614,8 +659,8 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
                 _ => return Ok(Step::Done(self.start_windows(var))),
             }
         }
-        // Recovery and first boot: always enumerate; the configuration cannot
-        // steer where to look.
+        // Recovery: always enumerate; the configuration cannot steer where to
+        // look.
         let mut cands = [None; volume::MAX_CANDIDATES];
         let n = volume::enumerate_candidates(self.p, gpt, &mut cands)?;
         self.log(format_args!("paguro: {n} candidate volume(s)"));
@@ -1037,21 +1082,28 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         created: &mut tpm::CreatedObject,
         prov: &mut Provision,
     ) -> Option<usize> {
-        let first = located.images.first()?;
-        let mut images = [Image::EMPTY; MAX_IMAGES];
-        let slot = images.first_mut()?;
-        *slot = Image {
-            name: first.name(),
-            path: located.default_path(),
-            format: located.default_format,
-            expose: Expose::Block,
-            chain: config::DEFAULT_CHAIN,
+        // The volume is the bootstrap payload's (select_volume found it by
+        // that GUID), so the authored entry names the volume the seals are for.
+        let mut entries = [Entry::EMPTY; MAX_ENTRIES];
+        let slot = entries.first_mut()?;
+        let root = located.root_path();
+        let efi = match (located.efi_file_path(), located.efi_disk_path()) {
+            (Some(f), _) => Efi::File(f),
+            (None, disk) => Efi::Disk {
+                disk: disk.unwrap_or(""),
+                path: config::DEFAULT_EFI,
+            },
+        };
+        *slot = Entry {
+            name: located.name(),
+            volume: part.guid,
+            root,
+            efi,
         };
         let cfg = Config {
-            volume: part.guid,
             default: 0,
-            images,
-            image_count: 1,
+            entries,
+            entry_count: 1,
             tpm: true,
             setup_tpm: true,
             passphrase: false,
@@ -1134,17 +1186,22 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         out: &mut [u8],
     ) -> Result<usize, BootError> {
         let per = u64::from(part.block_size / 512);
-        let mut images = [ImageId::EMPTY; handoff::MAX_IMAGES];
-        for (dst, src) in images
-            .iter_mut()
-            .zip(located.images.iter().take(located.image_count))
-        {
-            *dst = ImageId {
-                name: src.name(),
-                mft_record: src.mft_record,
-                mft_seq: src.mft_seq,
-            };
-        }
+        let name = located.name();
+        let id = |f: volume::FileId| ImageId {
+            name,
+            mft_record: f.mft_record,
+            mft_seq: f.mft_seq,
+        };
+        let root = located.root.map(id);
+        // Only the chosen entry's files, and the UEFI image's file only when
+        // it is not the root (INTERFACES.md §8).
+        let other = |f: &volume::FileId| root.is_none_or(|r| r.mft_record != f.mft_record);
+        let efi_file = located.efi_file.filter(other).map(id);
+        let efi_disk = located
+            .efi_disk
+            .filter(|_| root.is_some() && located.efi_file.is_none())
+            .filter(other)
+            .map(id);
         let mut pcrv = [0u8; 128];
         for (dst, src) in pcrv.chunks_exact_mut(32).zip(self.st.pcrs.iter()) {
             dst.copy_from_slice(src);
@@ -1179,8 +1236,9 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
                 values: &pcrv,
             },
             config: config_bytes,
-            images,
-            image_count: located.image_count,
+            root,
+            efi_disk,
+            efi_file,
             state: self.st.flags,
             rung,
             provision,

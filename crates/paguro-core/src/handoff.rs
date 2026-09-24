@@ -12,8 +12,14 @@
 //! at-most-once types, missing required types and unknown state flags are all
 //! refused; the decoder never returns a partial result.
 //!
-//! [`encode`] writes records in canonical order (by type, images in order), so
-//! `decode(encode(h)) == h` for every valid `h` (property-tested).
+//! [`encode`] writes records in canonical order (by type; `IMAGE` records by
+//! role), so `decode(encode(h)) == h` for every valid `h` (property-tested).
+//!
+//! `IMAGE` records name only the chosen boot entry's files, 0–2 of them: the
+//! `root` (role 1) when the entry has one, and the UEFI image's file when it
+//! is not the root — an `efi_disk` (role 2, only beside a root) or an
+//! `efi_file` (role 3), never both. They carry the entry's name, so they must
+//! agree on it, and no other file may be the root's MFT record.
 
 use crate::bytes::{Full, Reader, Writer};
 use crate::config::check_name;
@@ -24,7 +30,6 @@ pub const MAGIC: &[u8; 8] = b"PGRHOF\x00\x01";
 pub const HEADER_LEN: usize = 16;
 /// Hard cap on the whole blob: room for a maximal 64 KiB `paguro.ini` in `CONFIG` plus every other record.
 pub const MAX_LEN: usize = 96 * 1024;
-pub const MAX_IMAGES: usize = 16;
 pub const MAX_FVEK_KEY: usize = 64;
 /// PCRs are 0..=23.
 pub const PCR_COUNT: u32 = 24;
@@ -115,19 +120,35 @@ pub struct Pcrs<'a> {
     pub values: &'a [u8],
 }
 
+/// What an `IMAGE` record's file is to the chosen entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// The Linux root disk.
+    Root = 1,
+    /// The disk whose FAT32 holds the next UEFI image, when not the root.
+    EfiDisk = 2,
+    /// A UEFI image directly on the NTFS volume (`efi_file`).
+    EfiFile = 3,
+}
+
+impl Role {
+    pub const fn from_u8(v: u8) -> Option<Role> {
+        match v {
+            1 => Some(Role::Root),
+            2 => Some(Role::EfiDisk),
+            3 => Some(Role::EfiFile),
+            _ => None,
+        }
+    }
+}
+
+/// A file's identity (never its location): the boot entry's name and the
+/// file's MFT reference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImageId<'a> {
     pub name: &'a str,
     pub mft_record: u64,
     pub mft_seq: u16,
-}
-
-impl ImageId<'_> {
-    pub const EMPTY: ImageId<'static> = ImageId {
-        name: "",
-        mft_record: 0,
-        mft_seq: 0,
-    };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,18 +160,16 @@ pub struct Handoff<'a> {
     pub b: &'a [u8; 32],
     pub pcrs: Pcrs<'a>,
     pub config: Option<&'a [u8]>,
-    pub images: [ImageId<'a>; MAX_IMAGES],
-    pub image_count: usize,
+    /// The chosen entry's `root` (role 1); absent for an `efi_file`-only entry.
+    pub root: Option<ImageId<'a>>,
+    /// The chosen entry's `efi_disk` (role 2), only when it is not `root`.
+    pub efi_disk: Option<ImageId<'a>>,
+    /// The chosen entry's `efi_file` (role 3).
+    pub efi_file: Option<ImageId<'a>>,
     pub state: u32,
     pub rung: Rung,
     /// A new `tpm` seal body (INTERFACES.md §4) on a provisioning boot.
     pub provision: Option<Seal<'a>>,
-}
-
-impl<'a> Handoff<'a> {
-    pub fn images(&self) -> &[ImageId<'a>] {
-        self.images.get(..self.image_count).unwrap_or(&[])
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,10 +187,12 @@ pub enum HandoffError {
     Missing(u16),
     /// A value's length does not match what its type requires.
     BadLength(u16),
-    /// A value is out of range (bad image name, PCR mask, rung, key length…).
+    /// A value is out of range (bad image name or role, PCR mask, rung, key
+    /// length, an efi disk that disagrees with the root…).
     BadValue(u16),
     UnknownStateFlags,
-    TooManyImages,
+    /// A second `IMAGE` record with a role already seen.
+    DuplicateRole(Role),
     Provision(SealError),
 }
 
@@ -212,8 +233,9 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
     let mut b = None;
     let mut pcrs = None;
     let mut config = None;
-    let mut images = [ImageId::EMPTY; MAX_IMAGES];
-    let mut image_count = 0usize;
+    let mut root: Option<ImageId<'_>> = None;
+    let mut efi_disk: Option<ImageId<'_>> = None;
+    let mut efi_file: Option<ImageId<'_>> = None;
     let mut st = None;
     let mut rung = None;
     let mut provision = None;
@@ -298,24 +320,30 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
             }
             rtype::CONFIG => config = Some(value),
             rtype::IMAGE => {
+                let role = v.u8().map_err(|_| bad_len)?;
                 let nl = usize::from(v.u8().map_err(|_| bad_len)?);
-                if len != 1 + nl + 10 {
+                if len != 2 + nl + 10 {
                     return Err(bad_len);
                 }
+                let role = Role::from_u8(role).ok_or(HandoffError::BadValue(t))?;
                 let name = core::str::from_utf8(v.take(nl).map_err(short)?)
                     .map_err(|_| HandoffError::BadValue(t))?;
                 if !check_name(name) {
                     return Err(HandoffError::BadValue(t));
                 }
-                let slot = images
-                    .get_mut(image_count)
-                    .ok_or(HandoffError::TooManyImages)?;
-                *slot = ImageId {
+                let slot = match role {
+                    Role::Root => &mut root,
+                    Role::EfiDisk => &mut efi_disk,
+                    Role::EfiFile => &mut efi_file,
+                };
+                if slot.is_some() {
+                    return Err(HandoffError::DuplicateRole(role));
+                }
+                *slot = Some(ImageId {
                     name,
                     mft_record: v.u64_le().map_err(short)?,
                     mft_seq: v.u16_le().map_err(short)?,
-                };
-                image_count += 1;
+                });
             }
             rtype::STATE => {
                 fixed(4)?;
@@ -340,8 +368,8 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
     if n != count {
         return Err(HandoffError::CountMismatch);
     }
-    if image_count == 0 {
-        return Err(HandoffError::Missing(rtype::IMAGE));
+    if !images_consistent(root.as_ref(), efi_disk.as_ref(), efi_file.as_ref()) {
+        return Err(HandoffError::BadValue(rtype::IMAGE));
     }
     Ok(Handoff {
         volume: volume.ok_or(HandoffError::Missing(rtype::VOLUME))?,
@@ -351,8 +379,9 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
         b: b.ok_or(HandoffError::Missing(rtype::B))?,
         pcrs: pcrs.ok_or(HandoffError::Missing(rtype::PCRS))?,
         config,
-        images,
-        image_count,
+        root,
+        efi_disk,
+        efi_file,
         state: st.ok_or(HandoffError::Missing(rtype::STATE))?,
         rung: rung.ok_or(HandoffError::Missing(rtype::RUNG))?,
         provision,
@@ -364,7 +393,8 @@ pub enum EncodeError {
     /// Output buffer (or [`MAX_LEN`]) exceeded — e.g. a `CONFIG` too large to
     /// travel beside the other records.
     Full,
-    /// The handoff would not decode (bad name, mask, key length, no images…).
+    /// The handoff would not decode (bad name, mask, key length, an efi disk
+    /// that is the root…).
     Invalid,
 }
 
@@ -389,12 +419,30 @@ fn record(
     Ok(())
 }
 
+/// One entry's files: an efi disk only beside a root and never with an efi
+/// file, one name throughout, and nothing else is the root's file.
+fn images_consistent(
+    root: Option<&ImageId<'_>>,
+    efi_disk: Option<&ImageId<'_>>,
+    efi_file: Option<&ImageId<'_>>,
+) -> bool {
+    if efi_disk.is_some() && (root.is_none() || efi_file.is_some()) {
+        return false;
+    }
+    let Some(efi) = efi_disk.or(efi_file) else {
+        return true;
+    };
+    root.is_none_or(|r| efi.name == r.name && efi.mft_record != r.mft_record)
+}
+
 /// Encode canonically into `out`; returns the blob length.
 pub fn encode(h: &Handoff<'_>, out: &mut [u8]) -> Result<usize, EncodeError> {
-    if h.image_count == 0 || h.image_count > MAX_IMAGES {
-        return Err(EncodeError::Invalid);
-    }
-    if h.images().iter().any(|i| !check_name(i.name)) {
+    if [h.root, h.efi_disk, h.efi_file]
+        .iter()
+        .flatten()
+        .any(|i| !check_name(i.name))
+        || !images_consistent(h.root.as_ref(), h.efi_disk.as_ref(), h.efi_file.as_ref())
+    {
         return Err(EncodeError::Invalid);
     }
     if pcr_value_len(h.pcrs.mask) != Some(h.pcrs.values.len()) {
@@ -461,8 +509,14 @@ pub fn encode(h: &Handoff<'_>, out: &mut [u8]) -> Result<usize, EncodeError> {
         record(&mut w, rtype::CONFIG, |w| w.put(c))?;
         count += 1;
     }
-    for img in h.images() {
+    for (role, img) in [
+        (Role::Root, h.root.as_ref()),
+        (Role::EfiDisk, h.efi_disk.as_ref()),
+        (Role::EfiFile, h.efi_file.as_ref()),
+    ] {
+        let Some(img) = img else { continue };
         record(&mut w, rtype::IMAGE, |w| {
+            w.u8(role as u8)?;
             w.u8(u8::try_from(img.name.len()).map_err(|_| Full)?)?;
             w.put(img.name.as_bytes())?;
             w.u64_le(img.mft_record)?;
@@ -491,17 +545,6 @@ mod tests {
     static PCRV: [u8; 128] = [0x11; 128];
 
     pub(crate) fn sample() -> Handoff<'static> {
-        let mut images = [ImageId::EMPTY; MAX_IMAGES];
-        images[0] = ImageId {
-            name: "debian",
-            mft_record: 1234,
-            mft_seq: 7,
-        };
-        images[1] = ImageId {
-            name: "arch",
-            mft_record: 99,
-            mft_seq: 1,
-        };
         Handoff {
             volume: Volume {
                 partition: Guid([3; 16]),
@@ -526,8 +569,17 @@ mod tests {
                 values: &PCRV,
             },
             config: Some(b"[Paguro]\n"),
-            images,
-            image_count: 2,
+            root: Some(ImageId {
+                name: "debian",
+                mft_record: 1234,
+                mft_seq: 7,
+            }),
+            efi_disk: Some(ImageId {
+                name: "debian",
+                mft_record: 99,
+                mft_seq: 1,
+            }),
+            efi_file: None,
             state: state::HIBERNATED | state::DIRTY,
             rung: Rung::Tpm,
             provision: Some(Seal {
@@ -572,12 +624,68 @@ mod tests {
         m.fve_layout = None;
         m.config = None;
         m.provision = None;
-        m.image_count = 1;
-        m.images[1] = ImageId::EMPTY;
+        m.efi_disk = None;
         m.rung = Rung::Unencrypted;
         let (b, n) = enc(&m);
         assert_eq!(decode(&b[..n]), Ok(m));
-        assert_eq!(decode(&b[..n]).unwrap().images().len(), 1);
+        assert_eq!(decode(&b[..n]).unwrap().efi_disk, None);
+        // An efi_file entry with and without a root, and no image at all.
+        let file = Some(ImageId {
+            name: "debian",
+            mft_record: 55,
+            mft_seq: 2,
+        });
+        for root in [sample().root, None] {
+            let mut f = m;
+            f.root = root;
+            f.efi_file = file;
+            let (b, n) = enc(&f);
+            assert_eq!(decode(&b[..n]), Ok(f));
+        }
+        let mut z = m;
+        z.root = None;
+        let (b, n) = enc(&z);
+        assert_eq!(decode(&b[..n]), Ok(z), "0 IMAGE records");
+    }
+
+    #[test]
+    fn image_records_carry_their_role() {
+        let (b, n) = enc(&sample());
+        // Root first, then the efi disk: role byte, then the name.
+        let at = find(&b[..n], rtype::IMAGE, 0);
+        assert_eq!(&b[at + 6..at + 8], &[Role::Root as u8, 6]);
+        let at2 = find(&b[..n], rtype::IMAGE, 1);
+        assert_eq!(&b[at2 + 6..at2 + 8], &[Role::EfiDisk as u8, 6]);
+        // Records may arrive in either order.
+        let mut sw = b;
+        let (r1, r2) = (at..at2, at2..at2 + (at2 - at));
+        let first = b[r1.clone()].to_vec();
+        sw[r1.start..r1.start + first.len()].copy_from_slice(&b[r2.clone()]);
+        sw[r2.start..r2.end].copy_from_slice(&first);
+        assert_eq!(decode(&sw[..n]), Ok(sample()));
+        for v in 0..=255u8 {
+            match Role::from_u8(v) {
+                Some(r) => assert_eq!(r as u8, v),
+                None => assert!(v == 0 || v > 3),
+            }
+        }
+    }
+
+    /// Offset of the `nth` record of type `t`.
+    fn find(b: &[u8], t: u16, nth: usize) -> usize {
+        let mut at = HEADER_LEN;
+        let mut k = 0;
+        while at < b.len() {
+            let len = u32::from_le_bytes([b[at + 2], b[at + 3], b[at + 4], b[at + 5]]) as usize;
+            if u16::from_le_bytes([b[at], b[at + 1]]) == t {
+                if k == nth {
+                    return at;
+                }
+                k += 1;
+            }
+            at += 6 + len;
+        }
+        panic!("no record {t} #{nth}");
     }
 
     #[test]
@@ -619,7 +727,9 @@ mod tests {
 
     #[test]
     fn record_errors() {
-        let img = [8u8, 0, 12, 0, 0, 0, 1, b'a', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let img = [
+            8u8, 0, 13, 0, 0, 0, 1, 1, b'a', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         let with = |extra: &[u8], count: u16| {
             let mut rec = [0u8; 512];
             rec[..extra.len()].copy_from_slice(extra);
@@ -690,29 +800,77 @@ mod tests {
             with(&[3, 0, 1, 0, 0, 0, 4], 2),
             Err(HandoffError::BadLength(3))
         );
+        let image = |role: u8, name: &[u8], rec: u8| {
+            let mut r = [0u8; 64];
+            let len = 2 + name.len() + 10;
+            r[..6].copy_from_slice(&[8, 0, len as u8, 0, 0, 0]);
+            r[6] = role;
+            r[7] = name.len() as u8;
+            r[8..8 + name.len()].copy_from_slice(name);
+            r[8 + name.len()] = rec;
+            (r, 6 + len)
+        };
+        let (r, l) = image(1, b".", 0);
+        assert_eq!(with(&r[..l], 2), Err(HandoffError::BadValue(8)));
+        let (r, l) = image(2, &[0xff], 0);
+        assert_eq!(with(&r[..l], 2), Err(HandoffError::BadValue(8)));
+        for role in [0u8, 4, 0xff] {
+            let (r, l) = image(role, b"a", 5);
+            assert_eq!(with(&r[..l], 2), Err(HandoffError::BadValue(8)), "{role}");
+        }
+        // A second root, a second efi disk.
+        assert_eq!(with(&img, 2), Err(HandoffError::DuplicateRole(Role::Root)));
+        let (r, l) = image(2, b"a", 5);
+        let mut two = [0u8; 128];
+        two[..l].copy_from_slice(&r[..l]);
+        two[l..2 * l].copy_from_slice(&r[..l]);
         assert_eq!(
-            with(
-                &[8, 0, 12, 0, 0, 0, 1, b'.', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                2
-            ),
-            Err(HandoffError::BadValue(8))
+            with(&two[..2 * l], 3),
+            Err(HandoffError::DuplicateRole(Role::EfiDisk))
         );
+        // An efi disk of another entry, or the root file itself.
+        let (r, l) = image(2, b"b", 5);
+        assert_eq!(with(&r[..l], 2), Err(HandoffError::BadValue(8)));
+        let (r, l) = image(2, b"a", 0);
+        assert_eq!(with(&r[..l], 2), Err(HandoffError::BadValue(8)));
+        // An efi disk without a root; an efi disk and an efi file together.
+        let (r, l) = image(2, b"a", 5);
+        let (b, n) = frame(&r[..l], 1);
+        assert_eq!(decode(&b[..n]), Err(HandoffError::BadValue(8)));
+        let (f, fl) = image(3, b"a", 6);
+        let mut both = [0u8; 128];
+        both[..l].copy_from_slice(&r[..l]);
+        both[l..l + fl].copy_from_slice(&f[..fl]);
+        assert_eq!(with(&both[..l + fl], 3), Err(HandoffError::BadValue(8)));
+        // An efi file of another entry, or the root file itself; two of them.
+        let (f, fl) = image(3, b"b", 6);
+        assert_eq!(with(&f[..fl], 2), Err(HandoffError::BadValue(8)));
+        let (f, fl) = image(3, b"a", 0);
+        assert_eq!(with(&f[..fl], 2), Err(HandoffError::BadValue(8)));
+        let (f, fl) = image(3, b"a", 6);
+        let mut two = [0u8; 128];
+        two[..fl].copy_from_slice(&f[..fl]);
+        two[fl..2 * fl].copy_from_slice(&f[..fl]);
         assert_eq!(
-            with(
-                &[8, 0, 12, 0, 0, 0, 1, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                2
-            ),
-            Err(HandoffError::BadValue(8))
+            with(&two[..2 * fl], 3),
+            Err(HandoffError::DuplicateRole(Role::EfiFile))
         );
+        // An efi file alone decodes (up to the other required records).
+        let (b, n) = frame(&f[..fl], 1);
+        assert_eq!(decode(&b[..n]), Err(HandoffError::Missing(rtype::VOLUME)));
+        // Lengths: name overruns, name short, empty value, role only.
+        let mut x = img;
+        x[7] = 2;
+        assert_eq!(with(&x, 2), Err(HandoffError::BadLength(8)));
+        let mut x = img;
+        x[7] = 0;
+        assert_eq!(with(&x, 2), Err(HandoffError::BadLength(8)));
         assert_eq!(
-            with(
-                &[8, 0, 12, 0, 0, 0, 2, b'a', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                2
-            ),
+            with(&[8, 0, 0, 0, 0, 0], 2),
             Err(HandoffError::BadLength(8))
         );
         assert_eq!(
-            with(&[8, 0, 0, 0, 0, 0], 2),
+            with(&[8, 0, 1, 0, 0, 0, 1], 2),
             Err(HandoffError::BadLength(8))
         );
         for t in [1u8, 2, 4, 5] {
@@ -727,15 +885,8 @@ mod tests {
         );
         assert_eq!(with(&[1, 0, 40, 0, 0, 0], 2), Err(HandoffError::Truncated));
 
-        let mut many = [0u8; 17 * 18];
-        for i in 0..17 {
-            many[i * 18..i * 18 + 18].copy_from_slice(&img);
-        }
-        let (b, n) = frame(&many, 17);
-        assert_eq!(decode(&b[..n]), Err(HandoffError::TooManyImages));
-
         let (b, n) = frame(&[9, 0, 4, 0, 0, 0, 0, 0, 0, 0], 1);
-        assert_eq!(decode(&b[..n]), Err(HandoffError::Missing(rtype::IMAGE)));
+        assert_eq!(decode(&b[..n]), Err(HandoffError::Missing(rtype::VOLUME)));
         let (b, n) = frame(&img, 1);
         assert_eq!(decode(&b[..n]), Err(HandoffError::Missing(rtype::VOLUME)));
     }
@@ -769,11 +920,46 @@ mod tests {
     #[test]
     fn encode_refuses_invalid() {
         let mut buf = [0u8; 1024];
+        let root = sample().root.unwrap();
         let mut h = sample();
-        h.image_count = 0;
+        h.root = Some(ImageId {
+            name: "a b",
+            ..root
+        });
         assert_eq!(encode(&h, &mut buf), Err(EncodeError::Invalid));
         let mut h = sample();
-        h.images[0].name = "a b";
+        h.root = Some(ImageId {
+            name: "arch",
+            ..root
+        });
+        assert_eq!(encode(&h, &mut buf), Err(EncodeError::Invalid));
+        let mut h = sample();
+        h.efi_disk = Some(root);
+        assert_eq!(encode(&h, &mut buf), Err(EncodeError::Invalid));
+        let mut h = sample();
+        h.root = None;
+        assert_eq!(
+            encode(&h, &mut buf),
+            Err(EncodeError::Invalid),
+            "efi disk without root"
+        );
+        let mut h = sample();
+        h.efi_file = Some(ImageId {
+            mft_record: 5,
+            ..root
+        });
+        assert_eq!(
+            encode(&h, &mut buf),
+            Err(EncodeError::Invalid),
+            "efi disk and efi file"
+        );
+        let mut h = sample();
+        h.efi_disk = None;
+        h.efi_file = Some(ImageId {
+            name: "x-y",
+            mft_record: 5,
+            ..root
+        });
         assert_eq!(encode(&h, &mut buf), Err(EncodeError::Invalid));
         let mut h = sample();
         h.pcrs.mask = 0x1;

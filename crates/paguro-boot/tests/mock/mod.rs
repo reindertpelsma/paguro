@@ -6,10 +6,10 @@
 pub mod tpm;
 
 use paguro_boot::platform::{DiskInfo, Input, Platform, PlatformError, Screen, attrs};
-use paguro_boot::volume::{Key, Located, LocatedImage, Partition, Volume, VolumeKind};
+use paguro_boot::volume::{FileId, Key, Located, Partition, Volume, VolumeKind};
 use paguro_boot::{BootError, Buffers, Outcome, Params};
 use paguro_core::bootstrap;
-use paguro_core::config::{Config, Format};
+use paguro_core::config::{Efi, Entry};
 use paguro_core::gpt;
 use paguro_core::guid::{EFI_GLOBAL_VARIABLE, GPT_BASIC_DATA, Guid, PAGURO_VENDOR};
 use paguro_core::handoff::{self, FveLayout};
@@ -33,6 +33,8 @@ pub enum Event {
     Extend(u32, [u8; 32], Vec<u8>),
     Publish,
     Start(Vec<u8>),
+    /// `LoadImage(SourceBuffer)` + `StartImage` of these bytes.
+    StartBuffer(Vec<u8>),
     Reset,
 }
 
@@ -297,24 +299,58 @@ impl Platform for Mock {
         Ok(())
     }
 
+    fn load_start_image_buffer(&mut self, image: &[u8]) -> Result<(), PlatformError> {
+        self.events.push(Event::StartBuffer(image.to_vec()));
+        if self.start_fails {
+            return Err(PlatformError::Device(26));
+        }
+        Ok(())
+    }
+
     fn reset(&mut self) {
         self.events.push(Event::Reset);
     }
 }
 
-/// A fake BitLocker volume: knows its VMK, FVEK blob, protectors and images.
+/// What stage 4 was asked to find.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SawEntry {
+    pub name: String,
+    pub volume: Guid,
+    pub root: Option<String>,
+    /// `Disk { disk, path }` or `File(path)`, as text.
+    pub efi: String,
+}
+
+/// A fake BitLocker volume: knows its VMK, FVEK blob, protectors and the
+/// disks of one installation.
 pub struct FakeVolume {
     pub vmk: Key,
     pub blob: Vec<u8>,
     pub clear_key: Option<Key>,
     pub recovery: Option<([u8; 16], Key)>,
-    pub images: Vec<(&'static str, u64, u16)>,
+    /// The installation found without a configuration (recovery, first boot).
+    pub name: &'static str,
+    /// The root disk's MFT reference; `None`: nothing installed.
+    pub root: Option<(u64, u16)>,
+    /// The MFT reference any separate efi disk resolves to.
+    pub efi_disk: (u64, u16),
     pub flags: u32,
-    pub default_path: &'static str,
+    pub root_path: &'static str,
+    /// Found without a configuration: a separate efi disk.
+    pub efi_disk_path: Option<&'static str>,
+    /// Found without a configuration: an efi file (and no root).
+    pub efi_file_path: Option<&'static str>,
+    /// The MFT reference an efi file resolves to, and its bytes.
+    pub efi_file: (u64, u16),
+    pub efi_image: Vec<u8>,
+    /// Behave like the production stage-4 stub after recording the entry.
+    pub stub_stage4: bool,
     pub opened: Option<(Partition, VolumeKind)>,
     pub unlocked: bool,
     pub tries: usize,
     pub locate_saw_config: Option<bool>,
+    pub saw_entry: Option<SawEntry>,
 }
 
 pub const FVEK: [u8; 32] = [0xfe; 32];
@@ -326,13 +362,21 @@ impl FakeVolume {
             blob: b"encrypted-fvek-blob".to_vec(),
             clear_key: None,
             recovery: None,
-            images: vec![("debian", 1234, 7)],
+            name: "debian",
+            root: Some((1234, 7)),
+            efi_disk: (4321, 3),
             flags: 0,
-            default_path: "\\paguro\\debian.vhd",
+            root_path: "\\paguro\\debian.vhd",
+            efi_disk_path: None,
+            efi_file_path: None,
+            efi_file: (777, 1),
+            efi_image: b"MZ-fake-uki".to_vec(),
+            stub_stage4: false,
             opened: None,
             unlocked: false,
             tries: 0,
             locate_saw_config: None,
+            saw_entry: None,
         }
     }
 }
@@ -372,29 +416,66 @@ impl<P: Platform> Volume<P> for FakeVolume {
     fn locate(
         &mut self,
         _: &mut P,
-        cfg: Option<&Config<'_>>,
+        entry: Option<&Entry<'_>>,
         out: &mut Located,
     ) -> Result<(), BootError> {
-        self.locate_saw_config = Some(cfg.is_some());
-        for (i, (name, rec, seq)) in self.images.iter().enumerate() {
-            let mut n = [0u8; 32];
-            n[..name.len()].copy_from_slice(name.as_bytes());
-            out.images[i] = LocatedImage {
-                name: n,
-                name_len: name.len() as u8,
-                mft_record: *rec,
-                mft_seq: *seq,
-            };
+        self.locate_saw_config = Some(entry.is_some());
+        self.saw_entry = entry.map(|e| SawEntry {
+            name: e.name.into(),
+            volume: e.volume,
+            root: e.root.map(Into::into),
+            efi: format!("{:?}", e.efi),
+        });
+        if self.stub_stage4 {
+            return Err(BootError::NotImplemented("stage 4: NTFS + image"));
         }
-        out.image_count = self.images.len();
+        // (name, root, separate efi disk, efi file)
+        let (name, root_path, disk_path, file_path) = match entry {
+            Some(e) => (
+                e.name,
+                e.root,
+                e.efi_disk().filter(|d| Some(*d) != e.root),
+                match e.efi {
+                    Efi::File(f) => Some(f),
+                    Efi::Disk { .. } => None,
+                },
+            ),
+            None => (
+                self.name,
+                (self.efi_file_path.is_none()).then_some(self.root_path),
+                self.efi_disk_path,
+                self.efi_file_path,
+            ),
+        };
+        out.name[..name.len()].copy_from_slice(name.as_bytes());
+        out.name_len = name.len() as u8;
+        let id = |(mft_record, mft_seq)| FileId {
+            mft_record,
+            mft_seq,
+        };
+        out.root = root_path.and(self.root).map(id);
+        out.efi_disk = disk_path.map(|_| id(self.efi_disk));
+        out.efi_file = file_path.map(|_| id(self.efi_file));
         out.flags = self.flags;
         let chain = b"chain-device-path";
         out.chain[..chain.len()].copy_from_slice(chain);
         out.chain_len = chain.len();
-        out.default_path[..self.default_path.len()].copy_from_slice(self.default_path.as_bytes());
-        out.default_path_len = self.default_path.len();
-        out.default_format = Format::Vhd;
+        if let Some(p) = root_path {
+            out.root_path[..p.len()].copy_from_slice(p.as_bytes());
+            out.root_path_len = p.len();
+        }
+        if let Some(p) = disk_path {
+            out.efi_disk_path[..p.len()].copy_from_slice(p.as_bytes());
+            out.efi_disk_path_len = p.len();
+        }
+        if let Some(p) = file_path {
+            out.efi_file_path[..p.len()].copy_from_slice(p.as_bytes());
+            out.efi_file_path_len = p.len();
+        }
         Ok(())
+    }
+    fn efi_image(&mut self, _: &mut P) -> Result<&[u8], BootError> {
+        Ok(&self.efi_image)
     }
 }
 
@@ -446,10 +527,15 @@ pub const PIN: &str = "correct horse";
 
 pub fn ini_text(volume: &Guid, passphrase: bool) -> Vec<u8> {
     format!(
-        "# paguro configuration. Not hand-editable: use `paguro config`.\n[Paguro]\nversion = 1\ndefault = debian\nvolume = {volume}\n\n[Image.debian]\npath = \\paguro\\debian.vhd\nformat = vhd\n\n[Passphrase]\nenabled = {}\n",
+        "# paguro configuration. Not hand-editable: use `paguro config`.\n[Paguro]\nversion = 1\ndefault = debian\n\n[Boot.debian]\nvolume = {volume}\nroot = \\paguro\\debian.vhd\n\n[Passphrase]\nenabled = {}\n",
         u8::from(passphrase)
     )
     .into_bytes()
+}
+
+/// The ESP path (under `\EFI\paguro\`) of `volume`'s `kind` seal.
+pub fn seal_file(volume: &Guid, kind: Kind) -> String {
+    format!("{volume}\\{}", kind.file_name())
 }
 
 pub fn pass_hash(pw: &str, salt: &[u8; 16]) -> Key {
@@ -595,7 +681,7 @@ impl World {
             &TPM_SALT,
             Some((&public, &private)),
         );
-        self.m.files.insert(Kind::Tpm.file_name().into(), f);
+        self.m.files.insert(seal_file(&VOLUME, Kind::Tpm), f);
         self
     }
 
@@ -603,7 +689,7 @@ impl World {
         let ph = pass_hash(pw, &PASS_SALT);
         let wrapped = wrap(&kdf::env_passphrase(), &PASS_SALT, &self.v.blob, &ph, &VMK);
         let f = write_seal(Kind::Passphrase, None, &wrapped, &PASS_SALT, None);
-        self.m.files.insert(Kind::Passphrase.file_name().into(), f);
+        self.m.files.insert(seal_file(&VOLUME, Kind::Passphrase), f);
         self
     }
 
@@ -612,7 +698,7 @@ impl World {
         let env = kdf::env_setup(&S, &sha256(&[&self.ini]));
         let wrapped = wrap(&env, &SETUP_SALT, &self.v.blob, &ph, &VMK);
         let f = write_seal(Kind::SetupTpm, None, &wrapped, &SETUP_SALT, None);
-        self.m.files.insert(Kind::SetupTpm.file_name().into(), f);
+        self.m.files.insert(seal_file(&VOLUME, Kind::SetupTpm), f);
         self.m
             .put_var("PaguroSetup", PAGURO_VENDOR, attrs::NV_BS_RT, &S);
         self
@@ -631,7 +717,7 @@ impl World {
             &BYPASS_SALT,
             Some((&public, &private)),
         );
-        self.m.files.insert(Kind::PinBypass.file_name().into(), f);
+        self.m.files.insert(seal_file(&VOLUME, Kind::PinBypass), f);
         self
     }
 

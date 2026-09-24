@@ -7,8 +7,8 @@
 //! 1  read paguro.ini (64 KiB cap), SHA-256, compare  -- Secure Boot only
 //! 2  parse; PCR 12 must be zero; LOAD TAINT          -- or the sentinel
 //!    (recovery: cap PCR 12 first, never parse)
-//! 3  B, seals, volume, rungs in escalation order; BOOT TAINT
-//! 4  locate the image (Volume::locate), handoff, LoadImage
+//! 3  B, the entry's volume and its seals, rungs in escalation order; BOOT TAINT
+//! 4  locate the entry's disks (Volume::locate), handoff, LoadImage
 //! ```
 //!
 //! No allocation: every buffer is in [`Buffers`], which the caller places
@@ -32,7 +32,29 @@ pub use volume::{Unimplemented, Volume};
 
 /// Names on the ESP (INTERFACES.md §2) and in firmware (§5).
 pub mod names {
+    use paguro_core::guid::Guid;
+    use paguro_core::seal::Kind;
+
     pub const INI: &str = "paguro.ini";
+    /// Longest seal path under `\EFI\paguro\`: `<guid>\tpm_pin_bypass_seal.bin`.
+    pub const SEAL_PATH_MAX: usize = 64;
+
+    /// `<volume-guid>\<seal file>` (lower-case canonical GUID), relative to
+    /// `\EFI\paguro\`: each volume's seals live in its own directory.
+    pub fn seal_path<'a>(volume: &Guid, kind: Kind, out: &'a mut [u8; SEAL_PATH_MAX]) -> &'a str {
+        let g = volume.to_text();
+        let f = kind.file_name().as_bytes();
+        let n = g.len() + 1 + f.len();
+        if let Some(dst) = out.get_mut(..n) {
+            let (a, rest) = dst.split_at_mut(g.len());
+            a.copy_from_slice(&g);
+            if let Some((sep, b)) = rest.split_first_mut() {
+                *sep = b'\\';
+                b.copy_from_slice(f);
+            }
+        }
+        core::str::from_utf8(out.get(..n).unwrap_or(&[])).unwrap_or("")
+    }
     pub const VAR_B: &str = "PaguroB";
     pub const VAR_CONFIG_HASH: &str = "PaguroConfigHash";
     pub const VAR_SETUP: &str = "PaguroSetup";
@@ -159,5 +181,27 @@ impl Buffers {
 impl Default for Buffers {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names;
+    use paguro_core::guid::Guid;
+    use paguro_core::seal::Kind;
+
+    #[test]
+    fn seal_paths_are_per_volume_lower_case() {
+        let g = Guid::parse("6C0A1B2C-3D4E-5F60-7182-93A4B5C6D7E8").unwrap();
+        let mut b = [0u8; names::SEAL_PATH_MAX];
+        assert_eq!(
+            names::seal_path(&g, Kind::Tpm, &mut b),
+            "6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8\\tpm_seal.bin"
+        );
+        for k in Kind::ALL {
+            let mut b = [0u8; names::SEAL_PATH_MAX];
+            let p = names::seal_path(&g, k, &mut b);
+            assert!(p.ends_with(k.file_name()) && p.len() <= names::SEAL_PATH_MAX);
+        }
     }
 }

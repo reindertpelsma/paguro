@@ -4,7 +4,8 @@
 #![allow(clippy::indexing_slicing)]
 
 use paguro_core::bootstrap;
-use paguro_core::config::{self, Config, Expose, Format, Image, MAX_IMAGES};
+use paguro_core::config::{self, Config, Efi, Entry, MAX_ENTRIES};
+use paguro_core::disk;
 use paguro_core::gpt;
 use paguro_core::guid::Guid;
 use paguro_core::handoff::{self, FveLayout, Fvek, Handoff, ImageId, Pcrs, Rung, Volume};
@@ -46,33 +47,38 @@ proptest! {
 
     #[test]
     fn config_roundtrip(
-        imgs in proptest::collection::vec((name(), path(), path(), any::<bool>(), any::<bool>()), 1..=16),
-        guid in any::<[u8; 16]>(),
+        ents in proptest::collection::vec(
+            (name(), any::<[u8; 16]>(), path(), proptest::option::of(path()), path(), 0u8..3),
+            1..=16,
+        ),
         flags in any::<[bool; 3]>(),
         def in any::<prop::sample::Index>(),
     ) {
         let mut seen: Vec<&String> = Vec::new();
-        let mut images = [Image::EMPTY; MAX_IMAGES];
+        let mut entries = [Entry::EMPTY; MAX_ENTRIES];
         let mut n = 0;
-        for (nm, p, ch, raw, file) in &imgs {
+        for (nm, vol, root, efi_disk, efi, kind) in &ents {
             if seen.contains(&nm) {
                 continue;
             }
             seen.push(nm);
-            images[n] = Image {
+            // 0: root + disk, 1: efi_file only, 2: root + efi_file.
+            entries[n] = Entry {
                 name: nm,
-                path: p,
-                chain: ch,
-                format: if *raw { Format::Raw } else { Format::Vhd },
-                expose: if *file { Expose::File } else { Expose::Block },
+                volume: Guid(*vol),
+                root: (*kind != 1).then_some(root.as_str()),
+                efi: if *kind == 0 {
+                    Efi::Disk { disk: efi_disk.as_deref().unwrap_or(root), path: efi }
+                } else {
+                    Efi::File(efi)
+                },
             };
             n += 1;
         }
         let cfg = Config {
-            volume: Guid(guid),
             default: def.index(n),
-            images,
-            image_count: n,
+            entries,
+            entry_count: n,
             tpm: flags[0],
             setup_tpm: flags[1],
             passphrase: flags[2],
@@ -91,10 +97,10 @@ proptest! {
     fn config_never_panics_on_near_valid(lines in proptest::collection::vec(
         prop_oneof![
             Just("[Paguro]".to_string()),
-            Just("[Image.a]".to_string()),
+            Just("[Boot.a]".to_string()),
             Just("[TPM]".to_string()),
             "[A-Za-z.]{0,12}".prop_map(|s| format!("[{s}]")),
-            "(version|default|volume|path|format|expose|chain|enabled)=[ -~]{0,40}",
+            "(version|default|volume|root|efi_disk|efi|efi_file|enabled)=[ -~]{0,40}",
         ],
         0..40,
     )) {
@@ -132,16 +138,17 @@ proptest! {
 
     #[test]
     fn bootstrap_roundtrip(
+        volume in any::<[u8; 16]>(),
         salt in any::<[u8; 16]>(),
         wrapped in any::<[u8; 32]>(),
         desc in "[ -~]{0,40}",
         p in path(),
     ) {
-        let od = bootstrap::write_optional_data(&salt, &wrapped);
+        let od = bootstrap::write_optional_data(&Guid(volume), &salt, &wrapped);
         let mut buf = [0u8; 1024];
         let n = bootstrap::write_load_option(1, &desc, &p, &od, &mut buf).unwrap();
         let bs = bootstrap::parse(&buf[..n]).unwrap();
-        prop_assert_eq!((bs.salt, bs.wrapped_vmk), (&salt, &wrapped));
+        prop_assert_eq!((bs.volume, bs.salt, bs.wrapped_vmk), (Guid(volume), &salt, &wrapped));
     }
 
     #[test]
@@ -203,16 +210,21 @@ proptest! {
         b in any::<[u8; 32]>(),
         mask in 1u32..(1 << 24),
         config_bytes in proptest::option::of(bytes(2000)),
-        imgs in proptest::collection::vec((name(), any::<u64>(), any::<u16>()), 1..=16),
+        name in name(),
+        root in proptest::option::of((any::<u64>(), any::<u16>())),
+        efi in proptest::option::of((any::<bool>(), any::<u64>(), any::<u16>())),
         state in 0u32..16,
         rung in 1u8..=8,
         prov in proptest::option::of((any::<[u8; 32]>(), any::<[u8; 16]>(), tpm2b(300), tpm2b(300))),
     ) {
         let pcrv = vec![0x5au8; mask.count_ones() as usize * 32];
-        let mut images = [ImageId::EMPTY; handoff::MAX_IMAGES];
-        for (i, (n, r, s)) in imgs.iter().enumerate() {
-            images[i] = ImageId { name: n, mft_record: *r, mft_seq: *s };
-        }
+        let root = root.map(|(r, s)| ImageId { name: &name, mft_record: r, mft_seq: s });
+        // A second file: never the root's record; an efi disk only beside a root.
+        let efi = efi
+            .filter(|(_, r, _)| root.is_none_or(|x| x.mft_record != *r))
+            .map(|(disk, r, s)| (disk && root.is_some(), ImageId { name: &name, mft_record: r, mft_seq: s }));
+        let efi_disk = efi.filter(|e| e.0).map(|e| e.1);
+        let efi_file = efi.filter(|e| !e.0).map(|e| e.1);
         let provision = prov.as_ref().map(|(w, s, public, private)| Seal {
             kind: Kind::Tpm,
             deadline: None,
@@ -235,8 +247,9 @@ proptest! {
             b: &b,
             pcrs: Pcrs { mask, values: &pcrv },
             config: config_bytes.as_deref(),
-            images,
-            image_count: imgs.len(),
+            root,
+            efi_disk,
+            efi_file,
             state,
             rung: Rung::from_u8(rung).unwrap(),
             provision,
@@ -244,6 +257,37 @@ proptest! {
         let mut buf = vec![0u8; handoff::MAX_LEN];
         let n = handoff::encode(&h, &mut buf).unwrap();
         prop_assert_eq!(handoff::decode(&buf[..n]), Ok(h));
+    }
+
+    #[test]
+    fn disk_detect_is_total(len in any::<u64>(), tail in bytes(512)) {
+        let mut t = [0u8; 512];
+        t[..tail.len()].copy_from_slice(&tail);
+        let p = disk::detect(len, &t);
+        prop_assert!(p.len <= len);
+        if p.format == disk::Format::Vhd {
+            prop_assert_eq!(p.len + 512, len);
+        }
+    }
+
+    #[test]
+    fn disk_classify_never_panics(len in any::<u64>(), head in bytes(2048), gpt_sig in any::<bool>()) {
+        let mut h = head;
+        if gpt_sig && h.len() >= 520 {
+            h[512..520].copy_from_slice(gpt::SIGNATURE);
+        }
+        if let Ok(fs) = disk::classify(len, &h) {
+            let (at, n) = fs.range();
+            prop_assert!(at.saturating_add(n) <= len);
+        }
+    }
+
+    #[test]
+    fn fat32_superfloppy_accepted(total in 70_000u32..4_000_000, extra in 0u64..4096) {
+        let s = disk::build::fat32_boot_sector(total);
+        let len = u64::from(total) * 512 + extra;
+        let fs = disk::classify(len, &s).unwrap();
+        prop_assert_eq!(fs.range(), (0, u64::from(total) * 512));
     }
 
     #[test]

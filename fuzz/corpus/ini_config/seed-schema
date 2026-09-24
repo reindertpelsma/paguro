@@ -2,11 +2,10 @@
 [Paguro]
 version = 1
 default = debian
-volume = 5c5c5c5c-5c5c-5c5c-5c5c-5c5c5c5c5c5c
 
-[Image.debian]
-path = \paguro\debian.vhd
-format = vhd
+[Boot.debian]
+volume = 5c5c5c5c-5c5c-5c5c-5c5c-5c5c5c5c5c5c
+root = \paguro\debian.vhd
 
 [Passphrase]
 enabled = 1

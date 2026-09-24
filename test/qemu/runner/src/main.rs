@@ -93,15 +93,20 @@ struct Env {
 // ---------------------------------------------------------------------------
 // Images
 
+/// Where the volume's `tpm_seal.bin` lives under `\EFI\paguro\`.
+fn tpm_seal_path() -> String {
+    format!("{VOLUME}/tpm_seal.bin")
+}
+
 fn ini_text() -> Vec<u8> {
     format!(
-        "# paguro configuration. Not hand-editable: use `paguro config`.\n[Paguro]\nversion = 1\ndefault = debian\nvolume = {VOLUME}\n\n[Image.debian]\npath = \\paguro\\debian.vhd\nformat = vhd\n"
+        "# paguro configuration. Not hand-editable: use `paguro config`.\n[Paguro]\nversion = 1\ndefault = debian\n\n[Boot.debian]\nvolume = {VOLUME}\nroot = \\paguro\\debian.vhd\n"
     )
     .into_bytes()
 }
 
 /// A FAT ESP holding the loader as the removable-media default and the given
-/// `\EFI\paguro\` files.
+/// `\EFI\paguro\` files (`/` in a name makes a subdirectory).
 fn make_esp(env: &Env, name: &str, efi: &Path, files: &[(&str, &[u8])]) -> R<PathBuf> {
     let dir = env.work.join(format!("{name}-esp"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -109,7 +114,11 @@ fn make_esp(env: &Env, name: &str, efi: &Path, files: &[(&str, &[u8])]) -> R<Pat
     std::fs::create_dir_all(dir.join("EFI/paguro")).map_err(|e| e.to_string())?;
     std::fs::copy(efi, dir.join("EFI/BOOT/BOOTX64.EFI")).map_err(|e| e.to_string())?;
     for (f, data) in files {
-        std::fs::write(dir.join("EFI/paguro").join(f), data).map_err(|e| e.to_string())?;
+        let path = dir.join("EFI/paguro").join(f);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(path, data).map_err(|e| e.to_string())?;
     }
     // Scenarios that let the loader return expect the firmware to run it again
     // in the same boot. Newer OVMF (Ubuntu 26.04) does that through its
@@ -636,7 +645,7 @@ fn load_taint_and_unseal(env: &Env) -> R<()> {
     )?;
     let pcrs = (|| {
         vm.expect("stage1 skipped (secure boot off)", BOOT_WAIT)?;
-        vm.expect("stage2 ok (1 images)", 10)?;
+        vm.expect("stage2 ok (1 entries, default debian)", 10)?;
         vm.expect(&format!("pcr12={} (no tpm_seal.bin)", hex(&capped(1))), 10)?;
         let line = vm.capture("pcrs ", 10)?;
         let mut v = [[0u8; 32]; 4];
@@ -657,12 +666,12 @@ fn load_taint_and_unseal(env: &Env) -> R<()> {
         env,
         name,
         &env.efi,
-        &[("paguro.ini", &ini), ("tpm_seal.bin", &seal_file)],
+        &[("paguro.ini", &ini), (&tpm_seal_path(), &seal_file)],
     )?;
     let mut vm = Vm::start(env, name, false, &esp, &data, &vars, &state)?;
     let r = (|| {
         vm.expect("stage1 skipped (secure boot off)", BOOT_WAIT)?;
-        vm.expect("stage2 ok (1 images)", 10)?;
+        vm.expect("stage2 ok (1 entries, default debian)", 10)?;
         let load = pcr12_after_load_taint(&ini);
         vm.expect(&format!("pcr12={} (load taint)", hex(&load)), 10)?;
         vm.expect(&format!("volume {VOLUME} (BitLocker)"), 10)?;
@@ -733,7 +742,7 @@ fn secure_boot_case(
         efi,
         &[
             ("paguro.ini", &ini),
-            ("tpm_seal.bin", b"PGRTPM\x00\x01not-a-seal"),
+            (&tpm_seal_path(), b"PGRTPM\x00\x01not-a-seal"),
         ],
     )?;
     let data = make_data_disk(env)?;
@@ -770,13 +779,14 @@ fn secure_boot_verified(env: &Env) -> R<()> {
     let ini = ini_text();
     secure_boot_case(env, "sb-verified", Some(sha256(&[&ini])), |vm| {
         vm.expect("stage1 ok (verified)", 10)?;
-        // A malformed seal still counts as present for the ratchet.
-        vm.expect("tpm_seal.bin refused", 10)?;
-        vm.expect("stage2 ok (1 images)", 10)?;
+        vm.expect("stage2 ok (1 entries, default debian)", 10)?;
+        // A malformed seal (in the volume's directory) still counts as
+        // present for the ratchet.
         vm.expect(
             &format!("pcr12={} (load taint)", hex(&pcr12_after_load_taint(&ini))),
             10,
         )?;
+        vm.expect(&format!("{VOLUME}\\tpm_seal.bin refused"), 20)?;
         vm.expect("Unlock Linux", 20)
     })
 }

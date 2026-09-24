@@ -10,12 +10,12 @@
 //! - unknown sections are ignored; unknown keys in a known section are an error;
 //! - keys before the first `[section]` are an error;
 //! - every value is typed and bounded here, so nothing downstream re-validates;
-//! - errors about a section header (bad image name, too many images) carry the
+//! - errors about a section header (bad entry name, too many entries) carry the
 //!   line of the section's first key: the grammar yields entries, not headers,
 //!   and a header with no keys configures nothing.
 //!
 //! Output is borrowed from the input buffer: no allocation, fixed capacity
-//! ([`MAX_IMAGES`]).
+//! ([`MAX_ENTRIES`]).
 //!
 //! `#` starts a comment only at the beginning of a line (the frozen grammar);
 //! the trailing annotations in §3.2's example are documentation, and an NTFS
@@ -24,91 +24,102 @@
 use crate::guid::{Guid, GuidError};
 use crate::ini::{self, IniError};
 
-pub const MAX_IMAGES: usize = 16;
+pub const MAX_ENTRIES: usize = 16;
 pub const MAX_NAME: usize = 32;
 pub const MAX_PATH_BYTES: usize = 1024;
 pub const MAX_COMPONENTS: usize = 32;
 pub const MAX_COMPONENT_UTF16: usize = 255;
-/// The chain target when `chain` is absent: the UEFI removable-media path for
-/// the architecture the loader runs on.
+/// The UEFI image when `efi` is absent: the removable-media path for the
+/// architecture the loader runs on.
 #[cfg(not(target_arch = "aarch64"))]
-pub const DEFAULT_CHAIN: &str = "\\EFI\\BOOT\\BOOTX64.EFI";
+pub const DEFAULT_EFI: &str = "\\EFI\\BOOT\\BOOTX64.EFI";
 #[cfg(target_arch = "aarch64")]
-pub const DEFAULT_CHAIN: &str = "\\EFI\\BOOT\\BOOTAA64.EFI";
+pub const DEFAULT_EFI: &str = "\\EFI\\BOOT\\BOOTAA64.EFI";
 /// The first line [`write`] emits.
 pub const HEADER_COMMENT: &str = "# paguro configuration. Not hand-editable: use `paguro config`.";
+/// The section-name prefix of a boot entry.
+pub const ENTRY_PREFIX: &str = "Boot.";
 
+/// Where an entry's next UEFI image is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Format {
-    /// Fixed VHD: payload followed by a 512-byte footer.
-    Vhd,
-    Raw,
+pub enum Efi<'a> {
+    /// `efi` (FAT path) on the FAT32 of `efi_disk` (NTFS path; the entry's
+    /// `root` when absent). The primary mode.
+    Disk { disk: &'a str, path: &'a str },
+    /// `efi_file`: a UEFI image directly on the NTFS volume, loaded from a
+    /// buffer (no `DeviceHandle`). Excludes `efi_disk` and `efi`.
+    File(&'a str),
 }
 
+/// One `[Boot.<name>]` section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Expose {
-    Block,
-    File,
-}
-
-impl Format {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Format::Vhd => "vhd",
-            Format::Raw => "raw",
-        }
-    }
-}
-
-impl Expose {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Expose::Block => "block",
-            Expose::File => "file",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Image<'a> {
+pub struct Entry<'a> {
     pub name: &'a str,
-    /// Absolute NTFS path, validated by [`check_path`].
-    pub path: &'a str,
-    pub format: Format,
-    pub expose: Expose,
-    /// Path inside the nested ESP; [`DEFAULT_CHAIN`] when absent.
-    pub chain: &'a str,
+    /// GPT partition GUID of the NTFS volume holding all the entry's files.
+    pub volume: Guid,
+    /// The Linux root disk: an absolute NTFS path on `volume`. Required
+    /// unless the UEFI image is an `efi_file`.
+    pub root: Option<&'a str>,
+    pub efi: Efi<'a>,
 }
 
-impl Image<'_> {
-    pub const EMPTY: Image<'static> = Image {
+impl<'a> Entry<'a> {
+    pub const EMPTY: Entry<'static> = Entry {
         name: "",
-        path: "",
-        format: Format::Vhd,
-        expose: Expose::Block,
-        chain: DEFAULT_CHAIN,
+        volume: Guid::ZERO,
+        root: None,
+        efi: Efi::File(""),
     };
+
+    /// The disk holding the UEFI image, if it is on a disk's FAT32.
+    pub fn efi_disk(&self) -> Option<&'a str> {
+        match self.efi {
+            Efi::Disk { disk, .. } => Some(disk),
+            Efi::File(_) => None,
+        }
+    }
+
+    /// The UEFI image's file (disk or `efi_file`) when it is not the root:
+    /// what the handoff forwards besides the root.
+    pub fn separate_efi(&self) -> Option<&'a str> {
+        let f = match self.efi {
+            Efi::Disk { disk, .. } => disk,
+            Efi::File(f) => f,
+        };
+        (Some(f) != self.root).then_some(f)
+    }
+
+    /// Whether this entry is well-formed: valid name and paths, and a root
+    /// whenever the UEFI image is on a disk.
+    pub fn is_valid(&self) -> bool {
+        check_name(self.name)
+            && self.root.is_none_or(|r| check_path(r).is_ok())
+            && match self.efi {
+                Efi::Disk { disk, path } => {
+                    self.root.is_some() && check_path(disk).is_ok() && check_path(path).is_ok()
+                }
+                Efi::File(f) => check_path(f).is_ok(),
+            }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config<'a> {
-    /// GPT partition GUID of the NTFS volume.
-    pub volume: Guid,
-    /// Index into `images` of the `default` image.
+    /// Index into `entries` of the `default` entry.
     pub default: usize,
-    pub images: [Image<'a>; MAX_IMAGES],
-    pub image_count: usize,
+    pub entries: [Entry<'a>; MAX_ENTRIES],
+    pub entry_count: usize,
     pub tpm: bool,
     pub setup_tpm: bool,
     pub passphrase: bool,
 }
 
 impl<'a> Config<'a> {
-    pub fn images(&self) -> &[Image<'a>] {
-        self.images.get(..self.image_count).unwrap_or(&[])
+    pub fn entries(&self) -> &[Entry<'a>] {
+        self.entries.get(..self.entry_count).unwrap_or(&[])
     }
-    pub fn default_image(&self) -> Option<&Image<'a>> {
-        self.images().get(self.default)
+    pub fn default_entry(&self) -> Option<&Entry<'a>> {
+        self.entries().get(self.default)
     }
 }
 
@@ -118,10 +129,10 @@ pub enum Missing {
     PaguroSection,
     Version,
     Default,
-    Volume,
-    /// An image without `path`; the index is the order of first appearance.
-    ImagePath(usize),
-    ImageFormat(usize),
+    /// An entry without `volume`; the index is the order of first appearance.
+    EntryVolume(usize),
+    /// An entry with neither `root` nor `efi_file`.
+    EntryRoot(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,23 +173,21 @@ pub enum ConfigError {
         line: usize,
         err: GuidError,
     },
-    BadImageName {
+    BadEntryName {
         line: usize,
     },
-    TooManyImages {
-        line: usize,
-    },
-    BadFormat {
-        line: usize,
-    },
-    BadExpose {
+    TooManyEntries {
         line: usize,
     },
     BadPath {
         line: usize,
         err: PathError,
     },
-    /// `default` names no `[Image.*]` section.
+    /// `efi_file` together with `efi_disk` or `efi` (the later key's line).
+    EfiFileConflict {
+        line: usize,
+    },
+    /// `default` names no `[Boot.*]` section.
     DefaultNotFound,
 }
 
@@ -198,7 +207,7 @@ pub fn check_name(s: &str) -> bool {
 
 /// An absolute backslash path: `\a\b`, no empty, `.` or `..` components, at most
 /// 32 components of at most 255 UTF-16 units, at most 1024 bytes, and none of
-/// the characters NTFS/Win32 forbid in names.
+/// the characters NTFS/Win32 (and FAT long names) forbid.
 pub fn check_path(s: &str) -> Result<(), PathError> {
     if s.is_empty() {
         return Err(PathError::Empty);
@@ -246,7 +255,7 @@ fn parse_bool(v: &str, line: usize) -> Result<bool, ConfigError> {
 enum Section<'a> {
     None,
     Paguro,
-    Image(usize),
+    Entry(usize),
     Tpm,
     SetupTpm,
     Passphrase,
@@ -256,11 +265,11 @@ enum Section<'a> {
 /// Seen-key bits, one mask per known section.
 const K_VERSION: u8 = 1;
 const K_DEFAULT: u8 = 2;
-const K_VOLUME: u8 = 4;
-const K_PATH: u8 = 1;
-const K_FORMAT: u8 = 2;
-const K_EXPOSE: u8 = 4;
-const K_CHAIN: u8 = 8;
+const K_VOLUME: u8 = 1;
+const K_ROOT: u8 = 2;
+const K_EFI_DISK: u8 = 4;
+const K_EFI: u8 = 8;
+const K_EFI_FILE: u8 = 16;
 const K_ENABLED: u8 = 1;
 
 fn mark(seen: &mut u8, bit: u8, line: usize) -> Result<(), ConfigError> {
@@ -271,20 +280,28 @@ fn mark(seen: &mut u8, bit: u8, line: usize) -> Result<(), ConfigError> {
     Ok(())
 }
 
+fn path_value(v: &str, line: usize) -> Result<&str, ConfigError> {
+    check_path(v).map_err(|err| ConfigError::BadPath { line, err })?;
+    Ok(v)
+}
+
 /// Parse and validate. A malformed file is refused whole.
 pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
     let mut cfg = Config {
-        volume: Guid::ZERO,
         default: 0,
-        images: [Image::EMPTY; MAX_IMAGES],
-        image_count: 0,
+        entries: [Entry::EMPTY; MAX_ENTRIES],
+        entry_count: 0,
         tpm: true,
         setup_tpm: true,
         passphrase: false,
     };
     let mut paguro_section = false;
     let mut paguro_seen = 0u8;
-    let mut image_seen = [0u8; MAX_IMAGES];
+    let mut entry_seen = [0u8; MAX_ENTRIES];
+    // Raw per-entry values, assembled into `Entry::efi` at the end.
+    let mut efi_disk: [Option<&str>; MAX_ENTRIES] = [None; MAX_ENTRIES];
+    let mut efi_path: [Option<&str>; MAX_ENTRIES] = [None; MAX_ENTRIES];
+    let mut efi_file: [Option<&str>; MAX_ENTRIES] = [None; MAX_ENTRIES];
     let mut tpm_seen = 0u8;
     let mut setup_seen = 0u8;
     let mut pass_seen = 0u8;
@@ -306,26 +323,26 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
                 "TPM" => Section::Tpm,
                 "SetupTPM" => Section::SetupTpm,
                 "Passphrase" => Section::Passphrase,
-                s => match s.strip_prefix("Image.") {
+                s => match s.strip_prefix(ENTRY_PREFIX) {
                     Some(name) => {
                         if !check_name(name) {
-                            return Err(ConfigError::BadImageName { line });
+                            return Err(ConfigError::BadEntryName { line });
                         }
-                        let found = cfg.images().iter().position(|i| i.name == name);
+                        let found = cfg.entries().iter().position(|i| i.name == name);
                         let idx = match found {
                             Some(i) => i,
                             None => {
-                                let i = cfg.image_count;
+                                let i = cfg.entry_count;
                                 let slot = cfg
-                                    .images
+                                    .entries
                                     .get_mut(i)
-                                    .ok_or(ConfigError::TooManyImages { line })?;
+                                    .ok_or(ConfigError::TooManyEntries { line })?;
                                 slot.name = name;
-                                cfg.image_count += 1;
+                                cfg.entry_count += 1;
                                 i
                             }
                         };
-                        Section::Image(idx)
+                        Section::Entry(idx)
                     }
                     None => Section::Ignored(s),
                 },
@@ -349,51 +366,49 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
                 "default" => {
                     mark(&mut paguro_seen, K_DEFAULT, line)?;
                     if !check_name(v) {
-                        return Err(ConfigError::BadImageName { line });
+                        return Err(ConfigError::BadEntryName { line });
                     }
                     default_name = Some(v);
                 }
-                "volume" => {
-                    mark(&mut paguro_seen, K_VOLUME, line)?;
-                    cfg.volume =
-                        Guid::parse(v).map_err(|err| ConfigError::BadGuid { line, err })?;
-                }
                 _ => return Err(ConfigError::UnknownKey { line }),
             },
-            Section::Image(idx) => {
-                let seen = image_seen
+            Section::Entry(idx) => {
+                let seen = entry_seen
                     .get_mut(idx)
-                    .ok_or(ConfigError::TooManyImages { line })?;
-                let img = cfg
-                    .images
+                    .ok_or(ConfigError::TooManyEntries { line })?;
+                let ent = cfg
+                    .entries
                     .get_mut(idx)
-                    .ok_or(ConfigError::TooManyImages { line })?;
+                    .ok_or(ConfigError::TooManyEntries { line })?;
                 match e.key {
-                    "path" => {
-                        mark(seen, K_PATH, line)?;
-                        check_path(v).map_err(|err| ConfigError::BadPath { line, err })?;
-                        img.path = v;
+                    "volume" => {
+                        mark(seen, K_VOLUME, line)?;
+                        ent.volume =
+                            Guid::parse(v).map_err(|err| ConfigError::BadGuid { line, err })?;
                     }
-                    "format" => {
-                        mark(seen, K_FORMAT, line)?;
-                        img.format = match v {
-                            "vhd" => Format::Vhd,
-                            "raw" => Format::Raw,
-                            _ => return Err(ConfigError::BadFormat { line }),
+                    "root" => {
+                        mark(seen, K_ROOT, line)?;
+                        ent.root = Some(path_value(v, line)?);
+                    }
+                    "efi_disk" | "efi" | "efi_file" => {
+                        let (bit, store) = match e.key {
+                            "efi_disk" => (K_EFI_DISK, &mut efi_disk),
+                            "efi" => (K_EFI, &mut efi_path),
+                            _ => (K_EFI_FILE, &mut efi_file),
                         };
-                    }
-                    "expose" => {
-                        mark(seen, K_EXPOSE, line)?;
-                        img.expose = match v {
-                            "block" => Expose::Block,
-                            "file" => Expose::File,
-                            _ => return Err(ConfigError::BadExpose { line }),
+                        mark(seen, bit, line)?;
+                        let others = if bit == K_EFI_FILE {
+                            K_EFI_DISK | K_EFI
+                        } else {
+                            K_EFI_FILE
                         };
-                    }
-                    "chain" => {
-                        mark(seen, K_CHAIN, line)?;
-                        check_path(v).map_err(|err| ConfigError::BadPath { line, err })?;
-                        img.chain = v;
+                        if *seen & others != 0 {
+                            return Err(ConfigError::EfiFileConflict { line });
+                        }
+                        let dst = store
+                            .get_mut(idx)
+                            .ok_or(ConfigError::TooManyEntries { line })?;
+                        *dst = Some(path_value(v, line)?);
                     }
                     _ => return Err(ConfigError::UnknownKey { line }),
                 }
@@ -416,26 +431,33 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
     if !paguro_section {
         return Err(ConfigError::Missing(Missing::PaguroSection));
     }
-    for (bit, what) in [
-        (K_VERSION, Missing::Version),
-        (K_DEFAULT, Missing::Default),
-        (K_VOLUME, Missing::Volume),
-    ] {
+    for (bit, what) in [(K_VERSION, Missing::Version), (K_DEFAULT, Missing::Default)] {
         if paguro_seen & bit == 0 {
             return Err(ConfigError::Missing(what));
         }
     }
-    for (i, seen) in image_seen.iter().take(cfg.image_count).enumerate() {
-        if seen & K_PATH == 0 {
-            return Err(ConfigError::Missing(Missing::ImagePath(i)));
+    for (i, ((seen, ent), ((disk, path), file))) in entry_seen
+        .iter()
+        .zip(cfg.entries.iter_mut())
+        .zip(efi_disk.iter().zip(efi_path.iter()).zip(efi_file.iter()))
+        .take(cfg.entry_count)
+        .enumerate()
+    {
+        if seen & K_VOLUME == 0 {
+            return Err(ConfigError::Missing(Missing::EntryVolume(i)));
         }
-        if seen & K_FORMAT == 0 {
-            return Err(ConfigError::Missing(Missing::ImageFormat(i)));
-        }
+        ent.efi = match (*file, ent.root) {
+            (Some(f), _) => Efi::File(f),
+            (None, Some(root)) => Efi::Disk {
+                disk: disk.unwrap_or(root),
+                path: path.unwrap_or(DEFAULT_EFI),
+            },
+            (None, None) => return Err(ConfigError::Missing(Missing::EntryRoot(i))),
+        };
     }
     let default_name = default_name.ok_or(ConfigError::Missing(Missing::Default))?;
     cfg.default = cfg
-        .images()
+        .entries()
         .iter()
         .position(|i| i.name == default_name)
         .ok_or(ConfigError::DefaultNotFound)?;
@@ -458,18 +480,17 @@ impl From<crate::bytes::Full> for WriteError {
 
 /// Serialise canonically. `parse(write(c)) == c` for every valid `c` (checked
 /// by property test), so the loader can author the configuration the initrd
-/// writes on a provisioning boot and seal against its hash.
+/// writes on a provisioning boot and seal against its hash. `root` is written
+/// when present; `efi_disk` only when it differs from `root`; `efi` (with a
+/// disk) is always written, so an
+/// authored file does not depend on the reader's architecture default.
 pub fn write(cfg: &Config<'_>, out: &mut [u8]) -> Result<usize, WriteError> {
-    if cfg.image_count == 0 || cfg.image_count > MAX_IMAGES {
+    if cfg.entry_count == 0 || cfg.entry_count > MAX_ENTRIES {
         return Err(WriteError::Invalid);
     }
-    let default = cfg.default_image().ok_or(WriteError::Invalid)?;
-    for (i, img) in cfg.images().iter().enumerate() {
-        if !check_name(img.name)
-            || check_path(img.path).is_err()
-            || check_path(img.chain).is_err()
-            || cfg.images().iter().take(i).any(|o| o.name == img.name)
-        {
+    let default = cfg.default_entry().ok_or(WriteError::Invalid)?;
+    for (i, ent) in cfg.entries().iter().enumerate() {
+        if !ent.is_valid() || cfg.entries().iter().take(i).any(|o| o.name == ent.name) {
             return Err(WriteError::Invalid);
         }
     }
@@ -478,20 +499,31 @@ pub fn write(cfg: &Config<'_>, out: &mut [u8]) -> Result<usize, WriteError> {
     w.put(HEADER_COMMENT.as_bytes())?;
     w.put(b"\n[Paguro]\nversion = 1\ndefault = ")?;
     w.put(default.name.as_bytes())?;
-    w.put(b"\nvolume = ")?;
-    w.put(&cfg.volume.to_text())?;
     w.put(b"\n")?;
-    for img in cfg.images() {
-        w.put(b"\n[Image.")?;
-        w.put(img.name.as_bytes())?;
-        w.put(b"]\npath = ")?;
-        w.put(img.path.as_bytes())?;
-        w.put(b"\nformat = ")?;
-        w.put(img.format.as_str().as_bytes())?;
-        w.put(b"\nexpose = ")?;
-        w.put(img.expose.as_str().as_bytes())?;
-        w.put(b"\nchain = ")?;
-        w.put(img.chain.as_bytes())?;
+    for ent in cfg.entries() {
+        w.put(b"\n[")?;
+        w.put(ENTRY_PREFIX.as_bytes())?;
+        w.put(ent.name.as_bytes())?;
+        w.put(b"]\nvolume = ")?;
+        w.put(&ent.volume.to_text())?;
+        if let Some(root) = ent.root {
+            w.put(b"\nroot = ")?;
+            w.put(root.as_bytes())?;
+        }
+        match ent.efi {
+            Efi::Disk { disk, path } => {
+                if Some(disk) != ent.root {
+                    w.put(b"\nefi_disk = ")?;
+                    w.put(disk.as_bytes())?;
+                }
+                w.put(b"\nefi = ")?;
+                w.put(path.as_bytes())?;
+            }
+            Efi::File(f) => {
+                w.put(b"\nefi_file = ")?;
+                w.put(f.as_bytes())?;
+            }
+        }
         w.put(b"\n")?;
     }
     for (name, v) in [
@@ -520,17 +552,16 @@ mod tests {
 [Paguro]
 version     = 1
 default     = debian
+
+[Boot.debian]
 volume      = 6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8
+root        = \\paguro\\debian.vhd
+efi_disk    = \\paguro\\debian-esp.vhd
+efi         = \\EFI\\systemd\\systemd-bootx64.efi
 
-[Image.debian]
-path        = \\paguro\\debian.vhd
-format      = vhd
-expose      = block
-chain       = \\EFI\\BOOT\\BOOTX64.EFI
-
-[Image.arch]
-path   = \\paguro\\arch #1.img
-format = raw
+[Boot.arch]
+volume = 11111111-2222-3333-4444-555555555555
+root   = \\paguro\\arch #1.img
 
 [TPM]
 enabled     = 1
@@ -540,6 +571,10 @@ enabled     = 0
 
 [Passphrase]
 enabled     = 1
+
+[Boot.rescue]
+volume   = 6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8
+efi_file = \\paguro\\rescue.efi
 
 [Future]
 anything = goes
@@ -557,27 +592,151 @@ anything = goes
     #[test]
     fn parses_the_documented_schema() {
         let c = parse(GOOD.as_bytes()).unwrap();
-        assert_eq!(c.image_count, 2);
-        assert_eq!(c.default_image().unwrap().name, "debian");
-        assert_eq!(c.images()[1].path, "\\paguro\\arch #1.img");
-        assert_eq!(c.images()[1].format, Format::Raw);
-        assert_eq!(c.images()[1].expose, Expose::Block);
-        assert_eq!(c.images()[1].chain, DEFAULT_CHAIN);
+        assert_eq!(c.entry_count, 3);
+        let d = c.default_entry().unwrap();
+        assert_eq!(d.name, "debian");
         assert_eq!(
-            c.volume,
+            d.volume,
             Guid::parse("6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8").unwrap()
         );
+        assert_eq!(d.root, Some("\\paguro\\debian.vhd"));
+        assert_eq!(
+            d.efi,
+            Efi::Disk {
+                disk: "\\paguro\\debian-esp.vhd",
+                path: "\\EFI\\systemd\\systemd-bootx64.efi"
+            }
+        );
+        assert_eq!(d.separate_efi(), Some("\\paguro\\debian-esp.vhd"));
+        let a = &c.entries()[1];
+        assert_eq!(a.root, Some("\\paguro\\arch #1.img"));
+        assert_eq!(a.efi_disk(), a.root, "efi_disk defaults to root");
+        assert_eq!(a.separate_efi(), None);
+        assert_eq!(
+            a.efi,
+            Efi::Disk {
+                disk: "\\paguro\\arch #1.img",
+                path: DEFAULT_EFI
+            }
+        );
+        let r = &c.entries()[2];
+        assert_eq!(r.root, None, "root is optional with efi_file");
+        assert_eq!(r.efi, Efi::File("\\paguro\\rescue.efi"));
+        assert_eq!(r.efi_disk(), None);
+        assert_eq!(r.separate_efi(), Some("\\paguro\\rescue.efi"));
+        assert_eq!(
+            a.volume,
+            Guid::parse("11111111-2222-3333-4444-555555555555").unwrap(),
+            "entries may name different volumes"
+        );
         assert!(c.tpm && !c.setup_tpm && c.passphrase);
+    }
+
+    #[test]
+    fn default_selects_any_entry() {
+        let src = GOOD.replacen("default     = debian", "default = arch", 1);
+        let c = parse(src.as_bytes()).unwrap();
+        assert_eq!(c.default, 1);
+        assert_eq!(c.default_entry().unwrap().name, "arch");
+    }
+
+    #[test]
+    fn default_efi_is_the_removable_media_path() {
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(DEFAULT_EFI, "\\EFI\\BOOT\\BOOTAA64.EFI");
+        #[cfg(not(target_arch = "aarch64"))]
+        assert_eq!(DEFAULT_EFI, "\\EFI\\BOOT\\BOOTX64.EFI");
     }
 
     #[test]
     fn crlf_and_repeated_headers_merge() {
         let src = GOOD.replace('\n', "\r\n");
         assert!(parse(src.as_bytes()).is_ok());
-        let split = "[Paguro]\nversion=1\n[Image.a]\npath=\\a\n[Paguro]\ndefault=a\nvolume=6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8\n[Image.a]\nformat=raw\n";
+        let split = "[Paguro]\nversion=1\n[Boot.a]\nroot=\\a\n[Paguro]\ndefault=a\n[Boot.a]\nvolume=6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8\n";
         let c = parse(split.as_bytes()).unwrap();
-        assert_eq!((c.image_count, c.images()[0].format), (1, Format::Raw));
+        assert_eq!(
+            (
+                c.entry_count,
+                c.entries()[0].root,
+                c.entries()[0].efi_disk()
+            ),
+            (1, Some("\\a"), Some("\\a"))
+        );
         assert!(c.tpm && c.setup_tpm && !c.passphrase, "section defaults");
+    }
+
+    #[test]
+    fn old_schema_keys_are_refused() {
+        // `[Image.*]` is now an unknown (ignored) section; the removed keys
+        // are unknown keys where they would have been.
+        assert_eq!(
+            with(
+                "default     = debian",
+                "default = debian\nvolume = 6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8"
+            ),
+            ConfigError::UnknownKey { line: 5 }
+        );
+        for key in [
+            "format = vhd",
+            "expose = block",
+            "chain = \\x",
+            "path = \\x",
+        ] {
+            assert_eq!(
+                with("root        =", &std::format!("{key}\nroot =")),
+                ConfigError::UnknownKey { line: 8 },
+                "{key}"
+            );
+        }
+        let old = "[Paguro]\nversion=1\ndefault=a\n[Image.a]\npath=\\a\nformat=vhd\n";
+        assert_eq!(err(old), ConfigError::DefaultNotFound);
+    }
+
+    #[test]
+    fn efi_file_rules() {
+        let base = "[Paguro]\nversion=1\ndefault=r\n[Boot.r]\nvolume=6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8\n";
+        let ok = |extra: &str| {
+            let src = std::format!("{base}{extra}");
+            let c = parse(src.as_bytes()).map(|c| (c.entries()[0].root, c.entries()[0].efi));
+            c.map(|(r, e)| (r.map(std::string::String::from), std::format!("{e:?}")))
+        };
+        assert!(ok("efi_file=\\a.efi\n").is_ok());
+        let (root, _) = ok("root=\\r.vhd\nefi_file=\\a.efi\n").unwrap();
+        assert_eq!(
+            root.as_deref(),
+            Some("\\r.vhd"),
+            "a root may travel with an efi_file"
+        );
+        // Conflicts carry the line of whichever key came second.
+        for (extra, line) in [
+            ("efi_file=\\a.efi\nefi_disk=\\d.vhd\n", 7),
+            ("efi_file=\\a.efi\nefi=\\x.efi\n", 7),
+            ("efi_disk=\\d.vhd\nroot=\\r\nefi_file=\\a.efi\n", 8),
+            ("efi=\\x.efi\nefi_file=\\a.efi\n", 7),
+        ] {
+            assert_eq!(
+                ok(extra),
+                Err(ConfigError::EfiFileConflict { line }),
+                "{extra}"
+            );
+        }
+        assert_eq!(
+            ok("efi_file=\\a.efi\nefi_file=\\b.efi\n"),
+            Err(ConfigError::DuplicateKey { line: 7 })
+        );
+        assert_eq!(
+            ok("efi_file=a.efi\n"),
+            Err(ConfigError::BadPath {
+                line: 6,
+                err: PathError::NotAbsolute
+            })
+        );
+        // Neither root nor efi_file; efi_disk/efi alone do not replace root.
+        assert_eq!(ok(""), Err(ConfigError::Missing(Missing::EntryRoot(0))));
+        assert_eq!(
+            ok("efi_disk=\\d.vhd\nefi=\\x.efi\n"),
+            Err(ConfigError::Missing(Missing::EntryRoot(0)))
+        );
     }
 
     #[test]
@@ -591,24 +750,40 @@ anything = goes
             ConfigError::KeyOutsideSection { line: 1 }
         );
         assert_eq!(
-            with("format      = vhd", "format = vhd\nformat = raw"),
+            with("efi         =", "efi = \\x\nefi ="),
+            ConfigError::DuplicateKey { line: 11 }
+        );
+        assert_eq!(
+            with("root        =", "root = \\x\nroot ="),
+            ConfigError::DuplicateKey { line: 9 }
+        );
+        assert_eq!(
+            with("efi_disk    =", "efi_disk = \\x\nefi_disk ="),
             ConfigError::DuplicateKey { line: 10 }
+        );
+        assert_eq!(
+            with(
+                "volume = 1111",
+                "volume = 6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8\nvolume = 1111"
+            ),
+            ConfigError::DuplicateKey { line: 14 }
         );
         assert_eq!(
             with("version     = 1", "version = 1\n[TPM]\n[Paguro]\nversion=1"),
             ConfigError::DuplicateKey { line: 6 }
         );
         assert_eq!(
-            with("expose      = block", "exposé = block"),
-            ConfigError::UnknownKey { line: 10 }
+            with("[Boot.arch]", "[Boot.debian]\nroot = \\y\n[Boot.arch]"),
+            ConfigError::DuplicateKey { line: 13 },
+            "repeated entry headers merge, so their keys collide"
         );
         assert_eq!(
-            with("volume ", "volumes "),
-            ConfigError::UnknownKey { line: 5 }
+            with("efi_disk    =", "efi-disk ="),
+            ConfigError::UnknownKey { line: 9 }
         );
         assert_eq!(
             with("enabled     = 1\n\n[SetupTPM]", "enable = 1\n\n[SetupTPM]"),
-            ConfigError::UnknownKey { line: 18 }
+            ConfigError::UnknownKey { line: 17 }
         );
         assert_eq!(
             err("[Other]\nx=1\n"),
@@ -624,15 +799,19 @@ anything = goes
         );
         assert_eq!(
             with("volume      = 6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8\n", ""),
-            ConfigError::Missing(Missing::Volume)
+            ConfigError::Missing(Missing::EntryVolume(0))
         );
         assert_eq!(
-            with("path        = \\paguro\\debian.vhd\n", ""),
-            ConfigError::Missing(Missing::ImagePath(0))
+            with("root        = \\paguro\\debian.vhd\n", ""),
+            ConfigError::Missing(Missing::EntryRoot(0))
         );
         assert_eq!(
-            with("format = raw\n", ""),
-            ConfigError::Missing(Missing::ImageFormat(1))
+            with("root   = \\paguro\\arch #1.img\n", ""),
+            ConfigError::Missing(Missing::EntryRoot(1))
+        );
+        assert_eq!(
+            with("volume = 11111111-2222-3333-4444-555555555555\n", ""),
+            ConfigError::Missing(Missing::EntryVolume(1))
         );
         assert_eq!(
             with("version     = 1", "version = 2"),
@@ -648,34 +827,33 @@ anything = goes
         );
         assert_eq!(
             with("enabled     = 1", "enabled = yes"),
-            ConfigError::BadBool { line: 18 }
+            ConfigError::BadBool { line: 17 }
         );
         assert_eq!(
             with("6c0a1b2c-3d4e", "6c0a1b2c_3d4e"),
             ConfigError::BadGuid {
-                line: 5,
+                line: 7,
                 err: GuidError::BadSeparator
             }
         );
         assert_eq!(
-            with("[Image.arch]", "[Image.a.b]"),
-            ConfigError::BadImageName { line: 14 }
+            with("volume = 1111", "volume = 111"),
+            ConfigError::BadGuid {
+                line: 13,
+                err: GuidError::BadLength
+            }
         );
         assert_eq!(
-            with("[Image.arch]", "[Image.]"),
-            ConfigError::BadImageName { line: 14 }
+            with("[Boot.arch]", "[Boot.a.b]"),
+            ConfigError::BadEntryName { line: 13 }
+        );
+        assert_eq!(
+            with("[Boot.arch]", "[Boot.]"),
+            ConfigError::BadEntryName { line: 13 }
         );
         assert_eq!(
             with("default     = debian", "default = de bian"),
-            ConfigError::BadImageName { line: 4 }
-        );
-        assert_eq!(
-            with("format      = vhd", "format = vhdx"),
-            ConfigError::BadFormat { line: 9 }
-        );
-        assert_eq!(
-            with("expose      = block", "expose = both"),
-            ConfigError::BadExpose { line: 10 }
+            ConfigError::BadEntryName { line: 4 }
         );
         assert_eq!(
             with("\\paguro\\debian.vhd", "paguro\\debian.vhd"),
@@ -685,13 +863,24 @@ anything = goes
             }
         );
         assert_eq!(
-            with(
-                "chain       = \\EFI\\BOOT\\BOOTX64.EFI",
-                "chain = \\EFI\\..\\x"
-            ),
+            with("\\paguro\\debian-esp.vhd", "\\paguro\\\\esp.vhd"),
             ConfigError::BadPath {
-                line: 11,
+                line: 9,
+                err: PathError::EmptyComponent
+            }
+        );
+        assert_eq!(
+            with("\\EFI\\systemd\\systemd-bootx64.efi", "\\EFI\\..\\x"),
+            ConfigError::BadPath {
+                line: 10,
                 err: PathError::DotComponent
+            }
+        );
+        assert_eq!(
+            with("\\EFI\\systemd\\systemd-bootx64.efi", "\\EFI\\a:b"),
+            ConfigError::BadPath {
+                line: 10,
+                err: PathError::BadChar
             }
         );
         assert_eq!(
@@ -700,10 +889,12 @@ anything = goes
         );
 
         let mut many = std::string::String::from("[Paguro]\n");
-        for i in 0..=MAX_IMAGES {
-            many.push_str(&std::format!("[Image.i{i}]\npath=\\x\nformat=raw\n"));
+        for i in 0..=MAX_ENTRIES {
+            many.push_str(&std::format!(
+                "[Boot.i{i}]\nroot=\\x\nvolume=6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8\n"
+            ));
         }
-        assert_eq!(err(&many), ConfigError::TooManyImages { line: 51 });
+        assert_eq!(err(&many), ConfigError::TooManyEntries { line: 51 });
         let big = std::vec![b'#'; ini::MAX_LEN + 1];
         assert_eq!(
             parse(&big).unwrap_err(),
@@ -762,24 +953,50 @@ anything = goes
         let c = parse(GOOD.as_bytes()).unwrap();
         let mut buf = [0u8; 4096];
         let n = write(&c, &mut buf).unwrap();
-        assert!(buf[..n].starts_with(HEADER_COMMENT.as_bytes()));
+        let text = std::string::String::from_utf8(buf[..n].to_vec()).unwrap();
+        assert!(text.contains("[Boot.rescue]\nvolume = 6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8\nefi_file = \\paguro\\rescue.efi\n"));
+        assert!(text.starts_with(HEADER_COMMENT));
         assert_eq!(parse(&buf[..n]).unwrap(), c);
+        assert_eq!(
+            text.matches("efi_disk = ").count(),
+            1,
+            "efi_disk only where it differs from root: {text}"
+        );
         assert_eq!(write(&c, &mut buf[..10]), Err(WriteError::Full));
 
         let mut bad = c;
         bad.default = 5;
         assert_eq!(write(&bad, &mut buf), Err(WriteError::Invalid));
         let mut bad = c;
-        bad.image_count = 0;
+        bad.entry_count = 0;
         assert_eq!(write(&bad, &mut buf), Err(WriteError::Invalid));
         let mut bad = c;
-        bad.images[1].name = "debian";
+        bad.entries[1].name = "debian";
         assert_eq!(write(&bad, &mut buf), Err(WriteError::Invalid));
         let mut bad = c;
-        bad.images[0].path = "x";
+        bad.entries[0].root = Some("x");
         assert_eq!(write(&bad, &mut buf), Err(WriteError::Invalid));
         let mut bad = c;
-        bad.images[0].chain = "\\..";
+        bad.entries[0].root = None;
+        assert_eq!(
+            write(&bad, &mut buf),
+            Err(WriteError::Invalid),
+            "an efi disk needs a root"
+        );
+        let mut bad = c;
+        bad.entries[0].efi = Efi::Disk {
+            disk: "",
+            path: DEFAULT_EFI,
+        };
+        assert_eq!(write(&bad, &mut buf), Err(WriteError::Invalid));
+        let mut bad = c;
+        bad.entries[0].efi = Efi::Disk {
+            disk: "\\d",
+            path: "\\..",
+        };
+        assert_eq!(write(&bad, &mut buf), Err(WriteError::Invalid));
+        let mut bad = c;
+        bad.entries[2].efi = Efi::File("rescue.efi");
         assert_eq!(write(&bad, &mut buf), Err(WriteError::Invalid));
     }
 }

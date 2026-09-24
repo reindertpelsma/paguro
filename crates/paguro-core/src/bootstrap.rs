@@ -6,19 +6,25 @@
 //! [`MAX_LOAD_OPTION`], the description must terminate inside the declared
 //! bounds, the device path is walked node by node and must end in an
 //! End-Entire node exactly at `FilePathListLength`, and the paguro payload is a
-//! fixed 56-byte layout. The wrapped VMK needs the passphrase to open and
+//! fixed 72-byte layout. The wrapped VMK needs the passphrase to open and
 //! nothing can test a guess against it, so a forged entry yields a wrong key,
 //! never a decision.
 //!
 //! ```text
-//! OptionalData   magic "PGRBST\0\x01" | salt[16] | wrapped_vmk[32]
+//! OptionalData   magic "PGRBST\0\x01" | volume GUID[16] | salt[16] | wrapped_vmk[32]
 //! wrapped_vmk  = VMK XOR HMAC(pass_hash, "paguro/bootstrap" || salt)
 //! ```
+//!
+//! The volume GUID names the NTFS volume to unlock on the first boot (there is
+//! no configuration yet), and the configuration the loader authors on that
+//! boot names it too. Forging it only points the loader at another volume,
+//! where the wrapped VMK opens nothing.
 
 use crate::bytes::{Full, Reader, Writer};
+use crate::guid::Guid;
 
 pub const MAGIC: &[u8; 8] = b"PGRBST\x00\x01";
-pub const OPTIONAL_DATA_LEN: usize = 8 + 16 + 32;
+pub const OPTIONAL_DATA_LEN: usize = 8 + 16 + 16 + 32;
 /// Largest `Boot####` value the loader reads.
 pub const MAX_LOAD_OPTION: usize = 8192;
 /// `LOAD_OPTION_ACTIVE`.
@@ -56,6 +62,8 @@ pub struct LoadOption<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bootstrap<'a> {
+    /// GPT partition GUID of the NTFS volume this entry unlocks.
+    pub volume: Guid,
     pub salt: &'a [u8; 16],
     pub wrapped_vmk: &'a [u8; 32],
 }
@@ -147,9 +155,14 @@ pub fn parse_optional_data(data: &[u8]) -> Result<Bootstrap<'_>, BootstrapError>
         return Err(BootstrapError::BadLength);
     }
     let mut r = Reader::new(data.get(8..).unwrap_or(&[]));
+    let volume = Guid(*r.array::<16>().map_err(|_| BootstrapError::BadLength)?);
     let salt = r.array::<16>().map_err(|_| BootstrapError::BadLength)?;
     let wrapped_vmk = r.array::<32>().map_err(|_| BootstrapError::BadLength)?;
-    Ok(Bootstrap { salt, wrapped_vmk })
+    Ok(Bootstrap {
+        volume,
+        salt,
+        wrapped_vmk,
+    })
 }
 
 /// Parse a whole `Boot####` value and its bootstrap payload.
@@ -227,11 +240,16 @@ pub fn write_load_option(
 }
 
 /// Serialise the bootstrap OptionalData.
-pub fn write_optional_data(salt: &[u8; 16], wrapped_vmk: &[u8; 32]) -> [u8; OPTIONAL_DATA_LEN] {
+pub fn write_optional_data(
+    volume: &Guid,
+    salt: &[u8; 16],
+    wrapped_vmk: &[u8; 32],
+) -> [u8; OPTIONAL_DATA_LEN] {
     let mut out = [0u8; OPTIONAL_DATA_LEN];
     let mut w = Writer::new(&mut out);
-    // 56 bytes into a 56-byte buffer cannot fail.
+    // 72 bytes into a 72-byte buffer cannot fail.
     let _ = w.put(MAGIC);
+    let _ = w.put(&volume.0);
     let _ = w.put(salt);
     let _ = w.put(wrapped_vmk);
     out
@@ -249,13 +267,16 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let od = write_optional_data(&[1; 16], &[2; 32]);
+        let od = write_optional_data(&Guid([9; 16]), &[1; 16], &[2; 32]);
+        assert_eq!(od.len(), 72);
+        assert_eq!(&od[8..24], &[9; 16], "the volume follows the magic");
         let (b, n) = option("paguro setup", "\\EFI\\paguro\\paguro.efi", &od);
         let lo = parse_load_option(&b[..n]).unwrap();
         assert_eq!(lo.attributes, LOAD_OPTION_ACTIVE);
         assert_eq!(lo.description.len(), 24);
         assert!(!lo.is_windows_boot_manager());
         let bs = parse(&b[..n]).unwrap();
+        assert_eq!(bs.volume, Guid([9; 16]));
         assert_eq!((bs.salt, bs.wrapped_vmk), (&[1; 16], &[2; 32]));
     }
 
@@ -285,7 +306,7 @@ mod tests {
 
     #[test]
     fn every_error_variant() {
-        let od = write_optional_data(&[1; 16], &[2; 32]);
+        let od = write_optional_data(&Guid([9; 16]), &[1; 16], &[2; 32]);
         let (b, n) = option("d", "\\p", &od);
         assert_eq!(
             parse(&[0; MAX_LOAD_OPTION + 1]),
@@ -325,6 +346,11 @@ mod tests {
         assert_eq!(parse(&b2[..n2]), Err(BootstrapError::NotBootstrap));
         assert_eq!(
             parse_optional_data(&od[..8]),
+            Err(BootstrapError::BadLength)
+        );
+        // The pre-volume 56-byte layout is refused, not misread.
+        assert_eq!(
+            parse_optional_data(&od[..56]),
             Err(BootstrapError::BadLength)
         );
         assert_eq!(

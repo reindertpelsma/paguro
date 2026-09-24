@@ -78,6 +78,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "disk"
+path = "fuzz_targets/disk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "handoff"
 path = "fuzz_targets/handoff.rs"
 test = false

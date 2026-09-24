@@ -14,7 +14,13 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     if let Ok(cfg) = config::parse(data) {
-        assert!(cfg.image_count >= 1 && cfg.default < cfg.image_count);
+        assert!(cfg.entry_count >= 1 && cfg.default < cfg.entry_count);
+        for e in cfg.entries() {
+            assert!(e.is_valid());
+            if let config::Efi::Disk { .. } = e.efi {
+                assert!(e.root.is_some(), "a disk-hosted UEFI image implies a root");
+            }
+        }
         let mut buf = vec![0u8; 70 * 1024];
         let n = config::write(&cfg, &mut buf).expect("a parsed config re-serialises");
         assert_eq!(config::parse(&buf[..n]).expect("canonical form parses"), cfg);

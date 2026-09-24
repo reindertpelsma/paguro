@@ -194,6 +194,18 @@ pub trait Platform {
     /// verified by shim / Secure Boot exactly as on any path).
     fn load_start_image(&mut self, device_path: &[u8]) -> Result<(), PlatformError>;
 
+    /// `LoadImage(SourceBuffer)` + `StartImage` of a UEFI image read into
+    /// memory (an entry's `efi_file`, INTERFACES.md §3.2). `LoadImage` runs the
+    /// Secure Boot verification; the buffer is **never jumped to** directly,
+    /// which would bypass it. The image gets no `DeviceHandle`.
+    ///
+    /// Defaults to `Unsupported` for platforms that never chain (test TPM
+    /// harnesses).
+    fn load_start_image_buffer(&mut self, image: &[u8]) -> Result<(), PlatformError> {
+        let _ = image;
+        Err(PlatformError::Unsupported)
+    }
+
     /// `ResetSystem(EfiResetCold)`. Returns only in tests.
     fn reset(&mut self);
 }

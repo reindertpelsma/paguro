@@ -3,15 +3,15 @@
 //! Partition discovery (GPT walk, BitLocker/NTFS signature probe) is
 //! implemented here over [`Platform::read_blocks`]. The FVE-metadata side of
 //! stage 3 (FVEK blob, clear key, recovery-password and FVEK unwrap) and all of
-//! stage 4 (NTFS, image extents, chain target) sit behind [`Volume`], whose
+//! stage 4 (NTFS, the entry's disks, the UEFI image) sit behind [`Volume`], whose
 //! production implementation is [`Unimplemented`] until `paguro-core::ntfs`
 //! and the FVE parser land. The mock boot tests supply a fake.
 
-use paguro_core::config::{Config, Format};
+use paguro_core::config::Entry;
 use paguro_core::fve;
 use paguro_core::gpt::{self, Header};
 use paguro_core::guid::{GPT_BASIC_DATA, Guid};
-use paguro_core::handoff::{FveLayout, MAX_IMAGES};
+use paguro_core::handoff::FveLayout;
 
 use crate::BootError;
 use crate::platform::Platform;
@@ -179,67 +179,92 @@ pub fn enumerate_candidates<P: Platform>(
     Ok(n)
 }
 
-/// An image stage 4 located.
+/// A file's identity on the NTFS volume (never its location).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LocatedImage {
-    pub name: [u8; 32],
-    pub name_len: u8,
+pub struct FileId {
     pub mft_record: u64,
     pub mft_seq: u16,
 }
 
-impl LocatedImage {
-    pub const EMPTY: LocatedImage = LocatedImage {
-        name: [0; 32],
-        name_len: 0,
-        mft_record: 0,
-        mft_seq: 0,
-    };
-    pub fn name(&self) -> &str {
-        core::str::from_utf8(self.name.get(..usize::from(self.name_len)).unwrap_or(&[]))
-            .unwrap_or("")
-    }
-}
-
-/// Stage 4's result.
+/// Stage 4's result: the boot entry's disks, found on the unlocked volume.
+///
+/// Stage 4 reads each disk file's last 512 bytes and first sectors and
+/// decides with `paguro_core::disk::{detect, classify}` where the FAT32
+/// holding the UEFI image is.
 pub struct Located {
-    pub images: [LocatedImage; MAX_IMAGES],
-    pub image_count: usize,
+    /// The boot entry's name: the configured entry, or in recovery and on a
+    /// first boot the one stage 4 found.
+    pub name: [u8; 32],
+    pub name_len: u8,
+    /// The Linux root disk; `None`: nothing to boot on this volume.
+    pub root: Option<FileId>,
+    /// The disk holding the UEFI image, when it is not the root.
+    pub efi_disk: Option<FileId>,
+    /// A UEFI image directly on NTFS (`efi_file`): started from a buffer
+    /// ([`Volume::efi_image`]) instead of by device path.
+    pub efi_file: Option<FileId>,
     /// `handoff::state::HIBERNATED` / `DIRTY`.
     pub flags: u32,
-    /// Device path of the chain target (the UKI inside the image).
+    /// Device path of the UEFI image on the published FAT32 (unused for an
+    /// `efi_file`).
     pub chain: [u8; 512],
     pub chain_len: usize,
-    /// On a provisioning boot, the default image's NTFS path and format, from
-    /// which the loader authors the configuration the initrd writes.
-    pub default_path: [u8; 1024],
-    pub default_path_len: usize,
-    pub default_format: Format,
+    /// NTFS paths of the root, the efi disk (when separate) and the efi file,
+    /// from which the loader authors the configuration on a provisioning boot.
+    pub root_path: [u8; 1024],
+    pub root_path_len: usize,
+    pub efi_disk_path: [u8; 1024],
+    pub efi_disk_path_len: usize,
+    pub efi_file_path: [u8; 1024],
+    pub efi_file_path_len: usize,
+}
+
+fn text(b: &[u8], n: usize) -> &str {
+    core::str::from_utf8(b.get(..n).unwrap_or(&[])).unwrap_or("")
 }
 
 impl Located {
     pub const fn new() -> Self {
         Located {
-            images: [LocatedImage::EMPTY; MAX_IMAGES],
-            image_count: 0,
+            name: [0; 32],
+            name_len: 0,
+            root: None,
+            efi_disk: None,
+            efi_file: None,
             flags: 0,
             chain: [0; 512],
             chain_len: 0,
-            default_path: [0; 1024],
-            default_path_len: 0,
-            default_format: Format::Vhd,
+            root_path: [0; 1024],
+            root_path_len: 0,
+            efi_disk_path: [0; 1024],
+            efi_disk_path_len: 0,
+            efi_file_path: [0; 1024],
+            efi_file_path_len: 0,
         }
+    }
+    pub fn name(&self) -> &str {
+        text(&self.name, usize::from(self.name_len))
     }
     pub fn chain(&self) -> &[u8] {
         self.chain.get(..self.chain_len).unwrap_or(&[])
     }
-    pub fn default_path(&self) -> &str {
-        core::str::from_utf8(
-            self.default_path
-                .get(..self.default_path_len)
-                .unwrap_or(&[]),
-        )
-        .unwrap_or("")
+    /// The root's path, when there is a root.
+    pub fn root_path(&self) -> Option<&str> {
+        (self.root_path_len != 0).then(|| text(&self.root_path, self.root_path_len))
+    }
+    /// The efi disk's path; the root's when it has none of its own.
+    pub fn efi_disk_path(&self) -> Option<&str> {
+        match self.efi_disk_path_len {
+            0 => self.root_path(),
+            n => Some(text(&self.efi_disk_path, n)),
+        }
+    }
+    pub fn efi_file_path(&self) -> Option<&str> {
+        (self.efi_file_path_len != 0).then(|| text(&self.efi_file_path, self.efi_file_path_len))
+    }
+    /// Whether stage 4 found anything to start.
+    pub fn bootable(&self) -> bool {
+        self.efi_file.is_some() || self.root.is_some()
     }
 }
 
@@ -270,14 +295,19 @@ pub trait Volume<P: Platform> {
     fn layout(&self) -> Option<FveLayout>;
     /// The VMK behind the recovery-password protector for this 16-byte key.
     fn recovery_key(&mut self, p: &mut P, key: &[u8; 16]) -> Result<Option<Key>, BootError>;
-    /// Stage 4: parse NTFS, locate `cfg`'s images (or enumerate, in recovery),
-    /// validate their maps, and name the chain target.
+    /// Stage 4: parse NTFS, locate `entry`'s `root` and `efi_disk` or
+    /// `efi_file` (or, in recovery and on a first boot, find an installation),
+    /// validate their maps, and either publish the efi disk's FAT32 and name
+    /// the UEFI image on it, or read the `efi_file` for [`Volume::efi_image`].
     fn locate(
         &mut self,
         p: &mut P,
-        cfg: Option<&Config<'_>>,
+        entry: Option<&Entry<'_>>,
         out: &mut Located,
     ) -> Result<(), BootError>;
+    /// The `efi_file` stage 4 read (when [`Located::efi_file`] is set), for
+    /// `LoadImage(SourceBuffer)`.
+    fn efi_image(&mut self, p: &mut P) -> Result<&[u8], BootError>;
 }
 
 /// Production stand-in until the FVE parser and `paguro-core::ntfs` land:
@@ -310,10 +340,13 @@ impl<P: Platform> Volume<P> for Unimplemented {
     fn locate(
         &mut self,
         _: &mut P,
-        _: Option<&Config<'_>>,
+        _: Option<&Entry<'_>>,
         _: &mut Located,
     ) -> Result<(), BootError> {
         Err(BootError::NotImplemented("stage 4: NTFS + image"))
+    }
+    fn efi_image(&mut self, _: &mut P) -> Result<&[u8], BootError> {
+        Err(BootError::NotImplemented("stage 4: efi_file read"))
     }
 }
 

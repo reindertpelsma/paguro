@@ -8,6 +8,7 @@ use mock::*;
 use paguro_boot::platform::{Grey, Input, Notice, Row, Screen};
 use paguro_boot::{BootError, Outcome};
 use paguro_core::bootstrap;
+use paguro_core::config::Efi;
 use paguro_core::guid::{EFI_GLOBAL_VARIABLE, Guid, PAGURO_VENDOR};
 use paguro_core::handoff::{Rung, state};
 use paguro_core::seal::{self, Kind};
@@ -57,8 +58,27 @@ fn happy_path_tpm_rung() {
     assert_eq!(h.state, 0);
     assert_eq!(h.volume.partition, VOLUME);
     assert_eq!((h.volume.first_lba, h.volume.sectors), (64, 256));
-    assert_eq!(h.images()[0].name, "debian");
-    assert_eq!((h.images()[0].mft_record, h.images()[0].mft_seq), (1234, 7));
+    let root = h.root.unwrap();
+    assert_eq!(root.name, "debian");
+    assert_eq!((root.mft_record, root.mft_seq), (1234, 7));
+    assert_eq!(h.efi_file, None);
+    assert_eq!(h.efi_disk, None, "efi_disk defaults to root: not forwarded");
+    let saw = w.v.saw_entry.clone().unwrap();
+    assert_eq!(
+        (saw.name.as_str(), saw.volume, saw.root.as_deref()),
+        ("debian", VOLUME, Some("\\paguro\\debian.vhd"))
+    );
+    assert_eq!(
+        saw.efi,
+        format!(
+            "{:?}",
+            Efi::Disk {
+                disk: "\\paguro\\debian.vhd",
+                path: paguro_core::config::DEFAULT_EFI
+            }
+        ),
+        "efi_disk defaults to root, efi to the removable-media path"
+    );
     assert_eq!(h.pcrs.mask, 0x95);
     let t = w.m.tpm.as_ref().unwrap();
     assert_eq!(&h.pcrs.values[..32], &t.pcrs[0]);
@@ -176,7 +196,7 @@ fn recovery_never_tokenises_the_ini() {
     // A hostile file: if parsed it would fail (ConfigInvalid) and name a
     // volume that does not exist. Recovery must hash it and nothing else.
     let mut w = World::new();
-    let hostile = b"[Paguro]\nversion=1\nvolume=deadbeef-0000-0000-0000-000000000000\n[Image.x]\nbogus line\n".to_vec();
+    let hostile = b"[Paguro]\nversion=1\ndefault=x\n[Boot.x]\nvolume=deadbeef-0000-0000-0000-000000000000\nbogus line\n".to_vec();
     w.set_ini(hostile, false);
     w.v.recovery = Some((RECOVERY_KEY, VMK));
     w.m.input(Input::Recover)
@@ -247,7 +267,7 @@ fn deleting_the_seal_cannot_skip_the_ratchet() {
     a.run();
     let mut b = World::new();
     b.with_tpm_seal(PIN);
-    b.m.files.remove(Kind::Tpm.file_name());
+    b.m.files.remove(&seal_file(&VOLUME, Kind::Tpm));
     b.run();
     assert_ne!(a.m.extends()[0], b.m.extends()[0]);
     assert_eq!(b.m.extends()[0], boot_taint());
@@ -355,7 +375,7 @@ fn bootstrap_world(pw: &str) -> World {
     let salt = [0x99; 16];
     let ph = pass_hash(pw, &salt);
     let wrapped = kdf::xor32(&kdf::bootstrap_key(&ph, &salt), &VMK);
-    let od = bootstrap::write_optional_data(&salt, &wrapped);
+    let od = bootstrap::write_optional_data(&VOLUME, &salt, &wrapped);
     let mut lo = [0u8; 512];
     let n =
         bootstrap::write_load_option(1, "paguro setup", "\\EFI\\paguro\\paguro.efi", &od, &mut lo)
@@ -380,8 +400,12 @@ fn bootstrap_entry_is_deleted_first() {
 fn bootstrap_entry_deleted_even_when_the_boot_fails() {
     let mut w = bootstrap_world(PIN);
     w.m.disks.clear();
+    w.m.input(Input::Recover);
     assert_eq!(w.run(), Outcome::Halted(BootError::NoVolume));
     assert_eq!(w.m.events[0], Event::DeleteVar("Boot0005".into()));
+    // The payload's volume is missing: the same choice as a configured one.
+    assert!(w.m.screens.contains(&Screen::Notice(Notice::VolumeMissing)));
+    assert!(w.m.logged(&format!("configured volume {VOLUME} not found")));
 }
 
 #[test]
@@ -427,8 +451,10 @@ fn bootstrap_provisions_a_seal_that_unseals_next_boot() {
     assert_eq!(h.state, state::CONFIG_UNVERIFIED);
     let ini = h.config.expect("authored config").to_vec();
     let cfg = paguro_core::config::parse(&ini).unwrap();
-    assert_eq!(cfg.volume, VOLUME);
-    assert_eq!(cfg.default_image().unwrap().path, "\\paguro\\debian.vhd");
+    let e = cfg.default_entry().unwrap();
+    assert_eq!(e.volume, VOLUME, "the bootstrap payload's volume");
+    assert_eq!(e.root, Some("\\paguro\\debian.vhd"));
+    assert_eq!(e.efi_disk(), e.root);
     let prov = h.provision.expect("provisioned seal");
     assert_eq!(prov.pcrs, Some(seal::Pcrs::V1));
     assert!(w.m.logged(&format!(
@@ -450,7 +476,9 @@ fn bootstrap_provisions_a_seal_that_unseals_next_boot() {
     next.m.tpm = Some(tpm);
     next.m.put_var("PaguroB", PAGURO_VENDOR, 3, &b);
     next.set_ini(ini, true);
-    next.m.files.insert(Kind::Tpm.file_name().into(), seal_file);
+    next.m
+        .files
+        .insert(mock::seal_file(&VOLUME, Kind::Tpm), seal_file);
     pin(&mut next, PIN);
     assert_eq!(next.run(), Outcome::Started(Rung::Tpm));
     assert_eq!(next.m.decoded().vmk, Some(&VMK));
@@ -711,7 +739,8 @@ fn handoff_contents_per_rung() {
         assert_eq!(h.provision.is_some(), provision, "{rung:?}");
         assert_eq!(h.vmk.is_some(), rung != Rung::Unencrypted, "{rung:?}");
         assert_eq!(h.b.len(), 32);
-        assert_eq!(h.image_count, 1);
+        assert_eq!(h.root.unwrap().name, "debian");
+        assert_eq!(h.efi_disk, None);
         // The published blob never outlives publication in the loader's buffer
         // (checked indirectly: it decodes, and B matches the variable).
         assert_eq!(h.b, &w.m.var("PaguroB").unwrap().1[..]);
@@ -870,11 +899,11 @@ fn start_windows_without_an_entry() {
 fn malformed_seal_files_are_ignored() {
     let mut w = World::new();
     w.m.files.insert(
-        Kind::Tpm.file_name().into(),
+        seal_file(&VOLUME, Kind::Tpm),
         b"PGRTPM\x00\x01garbage".to_vec(),
     );
     w.m.files
-        .insert(Kind::Passphrase.file_name().into(), vec![0; 5000]);
+        .insert(seal_file(&VOLUME, Kind::Passphrase), vec![0; 5000]);
     w.v.clear_key = Some(VMK);
     assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
     assert!(w.m.logged("tpm_seal.bin refused"));
@@ -1021,4 +1050,335 @@ fn a_maximal_configuration_is_forwarded_whole() {
     let h = w.m.handoff.as_ref().expect("handoff built");
     let d = paguro_core::handoff::decode(h).expect("decodes");
     assert_eq!(d.config, Some(&expected[..]));
+}
+
+// ---------------------------------------------------------------------------
+// Boot entries: per-entry volumes, per-volume seals
+
+const OTHER: Guid = Guid([0x6d; 16]);
+
+/// A configuration with `entries` as `(name, volume, extra lines)`.
+fn entries_ini(default: &str, entries: &[(&str, Guid, &str)]) -> Vec<u8> {
+    let mut s = format!("[Paguro]\nversion = 1\ndefault = {default}\n");
+    for (name, vol, extra) in entries {
+        s.push_str(&format!(
+            "\n[Boot.{name}]\nvolume = {vol}\nroot = \\paguro\\{name}.vhd\n{extra}"
+        ));
+    }
+    s.push_str("\n[Passphrase]\nenabled = 1\n");
+    s.into_bytes()
+}
+
+#[test]
+fn an_entry_on_a_second_disks_volume_is_found() {
+    let mut w = World::new();
+    w.m.disks = vec![disk(&[(VOLUME, BITLOCKER)]), disk(&[(OTHER, BITLOCKER)])];
+    w.set_ini(
+        entries_ini("arch", &[("debian", VOLUME, ""), ("arch", OTHER, "")]),
+        true,
+    );
+    w.v.clear_key = Some(VMK);
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    let (part, _) = w.v.opened.unwrap();
+    assert_eq!((part.guid, part.disk), (OTHER, 1));
+    assert!(w.m.logged(&format!("volume {OTHER} (BitLocker) on disk 1")));
+    assert!(!w.m.screens.contains(&Screen::SelectVolume { count: 2 }));
+    let h = w.m.decoded();
+    assert_eq!(h.volume.partition, OTHER);
+    assert_eq!(h.root.unwrap().name, "arch");
+    assert_eq!(w.v.saw_entry.clone().unwrap().volume, OTHER);
+}
+
+#[test]
+fn seals_are_read_from_the_volume_directory() {
+    let mut w = World::new();
+    w.m.disks = vec![disk(&[(VOLUME, BITLOCKER)]), disk(&[(OTHER, BITLOCKER)])];
+    w.set_ini(entries_ini("arch", &[("arch", OTHER, "")]), true);
+    w.with_passphrase_seal("pw");
+    // Move the seal into the entry's volume directory.
+    let f =
+        w.m.files
+            .remove(&seal_file(&VOLUME, Kind::Passphrase))
+            .unwrap();
+    w.m.files.insert(seal_file(&OTHER, Kind::Passphrase), f);
+    assert!(
+        seal_file(&OTHER, Kind::Passphrase).starts_with("6d6d6d6d-6d6d-6d6d-6d6d-6d6d6d6d6d6d\\")
+    );
+    w.m.input(Input::Select(Row::RecoveryPassphrase))
+        .secret("pw");
+    assert_eq!(w.run(), Outcome::Started(Rung::Passphrase));
+    assert_eq!(w.m.decoded().volume.partition, OTHER);
+}
+
+#[test]
+fn seals_for_a_different_volume_are_ignored() {
+    // Seals exist for VOLUME (and at the old flat path), but the entry names
+    // OTHER: none of them is offered, and the ratchet sees no tpm_seal.bin.
+    let mut w = World::new();
+    w.m.disks = vec![disk(&[(VOLUME, BITLOCKER)]), disk(&[(OTHER, BITLOCKER)])];
+    w.set_ini(entries_ini("arch", &[("arch", OTHER, "")]), true);
+    w.with_tpm_seal(PIN).with_passphrase_seal("pw");
+    let flat = w.m.files[&seal_file(&VOLUME, Kind::Passphrase)].clone();
+    w.m.files.insert(Kind::Passphrase.file_name().into(), flat);
+    w.v.recovery = Some((RECOVERY_KEY, VMK));
+    w.m.input(Input::Select(Row::RecoveryKey))
+        .secret(RECOVERY_PW);
+    assert_eq!(w.run(), Outcome::Started(Rung::RecoveryKey));
+    assert_eq!(
+        w.m.extends(),
+        vec![boot_taint()],
+        "sentinel, not the load taint"
+    );
+    assert!(w.m.logged("(no tpm_seal.bin)"));
+    let menu = unlock_menus(&w.m)[0];
+    assert!(!menu.recovery_passphrase);
+    assert!(!menu.password_or_pin);
+    assert_eq!(menu.tpm, Err(Grey::Unavailable));
+}
+
+#[test]
+fn recovery_reads_the_enumerated_volumes_seals() {
+    // The configured volume is gone; recovery picks OTHER by enumeration and
+    // offers OTHER's passphrase seal, not VOLUME's.
+    let mut w = World::new();
+    w.m.disks = vec![disk(&[(OTHER, BITLOCKER)])];
+    w.with_passphrase_seal("pw");
+    let f = w.m.files[&seal_file(&VOLUME, Kind::Passphrase)].clone();
+    w.m.files.insert(seal_file(&OTHER, Kind::Passphrase), f);
+    w.m.input(Input::Recover)
+        .input(Input::Select(Row::RecoveryPassphrase))
+        .secret("pw");
+    assert_eq!(w.run(), Outcome::Started(Rung::Passphrase));
+    assert_eq!(w.v.opened.unwrap().0.guid, OTHER);
+    // And without OTHER's seal there is nothing to offer.
+    let mut w = World::new();
+    w.m.disks = vec![disk(&[(OTHER, BITLOCKER)])];
+    w.with_passphrase_seal("pw");
+    w.m.input(Input::Recover);
+    w.run();
+    assert!(!unlock_menus(&w.m)[0].recovery_passphrase);
+}
+
+#[test]
+fn the_default_entry_is_the_one_booted() {
+    let mut w = World::new();
+    w.set_ini(
+        entries_ini(
+            "second",
+            &[
+                ("first", VOLUME, ""),
+                (
+                    "second",
+                    VOLUME,
+                    "efi = \\EFI\\systemd\\systemd-bootx64.efi\n",
+                ),
+            ],
+        ),
+        true,
+    );
+    w.v.clear_key = Some(VMK);
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert!(w.m.logged("stage2 ok (2 entries, default second)"));
+    let saw = w.v.saw_entry.clone().unwrap();
+    assert_eq!(saw.name, "second");
+    assert_eq!(saw.root.as_deref(), Some("\\paguro\\second.vhd"));
+    assert!(saw.efi.contains("systemd-bootx64.efi"), "{}", saw.efi);
+    let h = w.m.decoded();
+    assert_eq!(h.root.unwrap().name, "second");
+    assert_eq!(h.efi_disk, None);
+}
+
+#[test]
+fn a_separate_efi_disk_is_forwarded_and_a_defaulted_one_is_not() {
+    // Separate: both IMAGE records, same entry name, different files.
+    let mut w = World::new();
+    w.set_ini(
+        entries_ini(
+            "debian",
+            &[("debian", VOLUME, "efi_disk = \\paguro\\esp.vhd\n")],
+        ),
+        true,
+    );
+    w.v.clear_key = Some(VMK);
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    let saw = w.v.saw_entry.clone().unwrap();
+    assert_eq!(
+        (
+            saw.root.as_deref(),
+            saw.efi.contains("\\\\paguro\\\\esp.vhd")
+        ),
+        (Some("\\paguro\\debian.vhd"), true),
+        "{}",
+        saw.efi
+    );
+    let h = w.m.decoded();
+    let root = h.root.unwrap();
+    assert_eq!((root.mft_record, root.mft_seq), (1234, 7));
+    let e = h.efi_disk.expect("separate efi disk forwarded");
+    assert_eq!((e.name, e.mft_record, e.mft_seq), ("debian", 4321, 3));
+
+    // Written out but equal to root: the same as absent.
+    let mut w = World::new();
+    w.set_ini(
+        entries_ini(
+            "debian",
+            &[("debian", VOLUME, "efi_disk = \\paguro\\debian.vhd\n")],
+        ),
+        true,
+    );
+    w.v.clear_key = Some(VMK);
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert_eq!(w.m.decoded().efi_disk, None);
+
+    // The volume layer resolving both paths to one file is not forwarded twice.
+    let mut w = World::new();
+    w.set_ini(
+        entries_ini(
+            "debian",
+            &[("debian", VOLUME, "efi_disk = \\paguro\\link.vhd\n")],
+        ),
+        true,
+    );
+    w.v.clear_key = Some(VMK);
+    w.v.efi_disk = (1234, 7);
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert_eq!(w.m.decoded().efi_disk, None);
+}
+
+#[test]
+fn first_boot_unlocks_the_bootstrap_payloads_volume() {
+    // Two BitLocker volumes: no question asked, the payload names VOLUME, and
+    // the authored configuration (and so its seal) names it too.
+    let mut w = bootstrap_world(PIN);
+    w.m.disks = vec![disk(&[(OTHER, BITLOCKER)]), disk(&[(VOLUME, BITLOCKER)])];
+    w.v.efi_disk_path = Some("\\paguro\\esp.vhd");
+    pin(&mut w, PIN);
+    assert_eq!(w.run(), Outcome::Started(Rung::Bootstrap));
+    assert!(
+        !w.m.screens
+            .iter()
+            .any(|s| matches!(s, Screen::SelectVolume { .. }))
+    );
+    assert_eq!(w.v.opened.unwrap().0.guid, VOLUME);
+    assert_eq!(w.v.locate_saw_config, Some(false));
+    let h = w.m.decoded();
+    let cfg = paguro_core::config::parse(h.config.unwrap()).unwrap();
+    let e = cfg.default_entry().unwrap();
+    assert_eq!((e.name, e.volume), ("debian", VOLUME));
+    assert_eq!(
+        e.efi,
+        Efi::Disk {
+            disk: "\\paguro\\esp.vhd",
+            path: paguro_core::config::DEFAULT_EFI
+        }
+    );
+    assert!(h.provision.is_some());
+    assert_eq!(h.efi_disk.map(|e| e.mft_record), Some(4321));
+}
+
+// ---------------------------------------------------------------------------
+// efi_file: a UEFI image directly on NTFS
+
+#[test]
+fn an_efi_file_entry_is_started_from_a_buffer() {
+    let mut w = World::new();
+    w.set_ini(
+        entries_ini("debian", &[])
+            .into_iter()
+            .chain(
+                format!("\n[Boot.debian]\nvolume = {VOLUME}\nefi_file = \\paguro\\rescue.efi\n")
+                    .into_bytes(),
+            )
+            .collect(),
+        true,
+    );
+    w.v.clear_key = Some(VMK);
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    let saw = w.v.saw_entry.clone().unwrap();
+    assert_eq!(saw.root, None);
+    assert_eq!(saw.efi, format!("{:?}", Efi::File("\\paguro\\rescue.efi")));
+    // LoadImage(SourceBuffer) with the bytes stage 4 read; no device path.
+    assert_eq!(
+        w.m.events.last(),
+        Some(&Event::StartBuffer(b"MZ-fake-uki".to_vec()))
+    );
+    assert!(!w.m.events.iter().any(|e| matches!(e, Event::Start(_))));
+    let h = w.m.decoded();
+    assert_eq!(h.root, None, "no root: none forwarded");
+    assert_eq!(h.efi_disk, None);
+    let f = h.efi_file.expect("efi file forwarded");
+    assert_eq!((f.name, f.mft_record, f.mft_seq), ("debian", 777, 1));
+}
+
+#[test]
+fn an_efi_file_beside_a_root_forwards_both() {
+    let mut w = World::new();
+    w.set_ini(
+        entries_ini(
+            "debian",
+            &[("debian", VOLUME, "efi_file = \\paguro\\uki.efi\n")],
+        ),
+        true,
+    );
+    w.v.clear_key = Some(VMK);
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    let h = w.m.decoded();
+    assert_eq!(h.root.map(|r| r.mft_record), Some(1234));
+    assert_eq!(h.efi_file.map(|r| r.mft_record), Some(777));
+    assert_eq!(h.efi_disk, None);
+}
+
+#[test]
+fn an_efi_file_entry_reaches_the_stage4_stub_with_its_target() {
+    // Stage 4 is not written: the stub is reached with the configured entry,
+    // and nothing is published or started.
+    let mut w = World::new();
+    w.set_ini(
+        format!(
+            "[Paguro]\nversion = 1\ndefault = rescue\n\n[Boot.rescue]\nvolume = {VOLUME}\nefi_file = \\paguro\\rescue.efi\n"
+        )
+        .into_bytes(),
+        true,
+    );
+    w.v.clear_key = Some(VMK);
+    w.v.stub_stage4 = true;
+    assert_eq!(
+        w.run(),
+        Outcome::Halted(BootError::NotImplemented("stage 4: NTFS + image"))
+    );
+    let saw = w.v.saw_entry.clone().expect("stage 4 was asked");
+    assert_eq!(
+        (saw.name.as_str(), saw.volume, saw.root),
+        ("rescue", VOLUME, None)
+    );
+    assert_eq!(saw.efi, format!("{:?}", Efi::File("\\paguro\\rescue.efi")));
+    assert!(w.m.handoff.is_none());
+    assert!(
+        !w.m.events
+            .iter()
+            .any(|e| matches!(e, Event::Start(_) | Event::StartBuffer(_)))
+    );
+    // The production stub refuses the buffer read too.
+    let mut m = Mock::new();
+    let mut stub = paguro_boot::Unimplemented;
+    let r = paguro_boot::Volume::<Mock>::efi_image(&mut stub, &mut m).map(<[u8]>::to_vec);
+    assert_eq!(
+        r.err(),
+        Some(BootError::NotImplemented("stage 4: efi_file read"))
+    );
+}
+
+#[test]
+fn first_boot_can_author_an_efi_file_entry() {
+    let mut w = bootstrap_world(PIN);
+    w.v.efi_file_path = Some("\\paguro\\rescue.efi");
+    pin(&mut w, PIN);
+    assert_eq!(w.run(), Outcome::Started(Rung::Bootstrap));
+    let h = w.m.decoded();
+    let cfg = paguro_core::config::parse(h.config.unwrap()).unwrap();
+    let e = cfg.default_entry().unwrap();
+    assert_eq!((e.root, e.efi), (None, Efi::File("\\paguro\\rescue.efi")));
+    assert_eq!(h.root, None);
+    assert!(h.efi_file.is_some());
+    assert!(matches!(w.m.events.last(), Some(Event::StartBuffer(_))));
 }

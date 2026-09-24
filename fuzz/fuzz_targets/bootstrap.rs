@@ -11,7 +11,7 @@ fuzz_target!(|data: &[u8]| {
         assert!(lo.description.len() + lo.file_path.len() + lo.optional_data.len() + 8 <= data.len());
         let _ = lo.is_windows_boot_manager();
         if let Ok(b) = bootstrap::parse_optional_data(lo.optional_data) {
-            let od = bootstrap::write_optional_data(b.salt, b.wrapped_vmk);
+            let od = bootstrap::write_optional_data(&b.volume, b.salt, b.wrapped_vmk);
             assert_eq!(&od[..], lo.optional_data);
         }
     }

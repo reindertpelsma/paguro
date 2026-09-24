@@ -2,13 +2,11 @@
 [Paguro]
 version = 1
 default = debian
-volume = 5c5c5c5c-5c5c-5c5c-5c5c-5c5c5c5c5c5c
 
-[Image.debian]
-path = \paguro\debian.vhd
-format = vhd
-expose = block
-chain = \EFI\BOOT\BOOTX64.EFI
+[Boot.debian]
+volume = 5c5c5c5c-5c5c-5c5c-5c5c-5c5c5c5c5c5c
+root = \paguro\debian.vhd
+efi = \EFI\BOOT\BOOTX64.EFI
 
 [TPM]
 enabled = 1

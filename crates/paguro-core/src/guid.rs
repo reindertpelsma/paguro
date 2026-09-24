@@ -137,6 +137,10 @@ pub const EFI_GLOBAL_VARIABLE: Guid = Guid([
 pub const GPT_BASIC_DATA: Guid = Guid([
     0xa2, 0xa0, 0xd0, 0xeb, 0xe5, 0xb9, 0x33, 0x44, 0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7,
 ]);
+/// `c12a7328-f81f-11d2-ba4b-00a0c93ec93b`: EFI System Partition.
+pub const GPT_ESP: Guid = Guid([
+    0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
+]);
 
 #[cfg(test)]
 mod tests {
@@ -150,6 +154,7 @@ mod tests {
             (PCR12_EVENT_TAG, "23fc424e-17ab-4b60-bf91-2bd392852091"),
             (EFI_GLOBAL_VARIABLE, "8be4df61-93ca-11d2-aa0d-00e098032b8c"),
             (GPT_BASIC_DATA, "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"),
+            (GPT_ESP, "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"),
         ];
         for (g, s) in cases {
             assert_eq!(Guid::parse(s), Ok(g), "{s}");

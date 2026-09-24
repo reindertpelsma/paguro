@@ -414,6 +414,19 @@ impl Platform for Efi {
         boot::start_image(img).map_err(|e| dev(&e))
     }
 
+    fn load_start_image_buffer(&mut self, image: &[u8]) -> Result<(), PlatformError> {
+        // LoadImage verifies it (Secure Boot / shim) exactly as by path.
+        let img = boot::load_image(
+            boot::image_handle(),
+            LoadImageSource::FromBuffer {
+                buffer: image,
+                file_path: None,
+            },
+        )
+        .map_err(|e| dev(&e))?;
+        boot::start_image(img).map_err(|e| dev(&e))
+    }
+
     fn reset(&mut self) {
         runtime::reset(ResetType::COLD, Status::SUCCESS, None)
     }

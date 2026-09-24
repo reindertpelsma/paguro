@@ -15,7 +15,7 @@ use paguro_boot::tpm::{CreatedObject, Tpm, policy_digest};
 use paguro_core::guid::Guid;
 use paguro_core::handoff;
 use paguro_core::seal::{self, Kind, Seal, Sealed};
-use paguro_core::{bootstrap, config, gpt};
+use paguro_core::{bootstrap, config, disk, gpt};
 use std::path::PathBuf;
 
 fn dir(target: &str) -> Option<PathBuf> {
@@ -176,6 +176,65 @@ fn write_fuzz_seeds() {
     g.extend(&d.data[1024..1024 + gpt::MAX_ENTRY_ARRAY]);
     put("gpt", "one-partition", &g);
 
+    // ini_config: a second entry on another volume with a separate efi disk
+    let mut two = mock::ini_text(&mock::VOLUME, true);
+    two.extend_from_slice(
+        b"\n[Boot.arch]\nvolume = 6d6d6d6d-6d6d-6d6d-6d6d-6d6d6d6d6d6d\nroot = \\paguro\\arch.img\nefi_disk = \\paguro\\arch-esp.vhd\nefi = \\EFI\\systemd\\systemd-bootx64.efi\n[Boot.rescue]\nvolume = 6d6d6d6d-6d6d-6d6d-6d6d-6d6d6d6d6d6d\nefi_file = \\paguro\\rescue.efi\n",
+    );
+    config::parse(&two).unwrap();
+    put("ini_config", "two-entries", &two);
+
+    // disk: flag | file length | last 512 bytes | payload head
+    let disk_seed = |fix: u8, file_len: u64, tail: &[u8; 512], head: &[u8]| {
+        let mut v = vec![fix];
+        v.extend(file_len.to_le_bytes());
+        v.extend(tail);
+        v.extend(head);
+        v
+    };
+    let total = 140_000u32;
+    let fat = disk::build::fat32_boot_sector(total);
+    put(
+        "disk",
+        "superfloppy-raw",
+        &disk_seed(0, u64::from(total) * 512, &[0; 512], &fat),
+    );
+    let blocks = 1u64 << 16;
+    let esp = gpt::Entry {
+        type_guid: paguro_core::guid::GPT_ESP,
+        unique_guid: Guid([0xe5; 16]),
+        first_lba: 2048,
+        last_lba: 4095,
+        attributes: 0,
+        name: [0; 36],
+    };
+    let mut h = [0u8; 512];
+    let mut a = [0u8; gpt::MAX_ENTRY_ARRAY];
+    gpt::build::write(&Guid([0xd1; 16]), blocks, 512, &[esp], 128, &mut h, &mut a).unwrap();
+    let mut head = vec![0u8; disk::HEAD_LEN];
+    head[510..512].copy_from_slice(&[0x55, 0xaa]);
+    head[512..1024].copy_from_slice(&h);
+    head[1024..].copy_from_slice(&a);
+    // As a fixed VHD: the footer names the payload.
+    let mut footer = [0u8; 512];
+    footer[0..8].copy_from_slice(b"conectix");
+    footer[40..48].copy_from_slice(&(blocks * 512).to_be_bytes());
+    footer[48..56].copy_from_slice(&(blocks * 512).to_be_bytes());
+    footer[60..64].copy_from_slice(&2u32.to_be_bytes());
+    let sum = footer
+        .iter()
+        .fold(0u32, |acc, b| acc.wrapping_add(u32::from(*b)));
+    footer[64..68].copy_from_slice(&(!sum).to_be_bytes());
+    assert_eq!(
+        disk::detect(blocks * 512 + 512, &footer).format,
+        disk::Format::Vhd
+    );
+    put(
+        "disk",
+        "gpt-esp-vhd",
+        &disk_seed(1, blocks * 512 + 512, &footer, &head),
+    );
+
     // handoff: from a real mock boot
     let mut w = mock::World::new();
     w.v.clear_key = Some(mock::VMK);
@@ -185,9 +244,33 @@ fn write_fuzz_seeds() {
     let mut b = vec![0u8; handoff::MAX_LEN];
     let n = handoff::encode(&handoff::Handoff { config: None, ..h }, &mut b).unwrap();
     put("handoff", "no-config", &b[..n]);
+    let root = h.root.unwrap();
+    let other = Some(handoff::ImageId {
+        mft_record: root.mft_record + 1,
+        ..root
+    });
+    let n = handoff::encode(
+        &handoff::Handoff {
+            efi_disk: other,
+            ..h
+        },
+        &mut b,
+    )
+    .unwrap();
+    put("handoff", "separate-efi-disk", &b[..n]);
+    let n = handoff::encode(
+        &handoff::Handoff {
+            root: None,
+            efi_file: other,
+            ..h
+        },
+        &mut b,
+    )
+    .unwrap();
+    put("handoff", "efi-file-only", &b[..n]);
 
     // bootstrap
-    let od = bootstrap::write_optional_data(&[1; 16], &[2; 32]);
+    let od = bootstrap::write_optional_data(&mock::VOLUME, &[1; 16], &[2; 32]);
     let mut lo = [0u8; 512];
     let n =
         bootstrap::write_load_option(1, "paguro setup", "\\EFI\\paguro\\paguro.efi", &od, &mut lo)
