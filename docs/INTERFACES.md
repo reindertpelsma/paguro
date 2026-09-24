@@ -675,17 +675,37 @@ kernel stays the default, instead of an initramfs that cannot find its root.
 Ordering: DKMS runs before initramfs generation (`/etc/kernel/postinst.d/dkms`
 before `initramfs-tools`; dracut and `kernel-install` plugins likewise).
 
-**Secure Boot: the module is signed with a key made on the machine.** Under
-lockdown an unsigned module is refused, and the root cannot mount. DKMS's own
-signing key (generated at install) is enrolled in MOK:
+**Secure Boot: one machine key, enrolled once.** There is no paguro project
+certificate. `paguro install` generates a **self-signed MOK key pair for this
+machine**, and everything paguro-side is signed with it:
 
-- WSL2 has no efivarfs, so `mokutil` cannot run at install time. The Windows
-  tool writes shim's `MokNew`/`MokAuth` variables itself
-  (`SetFirmwareEnvironmentVariable`), queuing the DKMS key together with
-  paguro's own certificate, so the first boot shows **one** MokManager
-  enrolment.
-- The private key lives in the image and is sealed like the design's other
-  MOK key (DESIGN §6, "Keeping the MOK private key out of Windows' reach").
+| Signed with the machine key | When |
+|---|---|
+| `paguro.efi` | at install, and on each paguro update (by Linux, below) |
+| `dm-paguro.ko` | by DKMS, on every kernel install, for any distribution |
+| locally built UKIs (`ukify`) | on each kernel install, where the distribution does not sign its own |
+
+The chain is firmware `db` → a Microsoft-signed shim on the real ESP (a
+distribution's `shim-signed`, redistributed unchanged) → `MokList` → the machine
+key. Distribution-signed GRUB and kernels keep verifying through the
+distribution's own shim (§3.2).
+
+- **Enrolment, once:** WSL2 has no efivarfs, so `mokutil` cannot run at install.
+  The Windows tool writes shim's `MokNew`/`MokAuth` variables itself
+  (`SetFirmwareEnvironmentVariable`) and shows the one-time password; the next
+  boot shows MokManager once. After that no install, distribution or kernel
+  update ever asks again. With Secure Boot off, nothing is enrolled.
+- **Where the private key lives:** created inside the WSL2 install container and
+  written into the image, where DKMS finds it. On the first native boot Linux
+  **seals it to PCR 11** (DESIGN §6, "Keeping the MOK private key out of
+  Windows' reach") and deletes the plaintext; the install container is
+  destroyed. Before that first boot the key has only ever existed on a machine
+  where Windows is, at that moment, the trusted installer.
+- **Consequence: only Linux signs after install.** Windows never holds the key
+  again, so a compromised Windows cannot sign a bootkit that MOK would trust.
+  paguro updates are signed by Linux; the Windows repair hook (DESIGN §7) restores
+  the **already signed** `paguro.efi` from a copy kept on the ESP and never
+  re-signs.
 
 ### 11.3 Guest agent (VM mode growth) — OPEN
 
