@@ -71,6 +71,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "bde_metadata"
+path = "fuzz_targets/bde_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bde_unlock"
+path = "fuzz_targets/bde_unlock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "gpt"
 path = "fuzz_targets/gpt.rs"
 test = false

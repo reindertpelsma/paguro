@@ -77,6 +77,21 @@ jobs:
           name: fuzz-crash-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}
 
+  bde:
+    name: BitLocker reader = libbde = dislocker (INTERFACES §12.2)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install the oracles and image tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libbde-utils dislocker ntfs-3g fuse3 xz-utils
+      - run: cargo build --release -p paguro-harness --bin paguro-bde-read --bin paguro-bde-write
+      # Windows-made volumes and make.sh's generated ones, whole-volume
+      # byte comparisons; root for the FUSE mounts.
+      - run: sudo -E PAGURO_BDE_PREBUILT=1 test/fixtures/bde/diff.sh
+
   qemu:
     name: QEMU ${{ matrix.group }} (OVMF, Secure Boot, swtpm; AAVMF)
     runs-on: ubuntu-24.04
