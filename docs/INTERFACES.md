@@ -79,7 +79,9 @@ LF or CRLF. **Maximum 65 536 bytes**, read into a buffer one byte larger.
 before any section header is an error. Duplicate keys within a known section are
 an error. Unknown sections are ignored; unknown keys in a known section are an
 error (so typos are loud). Booleans are exactly `0` or `1`. In `[Boot.*]`,
-`volume` and `root` are required.
+`volume` is required, and exactly one of `root` or `efi_file` at least:
+`root` is required unless `efi_file` is set; `efi_file` excludes `efi_disk`
+and `efi`.
 
 Reference: `paguro-core::ini` (grammar) and `paguro-core::config` (schema).
 
@@ -109,6 +111,12 @@ efi_disk = \paguro\debian.vhd
 # default = the removable-media path for this architecture
 efi      = \EFI\BOOT\BOOTX64.EFI
 
+[Boot.rescue]
+volume   = 6c0a0000-0000-4000-8000-000000000000
+# a UEFI image stored directly on the NTFS volume; excludes efi_disk and efi,
+# and root becomes optional
+efi_file = \paguro\rescue.efi
+
 [TPM]
 enabled = 1
 
@@ -126,7 +134,7 @@ enabled = 0
 | `default` | entry name | must name a present `[Boot.*]` |
 | entry name | `[A-Za-z0-9_-]{1,32}` | ≤ 16 entries |
 | `volume` | GPT partition GUID | canonical 36-char form |
-| `root`, `efi_disk` | NTFS path on `volume` | ≤ 32 components, each ≤ 255 UTF-16 units, total ≤ 1024 bytes |
+| `root`, `efi_disk`, `efi_file` | NTFS path on `volume` | ≤ 32 components, each ≤ 255 UTF-16 units, total ≤ 1024 bytes |
 | `efi` | FAT path | same bounds |
 
 **Disk format is detected, not configured.** A file whose last 512 bytes are a
@@ -152,10 +160,20 @@ and the UEFI image is loaded by device path, so it inherits a `DeviceHandle`
   The loader unlocks only the chosen entry's volume, with that volume's seals
   (`\EFI\paguro\<volume-guid>\`). `root` and `efi_disk` share the entry's
   volume: two volumes for one boot would mean two unlocks before the kernel.
-- **No UEFI image directly on NTFS.** Loading from NTFS would mean either
-  `LoadImage` from a buffer, which leaves `DeviceHandle` unset and breaks
-  systemd-stub's credentials and add-ons, or our own NTFS `SimpleFileSystem`,
-  more parser for nothing a small FAT32 VHD beside it does not already give.
+- **A UEFI image directly on NTFS is allowed, as the secondary mode
+  (`efi_file`).** Reading it costs little: the loader already reads NTFS files
+  by path (the image, `hiberfil.sys`, `$Volume`). It is loaded with
+  `LoadImage(SourceBuffer)`, **never jumped to**: `LoadImage` runs Secure Boot
+  verification, and executing a buffer directly would be a Secure Boot bypass.
+  What it gives up, and why it is not the default:
+  - **no `DeviceHandle`**, so no systemd-stub credentials or add-ons and no
+    systemd-boot behind it;
+  - **kernel updates need NTFS writes**: Linux can only write the file through
+    view C, which is exclusive with the VM and puts every kernel update through
+    the NTFS dirty-bit path. A UKI inside the image's own ESP updates any time.
+
+  Its use is images Windows manages: the paguro rescue or installer UKI, which
+  the Windows tool can drop onto C: without touching the inside of a VHD.
 - **No discovery inside the ESP.** Multiple kernels, boot counting and rollback
   are systemd-boot's job: point `efi` at systemd-boot and it enumerates
   `/EFI/Linux` and `/loader/entries` off the `DeviceHandle` we gave it. The
@@ -277,7 +295,7 @@ record   type u16 | len u32 | value[len]        (no padding)
 | 5 | `B` | 32 bytes | 1 |
 | 6 | `PCRS` | mask u32 \| n×32-byte SHA-256 values (no TPM: mask `0x95`, zero values) | 1 |
 | 7 | `CONFIG` | the verified `paguro.ini` bytes | 0–1 |
-| 8 | `IMAGE` | role u8 (1 = root, 2 = efi disk) \| name len u8 \| name \| mft_record u64 \| mft_seq u16 | 1–2: the chosen entry's `root`, and its `efi_disk` when different |
+| 8 | `IMAGE` | role u8 (1 = root, 2 = efi disk, 3 = efi file) \| name len u8 \| name \| mft_record u64 \| mft_seq u16 | 0–2: the chosen entry's `root`, and its `efi_disk` or `efi_file` when different from `root` |
 | 9 | `STATE` | flags u32: 1 = hibernation image, 2 = dirty bit, 4 = config unverified (also: Secure Boot off, first boot), 8 = recovery path | 1 |
 | 10 | `RUNG` | u8: 1 tpm, 2 setuptpm, 3 passphrase, 4 recovery, 5 pin bypass, 6 bootstrap, 7 clear key (BitLocker suspended), 8 unencrypted volume | 1 |
 | 11 | `PROVISION` | sealed object, wrapped VMK, salt (as the tpm seal body), sealed against the load taint of the `CONFIG` the loader authored on this boot | 0–1 |
