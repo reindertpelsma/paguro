@@ -83,7 +83,8 @@ jobs:
           seeds=../kernel/dm-paguro/test/fuzz/corpus/ntfs
           [ ${{ matrix.target }} = runlist ] && seeds=../kernel/dm-paguro/test/fuzz/corpus/runlist
           mkdir -p corpus/${{ matrix.target }}
-          cargo fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} $seeds -- \
+          # +nightly: rust-toolchain.toml pins stable, and cargo-fuzz needs -Z flags.
+          cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} $seeds -- \
             -dict=../kernel/dm-paguro/test/fuzz/ntfs.dict -max_len=131072 \
             -max_total_time=$SECS -print_final_stats=1
       - uses: actions/upload-artifact@v4
@@ -103,8 +104,18 @@ jobs:
       - name: install build and VM-test dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq linux-headers-$(uname -r) qemu-system-x86 \
+          # linux-modules-extra: the runner's Azure kernel keeps ntfs3 (and
+          # dm-log-writes) there, not in linux-modules; the VM needs both.
+          sudo apt-get install -y -qq linux-headers-$(uname -r) \
+            linux-modules-extra-$(uname -r) qemu-system-x86 \
             busybox-static dmsetup zstd cpio
+      - name: the VM's modules are present
+        run: |
+          uname -r
+          ls /lib/modules/$(uname -r)/kernel/fs/ntfs3/ntfs3.ko* ||
+            { echo "::error::no ntfs3 module for $(uname -r)"; exit 1; }
+          ls /lib/modules/$(uname -r)/kernel/drivers/md/dm-log-writes.ko* ||
+            echo "::warning::no dm-log-writes module: its VM test will SKIP"
       - name: enable KVM if the runner has it (else TCG)
         run: |
           if [ -e /dev/kvm ]; then
