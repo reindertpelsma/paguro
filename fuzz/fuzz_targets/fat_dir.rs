@@ -1,7 +1,8 @@
 //! The recovery browser's FAT32 directory reader (INTERFACES.md §13.4):
 //! the input is a FAT32 image (sectors past its end read as zero, so seeds
 //! can be truncated). The root and each directory in it are listed; names
-//! stay within 255 UTF-16 units, listings end, and nothing panics.
+//! stay within 255 UTF-16 units, listings end, and nothing panics; a few
+//! paths are looked up with `Fs::find`.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -30,6 +31,12 @@ fuzz_target!(|data: &[u8]| {
     let Ok(fs) = Fs::open(&mut img, 1 << 40, &mut scratch) else {
         return;
     };
+    // The loader's check that `efi` exists (fat::Fs::find).
+    for p in ["\\EFI\\BOOT\\BOOTX64.EFI", "\\a", "\\x\\y\\z.efi"] {
+        if let Ok(f) = fs.find(&mut img, p, &mut scratch) {
+            let _ = (f.is_dir, f.size, f.cluster);
+        }
+    }
     let mut dirs: Vec<Vec<u16>> = Vec::new();
     let mut n = 0u32;
     let _ = fs.list(&mut img, "\\", &mut scratch, |e| {
