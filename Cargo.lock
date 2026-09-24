@@ -293,6 +293,7 @@ dependencies = [
  "paguro-boot",
  "paguro-core",
  "paguro-crypto",
+ "paguro-ui",
  "sha2",
  "uefi",
 ]

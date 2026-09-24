@@ -4,13 +4,17 @@
 //! types, bounds reads, and reports failures as values. Protocols are opened
 //! per call and closed on return.
 
-use core::fmt::{self, Write};
+use core::fmt;
 use core::ptr::NonNull;
 
 use log::info;
-use paguro_boot::platform::{DiskInfo, Input, Platform, PlatformError, Screen};
-use paguro_boot::ui::{self, Key, Prompt, Reaction};
+
+use crate::console::Out;
+use crate::gop::{self, Gop};
+use paguro_boot::platform::{DirView, DiskInfo, Input, Platform, PlatformError, Screen};
+use paguro_boot::ui::Key;
 use paguro_core::guid::Guid;
+use paguro_ui::driver::{self, Console, Session};
 use uefi::boot::{
     self, AllocateType, LoadImageSource, MemoryType, OpenProtocolAttributes, OpenProtocolParams,
     SearchType,
@@ -34,6 +38,9 @@ pub struct Efi {
     disks: [Option<Handle>; MAX_DISKS],
     disk_count: usize,
     bounce: NonNull<u8>,
+    /// The graphical front end; `None`: the text console.
+    gop: Option<Gop>,
+    session: Session,
 }
 
 fn dev(e: &uefi::Error<impl fmt::Debug>) -> PlatformError {
@@ -57,10 +64,16 @@ impl Efi {
             BOUNCE / 4096,
         )
         .map_err(|e| dev(&e))?;
+        let gop = gop::take_display();
+        if gop.is_none() {
+            info!("paguro: no usable graphics output, text console");
+        }
         let mut me = Efi {
             disks: [None; MAX_DISKS],
             disk_count: 0,
             bounce,
+            gop,
+            session: Session::new(),
         };
         me.scan_disks();
         Ok(me)
@@ -102,7 +115,7 @@ impl Efi {
 
 /// Open a protocol without taking it from its driver (block devices are held
 /// by the partition driver; exclusive opens would disconnect it).
-fn open_get<P: uefi::proto::ProtocolPointer + ?Sized>(
+pub(crate) fn open_get<P: uefi::proto::ProtocolPointer + ?Sized>(
     h: Handle,
 ) -> uefi::Result<boot::ScopedProtocol<P>> {
     // SAFETY: GetProtocol does not track the open; the handle stays valid for
@@ -122,7 +135,7 @@ fn open_get<P: uefi::proto::ProtocolPointer + ?Sized>(
 
 /// `EFI_INPUT_KEY` → [`Key`]. Scan codes: UEFI 2.10 §12.3, Table 12-4
 /// (`SCAN_UP` 0x01 … `SCAN_ESC` 0x17), as the `uefi` crate names them.
-fn decode_key(k: UKey) -> Option<Key> {
+pub(crate) fn decode_key(k: UKey) -> Option<Key> {
     match k {
         UKey::Special(s) => match s {
             ScanCode::ESCAPE => Some(Key::Escape),
@@ -153,7 +166,8 @@ fn decode_key(k: UKey) -> Option<Key> {
     }
 }
 
-fn read_key() -> Key {
+/// A key from `SimpleTextInput` (no modifiers).
+pub(crate) fn read_key() -> Key {
     loop {
         let ev = uefi::system::with_stdin(|i| i.wait_for_key_event().ok());
         if let Some(ev) = ev {
@@ -167,11 +181,15 @@ fn read_key() -> Key {
     }
 }
 
-struct Out;
+/// The text console for the no-GOP prompt.
+struct Tty;
 
-impl Write for Out {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        uefi::system::with_stdout(|o| o.write_str(s))
+impl Console for Tty {
+    fn write_str(&mut self, s: &str) {
+        let _ = fmt::Write::write_str(&mut Out, s);
+    }
+    fn read_key(&mut self) -> Key {
+        gop::read_key()
     }
 }
 
@@ -374,24 +392,16 @@ impl Platform for Efi {
     }
 
     fn prompt(&mut self, screen: &Screen, secret: &mut [u8]) -> Input {
-        let _ = ui::render(screen, &mut Out);
-        if !ui::needs_key(screen) {
-            return Input::Continue;
+        match self.gop.as_mut() {
+            Some(g) => driver::prompt(g, &mut self.session, screen, secret),
+            None => driver::prompt_text(&mut Tty, screen, secret),
         }
-        let mut p = Prompt::new(screen, secret);
-        loop {
-            match p.feed(screen, read_key(), secret) {
-                Reaction::Redraw => {
-                    if let Some(f) = p.field() {
-                        let _ = ui::render_field_line(f, secret, &mut Out);
-                    }
-                }
-                Reaction::Ignore | Reaction::NextTheme => {}
-                Reaction::Done(i) => {
-                    let _ = Out.write_str("\r\n");
-                    return i;
-                }
-            }
+    }
+
+    fn prompt_browse(&mut self, screen: &Screen, dir: &DirView<'_>) -> Input {
+        match self.gop.as_mut() {
+            Some(g) => driver::prompt_browse(g, &mut self.session, screen, dir),
+            None => driver::prompt_browse_text(&mut Tty, screen, dir),
         }
     }
 

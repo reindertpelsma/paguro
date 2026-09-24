@@ -18,6 +18,7 @@
 #![cfg_attr(test, allow(clippy::indexing_slicing))]
 
 pub mod canvas;
+pub mod display;
 pub mod draw;
 pub mod driver;
 pub mod fixtures;

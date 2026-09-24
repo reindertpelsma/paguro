@@ -13,10 +13,14 @@
 //! - it **never writes to disk** (firmware variables only);
 //! - it **never chainloads Windows** — "Start Windows" is `BootNext` + reset;
 //! - it implements **no asymmetric cryptography** (shim verifies the UKI);
-//! - the theme is compiled in; no attacker-authored display data is parsed.
+//! - the theme is compiled in (`paguro-ui`, built from `themes/` by
+//!   `PAGURO_THEME`/`PAGURO_LANG`); no PNG, TOML or font parser is linked, and
+//!   no attacker-authored display data is parsed.
 #![no_main]
 #![no_std]
 
+mod console;
+mod gop;
 mod platform;
 
 /// SBAT metadata (shim's revocation scheme). shim refuses to start a second
@@ -59,6 +63,9 @@ fn main() -> Status {
     if uefi::helpers::init().is_err() {
         return Status::ABORTED;
     }
+    // Our own log backend: ConOut until the graphical front end takes the
+    // display, the serial port after (console.rs).
+    console::init_logger();
     info!("paguro {}", env!("CARGO_PKG_VERSION"));
     let Some(bufs) = buffers() else {
         info!("paguro: out of memory");
