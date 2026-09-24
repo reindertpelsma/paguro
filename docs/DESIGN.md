@@ -2878,7 +2878,7 @@ SHA-256 iterations.
 | Factor | Closes |
 |---|---|
 | `pass_hash` in the key | **TPM bus sniffing** — the LPC/SPI interposer attack that defeats BitLocker TPM-only in minutes. A sniffed `D` opens nothing. Also TPM implementation flaws and any authorisation bypass |
-| `B` in the key | **the firmware attack** — clearing NVRAM to drop the supervisor password destroys `B`, so a phished passphrase has nothing left to open |
+| `B` in the key | **any operating system**: `B` is boot-services-only, so a compromised Windows or Linux can never read it. **Not a physical attacker**: turning Secure Boot off, dumping `B` (or reading the SPI flash directly) and turning it back on restores PCR 7 and leaves `B` known. A firmware supervisor password stops the toggle, nothing stops an SPI read |
 | `H(paguro.ini)` in `setupTPM` | a staged transition cannot be unlocked with a rolled-back configuration, though it opens no seal and so gets no PCR 12 check (the passphrase rung attests nothing by design, below) |
 | the root gate | an unprivileged reader of the ESP cannot run a dictionary attack, because the FVEK blob lives only on the raw volume |
 
@@ -2993,10 +2993,14 @@ passphrase and shows an error. BitLocker's password protector does not attest th
 boot chain either.
 
 **It defaults to off because it is the one standing rung a phished passphrase
-opens by itself.** With it off, the firmware attacker clears NVRAM, captures the
-passphrase, and finds every remaining rung needs the TPM's original PCR state or
-the `B` they destroyed. (The root gate still stops an *unprivileged* attacker;
-the firmware attacker has the raw volume.)
+opens by itself.** With it off, a phished passphrase still needs `D`, which only
+the TPM releases, and only to the genuine loader at the original PCR values. A
+physical attacker can learn `B` (SPI read) and phish the passphrase, but cannot
+run their own code at the loader's PCR 4, so `D` stays in the TPM. **That makes
+TPM parameter encryption load-bearing**: without a salted session with
+response encryption, `D` crosses the TPM bus in clear during a genuine boot and
+a bus sniffer completes the set. (The root gate still stops an *unprivileged*
+attacker; the physical attacker has the raw volume.)
 
 **Leaving it off is nearly free, because Windows is the repair channel.** The
 image lives inside C:, so paguro's VMK *is* Windows' VMK — and Windows' own
