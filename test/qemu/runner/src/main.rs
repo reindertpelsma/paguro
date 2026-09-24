@@ -111,6 +111,15 @@ fn make_esp(env: &Env, name: &str, efi: &Path, files: &[(&str, &[u8])]) -> R<Pat
     for (f, data) in files {
         std::fs::write(dir.join("EFI/paguro").join(f), data).map_err(|e| e.to_string())?;
     }
+    // Scenarios that let the loader return expect the firmware to run it again
+    // in the same boot. Newer OVMF (Ubuntu 26.04) does that through its
+    // default platform-recovery option; older builds (Ubuntu 24.04, the CI
+    // runner) boot the built-in UEFI Shell first, which runs this script.
+    std::fs::write(
+        dir.join("startup.nsh"),
+        "FS0:\r\n\\EFI\\BOOT\\BOOTX64.EFI\r\n",
+    )
+    .map_err(|e| e.to_string())?;
     let img = env.work.join(format!("{name}-esp.img"));
     let _ = std::fs::remove_file(&img);
     sh(Command::new("mkfs.vfat")
@@ -123,6 +132,7 @@ fn make_esp(env: &Env, name: &str, efi: &Path, files: &[(&str, &[u8])]) -> R<Pat
         .arg(&img)
         .arg("-s")
         .arg(dir.join("EFI"))
+        .arg(dir.join("startup.nsh"))
         .arg("::/"))?;
     Ok(img)
 }
