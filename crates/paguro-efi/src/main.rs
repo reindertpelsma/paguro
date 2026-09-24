@@ -19,6 +19,14 @@
 
 mod platform;
 
+/// SBAT metadata (shim's revocation scheme). shim refuses to start a second
+/// stage without a `.sbat` section, and paguro.efi is started by a
+/// redistributed distribution shim (INTERFACES.md §2). Bump the `paguro`
+/// generation when a security fix must revoke older builds.
+#[used]
+#[unsafe(link_section = ".sbat")]
+static SBAT: [u8; include_bytes!("../sbat.csv").len()] = *include_bytes!("../sbat.csv");
+
 use core::ptr::{self, NonNull, addr_of_mut};
 
 use log::info;

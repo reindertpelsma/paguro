@@ -55,7 +55,8 @@ aarch64 under qemu-user and boots the aarch64 loader under AAVMF.
 
 ```text
 \EFI\paguro\
-  shim<arch>.efi, mm<arch>.efi   distribution shim (optional; see DESIGN §12)
+  shim<arch>.efi, mm<arch>.efi   a distribution's Microsoft-signed shim and
+                                 MokManager, redistributed unchanged (§2.1)
   paguro.efi                 the loader
   paguro.ini                 configuration only (§3)
   <volume-guid>\             one directory per NTFS volume paguro unlocks
@@ -67,6 +68,39 @@ aarch64 under qemu-user and boots the aarch64 loader under AAVMF.
 
 The loader **reads** these files and never writes any of them. The initrd and
 the Windows tool are the only writers.
+
+### 2.1 Getting started under Secure Boot without a Microsoft signature — DRAFT
+
+paguro has no Microsoft-signed binary and does not need one. Every shim a
+distribution ships is signed by Microsoft's third-party UEFI CA and trusts, in
+addition to its own vendor key, **anything signed by a key in `MokList`**. So:
+
+- **We redistribute a distribution's signed shim unchanged** (shim is BSD
+  licensed; distributions publish the signed binaries), with its MokManager.
+  `paguro.efi` is signed with the machine MOK key (§11.6), which that shim
+  accepts once the key is enrolled. Our own `Boot####` entry points at the
+  shim; the shim's second stage is `paguro.efi`, named in the entry's load
+  options (shim's second-stage argument) or, if a shim build ignores them,
+  installed under shim's default second-stage name next to it.
+- **SBAT:** shim refuses a second stage without a `.sbat` section. `paguro.efi`
+  carries one (`crates/paguro-efi/sbat.csv`); its `paguro` generation is bumped
+  when a security fix must revoke older builds.
+- **Which shim:** one whose SBAT generation is current and, per machine, signed
+  by a CA present in `db`. Microsoft's UEFI CA 2011 expired in June 2026;
+  newer shims are signed by the UEFI CA 2023, which only boots where Windows
+  Update has added that certificate to `db`. The installer reads `db` and picks
+  the matching build (x64 and aa64).
+- **What a shim revocation means for us:** if that distribution's shim is
+  revoked by SBAT or `dbx`, paguro follows the distribution's replacement; the
+  repair hook installs it. Nothing else changes, because our trust is the MOK
+  key, not the shim vendor's.
+- **To verify (§11):** the chosen shim loads a MOK-signed second stage named in
+  load options; and how `paguro.efi` then gets **MOK-signed next images**
+  (locally signed UKIs) accepted — firmware `LoadImage` checks `db` only, so
+  this relies on shim's `LoadImage` hook / loader protocol in recent shim, or
+  on `SHIM_LOCK->Verify` plus loading the PE ourselves. Distribution-signed
+  GRUB is unaffected: it is started through the distribution's own shim, which
+  is `db`-verified (§3.2).
 
 ## 3. `paguro.ini`
 
