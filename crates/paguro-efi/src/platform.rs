@@ -446,6 +446,37 @@ impl Platform for Efi {
         boot::start_image(img).map_err(|e| dev(&e))
     }
 
+    fn alloc_image(&mut self, len: usize) -> Result<&'static mut [u8], PlatformError> {
+        let p = boot::allocate_pages(
+            AllocateType::AnyPages,
+            MemoryType::LOADER_DATA,
+            len.div_ceil(4096).max(1),
+        )
+        .map_err(|e| dev(&e))?;
+        // SAFETY: a fresh allocation of at least `len` bytes, never freed,
+        // exclusively handed to the caller.
+        Ok(unsafe {
+            core::ptr::write_bytes(p.as_ptr(), 0, len);
+            core::slice::from_raw_parts_mut(p.as_ptr(), len)
+        })
+    }
+
+    fn expose_disk(
+        &mut self,
+        disk: &paguro_boot::stage4::ExposedDisk<'_>,
+        fat: paguro_boot::stage4::FatAt,
+        image: &str,
+        out: &mut [u8],
+    ) -> Result<usize, PlatformError> {
+        let h = self
+            .disks
+            .get(disk.part.disk)
+            .copied()
+            .flatten()
+            .ok_or(PlatformError::Unsupported)?;
+        crate::blockio::expose(h, disk, fat, image, out)
+    }
+
     fn reset(&mut self) {
         runtime::reset(ResetType::COLD, Status::SUCCESS, None)
     }

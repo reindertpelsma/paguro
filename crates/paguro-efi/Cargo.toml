@@ -20,6 +20,8 @@ paguro-ui.workspace = true
 # No "logger": console.rs routes the log (ConOut, or serial while the
 # graphical front end owns the display).
 uefi = { version = "0.41", features = ["panic_handler"] }
+# The raw BlockIo protocol table the synthetic disk publishes (blockio.rs).
+uefi-raw = "0.17"
 log = { version = "0.4", default-features = false }
 # The UEFI target is soft-float with SSE/AVX disabled; sha2's SIMD backends
 # do not compile there. Feature unification applies this to paguro-crypto too.

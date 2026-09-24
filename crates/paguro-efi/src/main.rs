@@ -19,6 +19,7 @@
 #![no_main]
 #![no_std]
 
+mod blockio;
 mod console;
 mod gop;
 mod platform;
@@ -34,7 +35,7 @@ static SBAT: [u8; include_bytes!("../sbat.csv").len()] = *include_bytes!("../sba
 use core::ptr::{self, NonNull, addr_of_mut};
 
 use log::info;
-use paguro_boot::{Buffers, Outcome, Params, Unimplemented};
+use paguro_boot::{Buffers, NtfsVolume, Outcome, Params};
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::prelude::*;
 
@@ -58,6 +59,23 @@ fn buffers() -> Option<&'static mut Buffers> {
     }
 }
 
+/// Place the stage-4 volume (~2.5 MiB) in zeroed pages: all-zero is a valid
+/// `NtfsVolume` (an unopened, unmounted volume; see `paguro_boot::stage4`).
+fn volume() -> Option<&'static mut NtfsVolume> {
+    let size = core::mem::size_of::<NtfsVolume>();
+    let pages = size.div_ceil(4096);
+    let p: NonNull<u8> =
+        boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages).ok()?;
+    // SAFETY: a fresh, page-aligned allocation of at least `size` bytes,
+    // exclusively ours; every field of NtfsVolume is an integer, a bool, an
+    // array of those, a Guid, or an `Option<&mut [u8]>` (None is null), so
+    // all-zero bytes are a valid value.
+    unsafe {
+        ptr::write_bytes(p.as_ptr(), 0, pages * 4096);
+        Some(&mut *p.as_ptr().cast::<NtfsVolume>())
+    }
+}
+
 #[entry]
 fn main() -> Status {
     if uefi::helpers::init().is_err() {
@@ -78,10 +96,14 @@ fn main() -> Status {
             return Status::DEVICE_ERROR;
         }
     };
-    // Stage 3's FVE side and stage 4 are not written yet: Unimplemented
-    // refuses them with a typed error after the rungs that need no volume
-    // structures have run.
-    let out = paguro_boot::run(&mut p, &mut Unimplemented, bufs, &Params::PRODUCTION);
+    let Some(vol) = volume() else {
+        info!("paguro: out of memory");
+        return Status::OUT_OF_RESOURCES;
+    };
+    // Stage 4 over an unencrypted NTFS volume; stage 3's FVE side (BitLocker)
+    // is not written yet and refuses with a typed error after the rungs that
+    // need no volume structures have run.
+    let out = paguro_boot::run(&mut p, vol, bufs, &Params::PRODUCTION);
     info!("paguro: outcome {out:?}");
     match out {
         Outcome::Started(_) => Status::SUCCESS,
