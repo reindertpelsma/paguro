@@ -1,0 +1,122 @@
+name: kernel
+
+# The kernel module: its trusted core (pg_range.c, pg_claim.c, pg_ntfs.c)
+# tested the way filesystems are tested against damaged images, then the
+# module itself in a throwaway VM. INTERFACES.md §10, §12.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"   # nightly: longer fuzzing
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  core-c:
+    name: core — C tests, sanitizers, analysers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install clang, valgrind and the analysers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang llvm valgrind cppcheck sparse
+      - name: unit tests + every fixture + full mutation sweep (ASan + UBSan)
+        run: make -C kernel/dm-paguro/test/unit check
+      - name: MemorySanitizer
+        run: make -C kernel/dm-paguro/test/unit msan
+      - name: Valgrind
+        run: make -C kernel/dm-paguro/test/unit valgrind
+      - name: gcc -fanalyzer, clang --analyze, cppcheck, sparse
+        run: make -C kernel/dm-paguro/test/unit analyze
+      - name: coverage of the core
+        run: make -C kernel/dm-paguro/test/unit coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-coverage
+          path: kernel/dm-paguro/test/unit/coverage.txt
+
+  cbmc:
+    name: core — bounded model checking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq cbmc
+      - run: make -C kernel/dm-paguro/test/cbmc
+
+  differential:
+    name: core — C against the Rust specification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: fixtures, exhaustive byte mutation, truncation, I/O faults, corpora
+        run: cargo run --release -p paguro-harness -- ntfs-exhaustive
+      - name: random rounds (range, NTFS, claims, runlists)
+        run: cargo run --release -p paguro-harness -- 1000000
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [c-ntfs, c-runlist, ntfs_file, runlist, ntfs_diff]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: time budget
+        run: echo "SECS=${{ github.event_name == 'schedule' && 1200 || 60 }}" >> "$GITHUB_ENV"
+      - name: libFuzzer on the C core (ASan + UBSan)
+        if: startsWith(matrix.target, 'c-')
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq clang
+          t=${{ matrix.target }}
+          make -C kernel/dm-paguro/test/fuzz run T=${t#c-} SECS=$SECS
+      - name: cargo-fuzz on the Rust specification
+        if: ${{ !startsWith(matrix.target, 'c-') }}
+        run: |
+          cargo install cargo-fuzz --locked
+          cd fuzz
+          seeds=../kernel/dm-paguro/test/fuzz/corpus/ntfs
+          [ ${{ matrix.target }} = runlist ] && seeds=../kernel/dm-paguro/test/fuzz/corpus/runlist
+          mkdir -p corpus/${{ matrix.target }}
+          cargo fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} $seeds -- \
+            -dict=../kernel/dm-paguro/test/fuzz/ntfs.dict -max_len=131072 \
+            -max_total_time=$SECS -print_final_stats=1
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: |
+            fuzz/artifacts
+            kernel/dm-paguro/test/fuzz/crash-*
+
+  module:
+    name: module build + VM test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install build and VM-test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq linux-headers-$(uname -r) qemu-system-x86 \
+            busybox-static dmsetup zstd cpio
+      - name: enable KVM if the runner has it (else TCG)
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+              sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          fi
+      - name: build dm-paguro against the runner's kernel (W=1)
+        run: make -C kernel/dm-paguro W=1 2>&1 | tee build.log && ! grep -E "(warning|error):" build.log | grep -v "compiler differs\|pahole"
+      - name: build pgctl (static)
+        run: gcc -static -O2 -Wall -Wextra -Werror -o kernel/dm-paguro/tools/pgctl kernel/dm-paguro/tools/pgctl.c
+      - name: build the harness (for the read-error sweep)
+        run: cargo build --release -p paguro-harness
+      - name: load and exercise it in a throwaway VM
+        run: sudo kernel/dm-paguro/test/vm-test.sh

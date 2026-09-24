@@ -15,6 +15,7 @@ bench = false
 [dependencies]
 paguro-core.workspace = true
 paguro-crypto.workspace = true
+paguro-boot.workspace = true
 uefi = { version = "0.41", features = ["logger", "panic_handler"] }
 log = { version = "0.4", default-features = false }
 # The UEFI target is soft-float with SSE/AVX disabled; sha2's SIMD backends

@@ -2545,12 +2545,49 @@ the NTFS layer destroys the dm table the running system is executing from, while
 NTFS's cached allocation state goes stale against raw writes it cannot see.
 
 Mode 1 handles this at the Windows end via `dwShareMode = 0` (§4.4). In mode 2
-Windows is not running, so the enforcement has to be local. Cheapest that
-actually works: **bind-mount a placeholder over the path** once C: is mounted. `unlink()` and `rename()` on a mountpoint return
-`EBUSY`; writes land on the placeholder. No patched filesystem driver, no LSM.
+Windows is not running, so the enforcement has to be local.
+
+**It is the minifilter's job, on the Linux side, and for the same reason.** The
+module already makes every access to the image's sectors through view C fail, so
+nothing here is needed for correctness. What is needed is that nobody *meets*
+those failures: a file manager generating a thumbnail, a backup tool, `du`, a
+desktop indexer or `grep -r` walking `/mnt/c` would otherwise get `EIO` and a log
+full of I/O errors, which reads as a failing disk. Same argument as §4.4: clean
+refusals up front, the range test underneath.
+
+**What ntfs3 can do to the image** (read from the source, mainline v7.3-rc4):
+it never moves existing data clusters, has no defrag or move-extent ioctl, never
+marks clusters bad and does not react to I/O errors beyond passing them up.
+Clusters are freed only by an operation on *that file* — truncate, a
+`fallocate` collapse (allowed on ordinary files), or unlinking the last link.
+So the guard only has to stop operations on the image's inode. One volume-wide
+effect remains: metadata **readahead** through the block device's page cache can
+touch clusters next to metadata, including the image's (below).
+
+Three layers, all keyed to the image's inode — never its path, because ntfs3
+resolves the 8.3 short name and supports hard links:
+
+| Layer | Mechanism | Covers |
+|---|---|---|
+| **inode guard** (primary) | a **BPF-LSM** program keyed on `(dev, ino)`: `file_open`, `path_truncate`, `inode_setattr`, `inode_unlink`, `inode_rename`, `inode_link`, `inode_setxattr`/`removexattr`, `inode_file_setattr`, `file_permission` → `EACCES` (`EBUSY` for unlink/rename/link). Every data access needs an fd, so `file_open` alone covers read, mmap, `fallocate`, `open_by_handle_at` | everything, on the inode |
+| **declarative backstop** | NTFS `SYSTEM` attribute on the image, view C mounted `sys_immutable,ads=0`, never `discard` | writes, truncate, unlink even without the program; `ads=0` removes the alternate-stream alias and its lookup-time MFT writes |
+| **tripwire** | the module's range test: readahead (`REQ_RAHEAD`) hits are expected and failed quietly; any other hit is counted and logged as a guard failure | the correctness floor |
+
+The BPF link is pinned, and the program also denies unlinking its own pin and
+unmounting that bpffs, so **only a reboot removes it**. The paguro host sets
+`lsm=…,bpf` on its signed command line (Debian enables `CONFIG_BPF_LSM` but not
+in the default list). The growth service is the one cgroup the program allows.
+No bind mount: it could be unmounted, and it would not behave as one
+filesystem.
+
+**Acceptance test:** mount view C read-write, then walk the whole volume —
+`find`, `du`, `tar` to `/dev/null`, a thumbnailer, `rm -rf` of the image's
+parent directory. **Zero `EIO`s in the kernel log**, clean `EBUSY`/`EACCES` to
+the callers, and the image intact.
 
 A guard rail, not a security boundary — the user is already root in their own
-OS. It exists so the catastrophic case requires deliberate effort.
+OS. It exists so the catastrophic case requires deliberate effort, and so the
+ordinary case never shows an I/O error.
 
 #### Rule 3 — the dirty bit cuts both ways
 

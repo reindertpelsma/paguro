@@ -1,0 +1,20 @@
+# paguro configuration. Not hand-editable: use `paguro config`.
+[Paguro]
+version = 1
+default = debian
+volume = 5c5c5c5c-5c5c-5c5c-5c5c-5c5c5c5c5c5c
+
+[Image.debian]
+path = \paguro\debian.vhd
+format = vhd
+expose = block
+chain = \EFI\BOOT\BOOTX64.EFI
+
+[TPM]
+enabled = 1
+
+[SetupTPM]
+enabled = 1
+
+[Passphrase]
+enabled = 0

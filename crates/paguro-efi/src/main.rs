@@ -2,18 +2,11 @@
 //!
 //! Build: `cargo build -p paguro-efi --target x86_64-unknown-uefi`
 //!
-//! The execution contract is four stages, and the order is the design:
-//!
-//! 1. **Must be correct; nothing protects it.** Read `paguro.ini` (64 KB cap),
-//!    SHA-256 the whole file, compare with the `paguro-config-hash` firmware
-//!    variable. No parser runs before this comparison.
-//! 2. **Behind stage 1.** Parse the file; LOAD TAINT: extend PCR 12 with the
-//!    file's hash (sentinel instead when there is no `tpm_seal.bin`).
-//! 3. **The key is still obtainable here.** Parse FVE metadata, try the rungs in
-//!    escalation order, obtain the VMK; BOOT TAINT: extend PCR 12 with a fixed
-//!    sentinel.
-//! 4. **The TPM will not re-authorise.** Parse NTFS, locate the image, validate
-//!    its map, hand the initrd its handoff, load the UKI through `LoadImage`.
+//! This binary is a thin [`Platform`](paguro_boot::Platform) over the `uefi`
+//! crate plus this `main`. The execution contract — four stages, two taints,
+//! recovery that never parses the configuration — is `paguro_boot::run`,
+//! which the mock boot tests exercise on the host and `test/qemu/` exercises
+//! under OVMF with swtpm.
 //!
 //! Invariants this binary must keep:
 //! - it **never writes to disk** (firmware variables only);
@@ -23,10 +16,34 @@
 #![no_main]
 #![no_std]
 
+mod platform;
+
+use core::ptr::{self, NonNull, addr_of_mut};
+
 use log::info;
+use paguro_boot::{Buffers, Outcome, Params, Unimplemented};
+use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::prelude::*;
 
-mod stages;
+/// Place [`Buffers`] (~200 KiB, too large for the firmware stack) in pages.
+fn buffers() -> Option<&'static mut Buffers> {
+    let size = core::mem::size_of::<Buffers>();
+    let pages = size.div_ceil(4096);
+    let p: NonNull<u8> =
+        boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages).ok()?;
+    let b = p.as_ptr().cast::<Buffers>();
+    // SAFETY: `p` is a fresh, page-aligned allocation of at least
+    // `size_of::<Buffers>()` bytes, exclusively ours for the image's lifetime.
+    // Zero is a valid value for every byte-array and integer field; the two
+    // fields holding enums or constructors are written explicitly before the
+    // reference is formed.
+    unsafe {
+        ptr::write_bytes(p.as_ptr(), 0, pages * 4096);
+        addr_of_mut!((*b).located).write(paguro_boot::volume::Located::new());
+        addr_of_mut!((*b).created).write(paguro_boot::tpm::CreatedObject::new());
+        Some(&mut *b)
+    }
+}
 
 #[entry]
 fn main() -> Status {
@@ -34,11 +51,25 @@ fn main() -> Status {
         return Status::ABORTED;
     }
     info!("paguro {}", env!("CARGO_PKG_VERSION"));
-    match stages::run() {
-        Ok(()) => Status::SUCCESS,
+    let Some(bufs) = buffers() else {
+        info!("paguro: out of memory");
+        return Status::OUT_OF_RESOURCES;
+    };
+    let mut p = match platform::Efi::new() {
+        Ok(p) => p,
         Err(e) => {
-            info!("paguro: {e:?}");
-            Status::LOAD_ERROR
+            info!("paguro: platform init failed: {e:?}");
+            return Status::DEVICE_ERROR;
         }
+    };
+    // Stage 3's FVE side and stage 4 are not written yet: Unimplemented
+    // refuses them with a typed error after the rungs that need no volume
+    // structures have run.
+    let out = paguro_boot::run(&mut p, &mut Unimplemented, bufs, &Params::PRODUCTION);
+    info!("paguro: outcome {out:?}");
+    match out {
+        Outcome::Started(_) => Status::SUCCESS,
+        Outcome::StartWindows => Status::SUCCESS,
+        Outcome::Halted(_) => Status::LOAD_ERROR,
     }
 }

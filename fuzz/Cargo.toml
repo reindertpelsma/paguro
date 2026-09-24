@@ -1,0 +1,106 @@
+[package]
+name = "paguro-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+paguro-core = { path = "../crates/paguro-core" }
+paguro-boot = { path = "../crates/paguro-boot" }
+
+[build-dependencies]
+cc = "1"
+
+# Not part of the main workspace: cargo-fuzz needs nightly and sanitizers.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+# ---- NTFS core (INTERFACES §10.1, §12) -------------------------------------
+# Inputs share the sparse-volume format of paguro-harness's SparseDisk;
+# seeds: kernel/dm-paguro/test/fuzz/corpus/ntfs (`paguro-harness ntfs-seeds`).
+
+[[bin]]
+name = "ntfs_file"
+path = "fuzz_targets/ntfs_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "runlist"
+path = "fuzz_targets/runlist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ntfs_diff"
+path = "fuzz_targets/ntfs_diff.rs"
+test = false
+doc = false
+bench = false
+
+# ---- Loader parsers (INTERFACES §3, §4, §8, §9, §12) -------------------------
+
+[[bin]]
+name = "ini_config"
+path = "fuzz_targets/ini_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seal"
+path = "fuzz_targets/seal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fve"
+path = "fuzz_targets/fve.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gpt"
+path = "fuzz_targets/gpt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handoff"
+path = "fuzz_targets/handoff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bootstrap"
+path = "fuzz_targets/bootstrap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tpm_response"
+path = "fuzz_targets/tpm_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tpm_client"
+path = "fuzz_targets/tpm_client.rs"
+test = false
+doc = false
+bench = false

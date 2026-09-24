@@ -11,11 +11,17 @@
 
 #ifdef __KERNEL__
 #include <linux/types.h>
+typedef u8 pg_u8;
+typedef u16 pg_u16;
+typedef u32 pg_u32;
 typedef u64 pg_u64;
 typedef size_t pg_size;
 #else
 #include <stddef.h>
 #include <stdint.h>
+typedef uint8_t pg_u8;
+typedef uint16_t pg_u16;
+typedef uint32_t pg_u32;
 typedef uint64_t pg_u64;
 typedef size_t pg_size;
 #endif
@@ -25,6 +31,9 @@ struct pg_extent {
 	pg_u64 start;
 	pg_u64 end;
 };
+
+/* Sort by start (heapsort: O(n log n) worst case, no recursion). */
+void pg_range_sort(struct pg_extent *e, pg_size n);
 
 /*
  * Sort and merge extents in place (touching or overlapping ones coalesce).

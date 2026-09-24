@@ -1,0 +1,20 @@
+[package]
+name = "paguro-qemu"
+description = "QEMU + OVMF + swtpm boot tests for paguro.efi (INTERFACES.md §12, QEMU level)"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "paguro-qemu"
+test = false
+
+[dependencies]
+paguro-core.workspace = true
+paguro-crypto.workspace = true
+paguro-boot.workspace = true
+sha2 = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

@@ -1,2 +1,2 @@
 obj-m := dm-paguro.o
-dm-paguro-y := dm-paguro-main.o pg_range.o
+dm-paguro-y := dm-paguro-main.o pg_ctl.o pg_range.o pg_claim.o pg_ntfs.o

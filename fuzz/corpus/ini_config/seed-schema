@@ -1,0 +1,12 @@
+# paguro configuration. Not hand-editable: use `paguro config`.
+[Paguro]
+version = 1
+default = debian
+volume = 5c5c5c5c-5c5c-5c5c-5c5c-5c5c5c5c5c5c
+
+[Image.debian]
+path = \paguro\debian.vhd
+format = vhd
+
+[Passphrase]
+enabled = 1

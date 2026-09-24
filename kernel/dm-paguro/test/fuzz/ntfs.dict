@@ -1,0 +1,32 @@
+# NTFS magic values and field patterns for fuzz_ntfs / cargo-fuzz ntfs_*.
+"FILE"
+"BAAD"
+"NTFS    "
+"EFI PART"
+"FAT32"
+"FAT"
+"\x55\xaa"
+"\xff\xff\xff\xff"
+# attribute types: $STANDARD_INFORMATION $ATTRIBUTE_LIST $FILE_NAME $DATA $VOLUME_INFORMATION
+"\x10\x00\x00\x00"
+"\x20\x00\x00\x00"
+"\x30\x00\x00\x00"
+"\x80\x00\x00\x00"
+"\x70\x00\x00\x00"
+# flags: in use, directory; compressed, encrypted, sparse
+"\x01\x00"
+"\x03\x00"
+"\x01\x00\x00\x00"
+"\x00\x40"
+"\x00\x80"
+# update sequence offset/count for 1 KiB and 4 KiB records
+"\x30\x00\x03\x00"
+"\x30\x00\x09\x00"
+# runlist headers
+"\x11"
+"\x21"
+"\x31"
+"\x41"
+"\x00"
+# ESP type GUID
+"\x28\x73\x2a\xc1\x1f\xf8\xd2\x11\xba\x4b\x00\xa0\xc9\x3e\xc9\x3b"

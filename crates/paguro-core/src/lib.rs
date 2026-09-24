@@ -20,9 +20,17 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::indexing_slicing))]
 
+pub mod bootstrap;
+pub mod bytes;
+pub mod config;
 pub mod fve;
+pub mod gpt;
+pub mod guid;
+pub mod handoff;
 pub mod ini;
+pub mod ntfs;
 pub mod range;
 pub mod runlist;
 pub mod seal;
+pub mod tpm;
 pub mod vhd;

@@ -1,0 +1,93 @@
+name: loader
+
+# paguro.efi and the crates behind it: paguro-core's loader-facing parsers,
+# paguro-boot's stage machine, the UEFI adapter, fuzzing, and QEMU boots
+# (INTERFACES.md §12).
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt, clippy, unit + property + mock-boot + swtpm tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-unknown-uefi
+      - name: install swtpm (real-TPM integration tests)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq swtpm
+      - run: cargo fmt --all --check
+      - run: cargo clippy -p paguro-core -p paguro-boot -p paguro-qemu --all-targets -- -D warnings
+      - run: cargo clippy -p paguro-efi --target x86_64-unknown-uefi -- -D warnings
+      - run: cargo test -p paguro-core -p paguro-boot
+      - name: swtpm tests really ran
+        run: cargo test -p paguro-boot --test swtpm -- --nocapture 2>&1 | tee swtpm.log && ! grep -q "skipping real-TPM" swtpm.log
+
+  efi:
+    name: build paguro.efi
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-uefi
+      - run: cargo build --release -p paguro-efi --target x86_64-unknown-uefi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paguro.efi
+          path: target/x86_64-unknown-uefi/release/paguro.efi
+
+  fuzz:
+    name: fuzz ${{ matrix.target }} (60 s)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ini_config, seal, fve, gpt, handoff, bootstrap, tpm_response, tpm_client]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-0.13
+      - run: command -v cargo-fuzz || cargo install cargo-fuzz --locked
+      - name: fuzz
+        working-directory: fuzz
+        run: |
+          mkdir -p /tmp/corpus
+          cargo +nightly fuzz run ${{ matrix.target }} /tmp/corpus corpus/${{ matrix.target }} -- -max_total_time=60
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+
+  qemu:
+    name: QEMU (OVMF, Secure Boot, swtpm)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-uefi
+      - name: install QEMU, OVMF, swtpm, image tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 ovmf swtpm mtools dosfstools gdisk sbsigntool
+      # TCG: OVMF + swtpm under (nested) KVM intermittently stops receiving
+      # TPM responses inside the firmware; TCG is reliable and fast enough.
+      - name: boot scenarios
+        run: PAGURO_QEMU_ACCEL=tcg test/qemu/run.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qemu-serial-logs
+          path: target/qemu/*.log

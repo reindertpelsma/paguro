@@ -1,12 +1,20 @@
-// Compile the kernel module's range logic into the harness so it can be
-// differential-tested against the Rust specification (paguro-core::range).
+// Compile the kernel module's core (range test, NTFS parser, claim checks)
+// into the harness so it can be differential-tested against the Rust
+// specification in paguro-core. Warnings are errors, as for the module.
 fn main() {
-    println!("cargo:rerun-if-changed=../../kernel/dm-paguro/pg_range.c");
-    println!("cargo:rerun-if-changed=../../kernel/dm-paguro/pg_range.h");
+    let dir = "../../kernel/dm-paguro";
+    let files = ["pg_range.c", "pg_claim.c", "pg_ntfs.c"];
+    for f in files
+        .iter()
+        .chain(&["pg_range.h", "pg_claim.h", "pg_ntfs.h"])
+    {
+        println!("cargo:rerun-if-changed={dir}/{f}");
+    }
     cc::Build::new()
-        .file("../../kernel/dm-paguro/pg_range.c")
-        .include("../../kernel/dm-paguro")
+        .files(files.iter().map(|f| format!("{dir}/{f}")))
+        .include(dir)
         .warnings(true)
         .extra_warnings(true)
-        .compile("pg_range");
+        .warnings_into_errors(true)
+        .compile("pgcore");
 }

@@ -1,23 +1,261 @@
-insmod /dm-paguro.ko || bad "insmod"
-dd if=/dev/zero of=/tmp/img bs=512 count=4096 2>/dev/null
-LOOP=$(losetup -f); losetup $LOOP /tmp/img
-# protect sectors [1000, 2000) of the loop device
-echo "0 4096 paguro $LOOP 0 1 1000 1000" | dmsetup create pv || bad "dmsetup create"
-dmsetup mknodes
-D=/dev/mapper/pv
-dd if=$D of=/dev/null bs=512 count=8 iflag=direct 2>/tmp/e && ok "read outside range" || { bad "read outside range"; cat /tmp/e; }
-dd if=$D of=/dev/null bs=512 skip=1000 count=1 iflag=direct 2>/dev/null && bad "read inside range succeeded" || ok "read inside range refused"
-dd if=$D of=/dev/null bs=512 skip=1999 count=1 iflag=direct 2>/dev/null && bad "read last protected sector" || ok "last protected sector refused"
-dd if=$D of=/dev/null bs=512 skip=2000 count=1 iflag=direct 2>/dev/null && ok "first sector after range readable" || bad "sector 2000 refused"
-echo PAGURO | dd of=$D bs=512 seek=3000 count=1 conv=sync,fsync oflag=direct 2>/dev/null && ok "write outside range" || bad "write outside range"
-dd if=/tmp/img bs=512 skip=3000 count=1 2>/dev/null | grep -q PAGURO && ok "write reached the device" || bad "write did not reach device"
-yes EVIL | head -c 5120 > /tmp/evil
-# ONE 5 KiB direct write covering sectors 995..1004: a single bio straddling the edge
-dd if=/tmp/evil of=$D bs=5120 count=1 seek=$((995*512)) oflag=direct,seek_bytes conv=fsync 2>/dev/null && bad "straddling write succeeded" || ok "straddling write refused"
-dd if=/tmp/img bs=512 skip=995 count=10 2>/dev/null | grep -q EVIL && bad "straddling write partially landed" || ok "no sector of the straddling write landed"
-echo "status: $(dmsetup status pv)"
-echo "table:  $(dmsetup table pv)"
-echo "0 4096 paguro $LOOP 0 1 5 0" | dmsetup create bad0 2>/dev/null && bad "zero-length range accepted" || ok "zero-length range rejected"
-dmsetup remove pv && ok "dmsetup remove"
+# Sourced into the VM's /init after ok/bad and module loading (vm-test.sh).
+# Fixtures: /fx/vol512.img (512-byte clusters: contiguous, fragmented and
+# attribute-list files), /fx/vol4k.img (compressed, sparse), /fx/vol4kn.img
+# (4096-byte sectors), /fx/dirty.img; identities in /ids (ID_<image>_<file>).
+. /ids
+dmc() { dmsetup create "$@" 2>/tmp/dmerr && dmsetup mknodes; }
+lim() { pgctl status | awk -v c="$1" '$1 == "claim" && $2 == c { for (i = 1; i < NF; i++) if ($i == "sectors") print $(i + 1) }'; }
+vstat() { pgctl status | awk -v v="$1" -v k="$2" '$1 == "volume" && $2 == v { for (i = 1; i < NF; i++) if ($i == k) print $(i + 1) }'; }
+# One direct I/O of <count> sectors at <sector>: a single bio, so a range that
+# straddles an edge is refused whole rather than split by dd.
+rd() { dd if="$1" of=/dev/null bs=$((512 * ${3:-1})) skip=$(($2 * 512)) count=1 iflag=direct,skip_bytes 2>/dev/null; }
+raw() { dd if="$1" bs=512 skip="$2" count="$3" iflag=direct 2>/dev/null; }	# bypasses the page cache
+wr() { dd if=/tmp/pat of="$1" bs=$((512 * ${3:-1})) seek=$(($2 * 512)) count=1 oflag=direct,seek_bytes conv=notrunc 2>/dev/null; }
+refused() { # refused <test name> <expected error code> <command...>
+    t=$1 code=$2; shift 2
+    out=$("$@" 2>/dev/null) && { bad "$t (accepted)"; return; }
+    case "$out" in "error $code "*) ok "$t" ;; *) bad "$t: $out" ;; esac
+}
+yes PAGURO | head -c 65536 > /tmp/pat
+
+insmod /dm-paguro.ko && ok "insmod" || bad "insmod"
+[ -c /dev/paguro ] && ok "/dev/paguro registered" || bad "/dev/paguro missing"
+
+# ---- reference copies, read with ntfs3 straight off the device -----------
+L1=$(losetup -f); losetup "$L1" /fx/vol512.img; N1=$(blockdev --getsz "$L1")
+mkdir -p /ref /mnt4
+mount -t ntfs3 -o ro "$L1" /mnt && ok "ntfs3 mounts the fixture" || bad "ntfs3 mount"
+for f in contig.img frag.img alist.img links.img; do cp /mnt/$f /ref/$f; done
+id=$(pgctl ident /mnt/contig.img)
+[ "$id" = "$ID_vol512_img_contig_img" ] &&
+    ok "ntfs3 inode/generation = manifest (rec, seq)" || bad "identity mismatch: $id vs $ID_vol512_img_contig_img"
+umount /mnt
+
+# ---- PG_VOLUME_ADD / PG_CLAIM ---------------------------------------------
+V1=$(pgctl add "$L1" "$L1") && ok "volume added" || bad "volume add"
+refused "second add of the same device" 102 pgctl add "$L1" "$L1"
+claim() { set -- $2; pgctl claim "$V1" "$1" "$2" 2>/dev/null; }
+C1=$(claim x "$ID_vol512_img_contig_img") && ok "claim contiguous file" || bad "claim contig"
+C2=$(claim x "$ID_vol512_img_frag_img") && ok "claim fragmented file" || bad "claim frag"
+C3=$(claim x "$ID_vol512_img_alist_img") && ok "claim attribute-list file" || bad "claim alist"
+C4=$(claim x "$ID_vol512_img_links_img") && ok "claim non-resident-list file" || bad "claim links"
+C5=$(claim x "$ID_vol512_img_ads_img") && ok "claim file with a named stream" || bad "claim ads"
+set -- $ID_vol512_img_contig_img
+refused "claiming a file twice" 101 pgctl claim "$V1" "$1" "$2"
+set -- $ID_vol512_img_odd_bin
+refused "wrong sequence number" 17 pgctl claim "$V1" "$1" $(($2 + 1))
+set -- $ID_vol512_img_small_txt; refused "resident \$DATA" 22 pgctl claim "$V1" "$1" "$2"
+set -- $ID_vol512_img_dir; refused "directory" 16 pgctl claim "$V1" "$1" "$2"
+set -- $ID_vol512_img_odd_bin; refused "size not whole sectors" 37 pgctl claim "$V1" "$1" "$2"
+refused "system record" 9 pgctl claim "$V1" 5 5
+
+# ---- view C, ntfs3 on top, cross-check ------------------------------------
+dmc pvc --table "0 $N1 paguro-volume $V1 c" && ok "view C loads" || bad "view C: $(cat /tmp/dmerr)"
+dmc pvb --table "0 $N1 paguro-volume $V1 b" && bad "view B loaded beside C" ||
+    ok "views B and C are mutually exclusive"
+mount -t ntfs3 -o ro /dev/mapper/pvc /mnt && ok "ntfs3 mounts view C" || bad "ntfs3 on view C"
+for p in "$C1 contig.img" "$C2 frag.img" "$C3 alist.img" "$C4 links.img"; do
+    set -- $p
+    pgctl crosscheck "$1" "/mnt/$2" >/dev/null && ok "FIEMAP agrees: $2" || bad "cross-check $2"
+done
+pgctl crosscheck "$C5" /mnt/contig.img >/dev/null && bad "wrong FIEMAP accepted" ||
+    ok "a disagreeing FIEMAP refuses the claim"
+dmc pa5 --table "0 $(lim "$C5") paguro-image $C5" && bad "view A over a refused claim" ||
+    ok "no view A for a refused claim, ever"
+
+# ---- view A ------------------------------------------------------------------
+for p in "1 $C1 contig.img" "2 $C2 frag.img" "3 $C3 alist.img" "4 $C4 links.img"; do
+    set -- $p
+    dmc pa$1 --table "0 $(lim "$2") paguro-image $2" || bad "view A $3: $(cat /tmp/dmerr)"
+    cmp /dev/mapper/pa$1 /ref/$3 && ok "view A reads $3 exactly" || bad "view A $3 content"
+done
+dmc pax --table "0 $(($(lim "$C1") + 1)) paguro-image $C1" && bad "view A longer than the claim" ||
+    ok "view A length beyond the claim refused"
+
+# ---- view C refuses the claimed extents -------------------------------------
+set -- $(pgctl fiemap /mnt/frag.img | head -1); S=$1; L=$2
+rd /dev/mapper/pvc "$S" && bad "read of first claimed sector" || ok "read of first claimed sector refused"
+rd /dev/mapper/pvc $((S + L - 1)) && bad "read of last sector of extent" || ok "read of extent's last sector refused"
+rd /dev/mapper/pvc $((S - 1)) && ok "sector before the extent readable" || bad "sector before refused"
+rd /dev/mapper/pvc $((S - 1)) 2 && bad "straddling read" || ok "read straddling the edge refused"
+raw "$L1" $((S - 1)) 2 > /tmp/before
+wr /dev/mapper/pvc "$S" && bad "write to claimed sector" || ok "write to claimed sector refused"
+wr /dev/mapper/pvc $((S - 1)) 2 && bad "straddling write" || ok "write straddling the edge refused"
+raw "$L1" $((S - 1)) 2 | cmp -s - /tmp/before &&
+    ok "no sector of the refused writes landed" || bad "refused write partially landed"
+wr /dev/mapper/pvc $((S - 1)) && ok "write beside the extent passes" || bad "unclaimed write refused"
+raw "$L1" $((S - 1)) 1 | grep -q PAGURO &&
+    ok "and reaches the device" || bad "unclaimed write lost"
+cat /mnt/frag.img > /dev/null 2>&1 && bad "file contents readable through view C" ||
+    ok "claimed file unreadable through ntfs3 on view C"
+ls /mnt > /dev/null && ok "the rest of the volume still reads" || bad "metadata unreadable"
+
+# ---- guard counters: readahead is quiet, anything else counts -----------------
+g0=$(vstat "$V1" guard); a0=$(vstat "$V1" readahead)
+pgctl fadvise /dev/mapper/pvc "$S" "$L"
+g1=$(vstat "$V1" guard); a1=$(vstat "$V1" readahead)
+[ "$a1" -gt "$a0" ] && [ "$g1" = "$g0" ] && ok "readahead refused quietly ($a0 -> $a1)" ||
+    bad "readahead counters: guard $g0->$g1 readahead $a0->$a1"
+rd /dev/mapper/pvc "$S"
+[ "$(vstat "$V1" guard)" -gt "$g1" ] && ok "a direct read counts as a guard hit" || bad "guard counter"
+echo "status: $(dmsetup status pvc)"
+
+# ---- release ---------------------------------------------------------------
+refused "release while view A is live" 0 pgctl release "$C1"
+dmsetup remove pa1 && pgctl release "$C1" && ok "release after view A is gone" || bad "release"
+set -- $(pgctl fiemap /mnt/contig.img | head -1)
+rd /dev/mapper/pvc "$1" && ok "released extents pass through again" || bad "released extent still refused"
+refused "remove a volume with claims" 0 pgctl remove "$V1"
+
+# ---- reserved ranges (BitLocker's regions): subtract-only ------------------
+set -- $(pgctl fiemap /mnt/frag.img | head -1); S=$1; L=$2
+set -- $ID_vol512_img_frag_img; FR=$1; FS=$2
+for t in "overlap-start R$((S - 4))+8 100" "overlap-inside R$((S + 1))+1 100" \
+         "touching R$((S - 8))+8,R$((S + L))+8 0"; do
+    set -- $t
+    L2=$(losetup -f); losetup -r "$L2" /fx/vol512.img
+    V=$(pgctl add "$L2" "$L2" $(echo "$2" | tr , ' ') 2>/dev/null) || bad "add with reserved ranges"
+    if [ "$3" = 0 ]; then
+        C=$(pgctl claim "$V" "$FR" "$FS" 2>/dev/null) && ok "reserved $1: accepted" || bad "reserved $1"
+        pgctl release "$C"
+    else
+        refused "reserved $1: refused" "$3" pgctl claim "$V" "$FR" "$FS"
+    fi
+    pgctl remove "$V"; losetup -d "$L2"
+done
+
+# ---- dm-log-writes under the volume: refused writes never reach the device --
+# (seed of the power-loss replay harness, INTERFACES 12.1)
+if [ -e /mod/dm-log-writes.ko ]; then
+    cp /fx/vol512.img /tmp/lw.img; truncate -s 16M /tmp/log.img
+    LW=$(losetup -f); losetup "$LW" /tmp/lw.img; LG=$(losetup -f); losetup "$LG" /tmp/log.img
+    dmc lw --table "0 $N1 log-writes $LW $LG" || bad "log-writes: $(cat /tmp/dmerr)"
+    VL=$(pgctl add /dev/mapper/lw /dev/mapper/lw)
+    set -- $ID_vol512_img_frag_img; CL=$(pgctl claim "$VL" "$1" "$2" 2>/dev/null)
+    dmc lwc --table "0 $N1 paguro-volume $VL c"
+    # Flush (log-writes logs writes at flushes), mark, read nr_entries.
+    entries() {
+        dd if=/dev/null of=/dev/mapper/lwc count=0 conv=fsync 2>/dev/null
+        dmsetup message lw 0 mark "$1"
+        raw "$LG" 0 1 | od -An -tu4 -j16 -N4 | tr -d ' '
+    }
+    e0=$(entries a)
+    wr /dev/mapper/lwc "$S"; wr /dev/mapper/lwc $((S - 1)) 2
+    e1=$(entries b)
+    wr /dev/mapper/lwc $((S - 1))
+    e2=$(entries c)
+    [ $((e2 - e1)) = $((e1 - e0 + 1)) ] &&
+        ok "log-writes: refused writes logged nothing, a passing one was logged ($e0 $e1 $e2)" ||
+        bad "log-writes entries $e0 -> $e1 -> $e2"
+    dmsetup remove lwc; pgctl release "$CL"; pgctl remove "$VL"; dmsetup remove lw
+else
+    echo "SKIP: no dm-log-writes module"
+fi
+
+# ---- 4Kn: 4096-byte logical sectors end to end ------------------------------
+L4=$(losetup -f); losetup.ul --sector-size 4096 "$L4" /fx/vol4kn.img; N4=$(blockdev --getsz "$L4")
+[ "$(blockdev --getss "$L4")" = 4096 ] && ok "4Kn loop device" || bad "loop sector size"
+mount -t ntfs3 -o ro "$L4" /mnt4 && cp /mnt4/plain.img /ref/plain4k.img && umount /mnt4
+V4=$(pgctl add "$L4" "$L4") && ok "4Kn volume added" || bad "4Kn add"
+set -- $ID_vol4kn_img_plain_img
+C7=$(pgctl claim "$V4" "$1" "$2") && ok "4Kn claim" || bad "4Kn claim"
+dmc pv4 --table "0 $N4 paguro-volume $V4 c" || bad "4Kn view C: $(cat /tmp/dmerr)"
+[ "$(blockdev --getss /dev/mapper/pv4)" = 4096 ] && ok "view C reports 4096-byte sectors" || bad "view C sector size"
+mount -t ntfs3 -o ro /dev/mapper/pv4 /mnt4 && pgctl crosscheck "$C7" /mnt4/plain.img >/dev/null &&
+    ok "4Kn cross-check" || bad "4Kn cross-check"
+dmc pa7 --table "0 $(lim "$C7") paguro-image $C7" || bad "4Kn view A: $(cat /tmp/dmerr)"
+[ "$(blockdev --getss /dev/mapper/pa7)" = 4096 ] && ok "view A reports 4096-byte sectors" || bad "view A sector size"
+cmp /dev/mapper/pa7 /ref/plain4k.img && ok "4Kn view A reads the file exactly" || bad "4Kn view A content"
+[ "$(pgctl dio /dev/mapper/pa7 0 512)" = "Invalid argument" ] &&
+    ok "misaligned direct I/O refused on view A (EINVAL)" || bad "512-byte direct I/O on a 4Kn view A"
+[ "$(pgctl dio /dev/mapper/pv4 512 4096)" = "Invalid argument" ] &&
+    ok "misaligned direct I/O refused on view C (EINVAL)" || bad "512-byte-aligned direct I/O on 4Kn view C"
+[ "$(pgctl dio /dev/mapper/pa7 4096 4096)" = ok ] && ok "aligned 4 KiB direct I/O passes" || bad "aligned dio"
+set -- $(pgctl fiemap /mnt4/plain.img | head -1)
+dd if=/dev/mapper/pv4 of=/dev/null bs=4096 skip=$(($1 / 8)) count=1 iflag=direct 2>/dev/null &&
+    bad "4Kn claimed block read" || ok "4Kn: first claimed block refused"
+dd if=/dev/mapper/pv4 of=/dev/null bs=4096 skip=$(($1 / 8 - 1)) count=1 iflag=direct 2>/dev/null &&
+    ok "4Kn: block before it passes" || bad "4Kn: block before refused"
+dd if=/dev/mapper/pv4 of=/dev/null bs=4096 skip=$((($1 + $2) / 8 - 1)) count=2 iflag=direct 2>/dev/null &&
+    bad "4Kn straddle" || ok "4Kn: read straddling the end refused"
+umount /mnt4
+
+# ---- compressed and sparse files are refused ---------------------------------
+L5=$(losetup -f); losetup -r "$L5" /fx/vol4k.img
+V5=$(pgctl add "$L5" "$L5") || bad "vol4k add"
+set -- $ID_vol4k_img_comp_c_bin; refused "compressed file" 23 pgctl claim "$V5" "$1" "$2"
+set -- $ID_vol4k_img_sparse_bin; refused "sparse file" 25 pgctl claim "$V5" "$1" "$2"
+pgctl remove "$V5"
+
+# ---- a dirty volume: read-only everywhere, no view B -------------------------
+L6=$(losetup -f); losetup "$L6" /fx/dirty.img; N6=$(blockdev --getsz "$L6")
+V6=$(pgctl add "$L6" "$L6") && [ "$(vstat "$V6" flags)" = 0x1 ] && ok "dirty flag read" || bad "dirty volume"
+set -- $ID_vol512_img_contig_img
+C8=$(pgctl claim "$V6" "$1" "$2" 2>/dev/null) || bad "claim on dirty volume"
+dmc pvb6 --table "0 $N6 paguro-volume $V6 b" && bad "view B on a dirty volume" || ok "no view B on a dirty volume"
+dmc pvc6 --table "0 $N6 paguro-volume $V6 c" && bad "writable view C on a dirty volume" ||
+    ok "no writable view C on a dirty volume"
+dmc pvc6 --readonly --table "0 $N6 paguro-volume $V6 c" && ok "read-only view C" || bad "ro view C: $(cat /tmp/dmerr)"
+mount -t ntfs3 -o ro /dev/mapper/pvc6 /mnt4 && pgctl crosscheck "$C8" /mnt4/contig.img >/dev/null || bad "dirty cross-check"
+dmc pa8 --table "0 $(lim "$C8") paguro-image $C8" && bad "writable view A of a dirty volume" ||
+    ok "no writable view A on a dirty volume"
+dmc pa8 --readonly --table "0 $(lim "$C8") paguro-image $C8" && cmp /dev/mapper/pa8 /ref/contig.img &&
+    ok "read-only view A of a dirty volume" || bad "ro view A: $(cat /tmp/dmerr)"
+umount /mnt4; dmsetup remove pa8; dmsetup remove pvc6; pgctl release "$C8"; pgctl remove "$V6"
+
+# ---- growth: append-only extends, anything else goes read-only ----------------
+umount /mnt
+mount -t ntfs3 /dev/mapper/pvc /mnt || bad "ntfs3 read-write on view C"
+head -c 65536 /tmp/pat > /tmp/app
+cat /tmp/app >> /mnt/alist.img && sync && ok "append through view C" || bad "append"
+truncate -s 1048576 /mnt/links.img && sync && ok "truncate through view C" || bad "truncate"
+umount /mnt; mount -t ntfs3 -o ro /dev/mapper/pvc /mnt
+old=$(lim "$C3")
+set -- $(pgctl grow "$C3")
+[ "$2" = 0 ] && [ "$4" = $((old + 128)) ] && ok "append-only growth accepted ($old -> $4)" || bad "grow: $*"
+dmsetup reload pa3 --table "0 $(lim "$C3") paguro-image $C3" 2>/dev/null &&
+    bad "reload before re-cross-check" || ok "grown claim needs a fresh cross-check"
+pgctl crosscheck "$C3" /mnt/alist.img >/dev/null && dmsetup reload pa3 --table "0 $(lim "$C3") paguro-image $C3" &&
+    dmsetup resume pa3 && ok "view A reloaded at the new length" || bad "reload grown view A"
+cat /ref/alist.img /tmp/app | cmp - /dev/mapper/pa3 && ok "grown view A reads old and new bytes" || bad "grown content"
+set -- $(pgctl grow "$C4")
+[ $(($2 & 1)) = 1 ] && [ "$8" = 106 ] && ok "truncation is not growth: claim read-only" || bad "grow after truncate: $*"
+wr /dev/mapper/pa4 0 && bad "write to a read-only claim's view A" || ok "view A refuses writes once read-only"
+rd /dev/mapper/pa4 0 && ok "and still reads" || bad "read-only view A read"
+
+# ---- view B once view C is gone ------------------------------------------------
+umount /mnt
+for d in pa2 pa3 pa4 pvc; do dmsetup remove $d; done
+dmc pvb --table "0 $N1 paguro-volume $V1 b" && ok "view B loads once C is gone" || bad "view B: $(cat /tmp/dmerr)"
+rd /dev/mapper/pvb "$S" && bad "view B read of claimed sector" || ok "view B refuses the claimed sector"
+dmsetup remove pvb
+
+# ---- I/O errors at every sector the claim reads (dm-error splices) ---------------
+if [ -s /reads ]; then
+    set -- $ID_vol512_img_contig_img; CR=$1; CS=$2
+    n=0; bad_n=0
+    for s in $(cat /reads); do
+        printf "0 %s linear %s 0\n%s 1 error\n%s %s linear %s %s\n" \
+            "$s" "$L1" "$s" $((s + 1)) $((N1 - s - 1)) "$L1" $((s + 1)) > /tmp/tbl
+        [ "$s" = 0 ] && printf "0 1 error\n1 %s linear %s 1\n" $((N1 - 1)) "$L1" > /tmp/tbl
+        dmsetup create flt < /tmp/tbl && dmsetup mknodes
+        if V=$(pgctl add /dev/mapper/flt /dev/mapper/flt 2>/dev/null); then
+            C=$(pgctl claim "$V" "$CR" "$CS" 2>/dev/null) && { bad_n=$((bad_n + 1)); pgctl release "$C"; }
+            pgctl remove "$V"
+        fi
+        dmsetup remove flt; n=$((n + 1))
+    done
+    [ "$bad_n" = 0 ] && [ "$n" -gt 3 ] && ok "a read error at each of $n sectors refuses add or claim" ||
+        bad "$bad_n of $n read errors went unnoticed"
+else
+    echo "SKIP: no paguro-harness built; read-error sweep not run"
+fi
+
+# ---- teardown ------------------------------------------------------------------
+for c in $C2 $C3 $C4 $C5 $C7; do pgctl release "$c" 2>/dev/null; done
+dmsetup remove pa7; dmsetup remove pv4
+pgctl status
+rmmod dm-paguro && ok "module unloads cleanly" || bad "rmmod"
+dmesg | grep -E "BUG|Oops|WARNING|refcount|KASAN" && bad "kernel complained" || ok "no kernel warnings"
 [ $fail = 0 ] && echo "RESULT: ALL PASS" || echo "RESULT: FAILURES"
 poweroff -f

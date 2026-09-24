@@ -1,0 +1,4 @@
+pg_test_*
+*.profraw
+*.profdata
+coverage.txt
