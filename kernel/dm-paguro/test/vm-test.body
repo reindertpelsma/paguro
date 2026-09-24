@@ -18,6 +18,10 @@ refused() { # refused <test name> <expected error code> <command...>
 }
 yes PAGURO | head -c 65536 > /tmp/pat
 
+# The final "kernel complained" check covers dm-paguro's lifetime only, not
+# boot-time notices (e.g. "Speculative Return Stack Overflow: WARNING" on
+# AMD hosts whose microcode the guest cannot see).
+dmesg -c > /tmp/boot.dmesg
 insmod /dm-paguro.ko && ok "insmod" || bad "insmod"
 [ -c /dev/paguro ] && ok "/dev/paguro registered" || bad "/dev/paguro missing"
 

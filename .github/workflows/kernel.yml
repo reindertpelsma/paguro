@@ -104,18 +104,29 @@ jobs:
       - name: install build and VM-test dependencies
         run: |
           sudo apt-get update -qq
-          # linux-modules-extra: the runner's Azure kernel keeps ntfs3 (and
-          # dm-log-writes) there, not in linux-modules; the VM needs both.
-          sudo apt-get install -y -qq linux-headers-$(uname -r) \
-            linux-modules-extra-$(uname -r) qemu-system-x86 \
+          sudo apt-get install -y -qq linux-headers-$(uname -r) qemu-system-x86 \
             busybox-static dmsetup zstd cpio
-      - name: the VM's modules are present
+      # The VM boots Ubuntu's generic HWE kernel, not the runner's own Azure
+      # kernel: the Azure flavour keeps ntfs3 in linux-modules-extra, and on
+      # its 6.17 series an O_DIRECT bio to a device with ntfs3 mounted falls
+      # back to buffered I/O when the page cache cannot be invalidated, so the
+      # direct-I/O refusal checks never reach the target. The packages are
+      # only unpacked (dpkg -x), never installed or loaded on the runner.
+      - name: fetch the VM kernel (generic HWE image, modules, headers)
         run: |
-          uname -r
-          ls /lib/modules/$(uname -r)/kernel/fs/ntfs3/ntfs3.ko* ||
-            { echo "::error::no ntfs3 module for $(uname -r)"; exit 1; }
-          ls /lib/modules/$(uname -r)/kernel/drivers/md/dm-log-writes.ko* ||
-            echo "::warning::no dm-log-writes module: its VM test will SKIP"
+          kver=$(apt-cache depends linux-image-generic-hwe-24.04 |
+                 sed -n 's/^ *Depends: linux-image-\([0-9].*-generic\)$/\1/p' | head -1)
+          [ -n "$kver" ] || { echo "::error::cannot resolve the HWE kernel version"; exit 1; }
+          common=$(apt-cache depends linux-headers-$kver |
+                   sed -n 's/^ *Depends: \(linux-.*-headers-.*\)$/\1/p' | head -1)
+          d=$RUNNER_TEMP/vmk; mkdir -p $d/debs; cd $d/debs
+          apt-get download linux-image-unsigned-$kver linux-modules-$kver \
+            linux-headers-$kver $common
+          for f in *.deb; do dpkg -x $f $d; done
+          ls $d/lib/modules/$kver/kernel/fs/ntfs3/ntfs3.ko* \
+             $d/lib/modules/$kver/kernel/drivers/md/dm-log-writes.ko*
+          echo "VMK=$d" >> "$GITHUB_ENV"; echo "KVER=$kver" >> "$GITHUB_ENV"
+          echo "VM kernel: $kver (runner: $(uname -r))"
       - name: enable KVM if the runner has it (else TCG)
         run: |
           if [ -e /dev/kvm ]; then
@@ -125,9 +136,14 @@ jobs:
           fi
       - name: build dm-paguro against the runner's kernel (W=1)
         run: make -C kernel/dm-paguro W=1 2>&1 | tee build.log && ! grep -E "(warning|error):" build.log | grep -v "compiler differs\|pahole"
+      - name: build dm-paguro against the VM kernel (W=1)
+        run: |
+          make -C kernel/dm-paguro clean
+          make -C kernel/dm-paguro KDIR=$VMK/usr/src/linux-headers-$KVER W=1 2>&1 | tee build-vm.log &&
+            ! grep -E "(warning|error):" build-vm.log | grep -v "compiler differs\|pahole"
       - name: build pgctl (static)
         run: gcc -static -O2 -Wall -Wextra -Werror -o kernel/dm-paguro/tools/pgctl kernel/dm-paguro/tools/pgctl.c
       - name: build the harness (for the read-error sweep)
         run: cargo build --release -p paguro-harness
       - name: load and exercise it in a throwaway VM
-        run: sudo kernel/dm-paguro/test/vm-test.sh
+        run: sudo kernel/dm-paguro/test/vm-test.sh "$VMK/boot/vmlinuz-$KVER" "$VMK/lib/modules/$KVER"
