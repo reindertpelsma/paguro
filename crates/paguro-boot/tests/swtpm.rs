@@ -37,7 +37,13 @@ impl Drop for Swtpm {
 }
 
 fn start() -> Option<Swtpm> {
-    if Command::new("swtpm").arg("--version").output().is_err() {
+    // Check the exit status too: under qemu-user (the arm64 CI job) spawning a
+    // missing program "succeeds" and the child exits non-zero instead.
+    let present = Command::new("swtpm")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !present {
         eprintln!("swtpm not installed: skipping real-TPM tests");
         return None;
     }
