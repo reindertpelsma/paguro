@@ -402,6 +402,21 @@ impl Vm {
         vars: &Path,
         state: &Path,
     ) -> R<Vm> {
+        Self::start_with(env, name, secure, esp, data, vars, state, None)
+    }
+
+    /// As [`Vm::start`], with a QMP socket at `qmp` (for screendumps).
+    #[allow(clippy::too_many_arguments)]
+    fn start_with(
+        env: &Env,
+        name: &str,
+        secure: bool,
+        esp: &Path,
+        data: &Path,
+        vars: &Path,
+        state: &Path,
+        qmp: Option<&Path>,
+    ) -> R<Vm> {
         let tpm = swtpm_for_qemu(state)?;
         let code = env.ovmf.join(if secure {
             "OVMF_CODE_4M.secboot.fd"
@@ -419,6 +434,11 @@ impl Vm {
                 "-m", "512", "-display", "none", "-serial", "stdio", "-monitor", "none",
             ])
             .args(["-no-reboot", "-net", "none"]);
+        if let Some(q) = qmp {
+            let _ = std::fs::remove_file(q);
+            cmd.arg("-qmp")
+                .arg(format!("unix:{},server=on,wait=off", q.display()));
+        }
         if secure {
             cmd.args(["-global", "driver=cfi.pflash01,property=secure,value=on"]);
         }
@@ -791,6 +811,144 @@ fn secure_boot_verified(env: &Env) -> R<()> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// The graphical front end
+
+/// One QMP command; returns the reply line (`return` or `error`).
+fn qmp(
+    stream: &mut UnixStream,
+    reader: &mut std::io::BufReader<UnixStream>,
+    cmd: &str,
+) -> R<String> {
+    use std::io::BufRead;
+    stream
+        .write_all(cmd.as_bytes())
+        .map_err(|e| format!("qmp write: {e}"))?;
+    loop {
+        let mut line = String::new();
+        if reader
+            .read_line(&mut line)
+            .map_err(|e| format!("qmp read: {e}"))?
+            == 0
+        {
+            return Err("qmp closed".into());
+        }
+        if line.contains("\"return\"") || line.contains("\"error\"") {
+            return Ok(line);
+        }
+    }
+}
+
+/// `screendump` to a PPM and read it back as (width, height, RGB).
+fn screendump(sock: &Path, out: &Path) -> R<(usize, usize, Vec<u8>)> {
+    use std::io::BufRead;
+    let mut s = UnixStream::connect(sock).map_err(|e| format!("qmp connect: {e}"))?;
+    s.set_read_timeout(Some(Duration::from_secs(20)))
+        .map_err(|e| e.to_string())?;
+    let mut r = std::io::BufReader::new(s.try_clone().map_err(|e| e.to_string())?);
+    let mut greeting = String::new();
+    r.read_line(&mut greeting).map_err(|e| e.to_string())?;
+    qmp(&mut s, &mut r, "{\"execute\":\"qmp_capabilities\"}\n")?;
+    let _ = std::fs::remove_file(out);
+    let reply = qmp(
+        &mut s,
+        &mut r,
+        &format!(
+            "{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{}\"}}}}\n",
+            out.display()
+        ),
+    )?;
+    if reply.contains("\"error\"") {
+        return Err(format!("screendump: {reply}"));
+    }
+    let data = std::fs::read(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    // P6 <w> <h> 255, then RGB.
+    let mut fields = Vec::new();
+    let mut at = 0usize;
+    while fields.len() < 4 {
+        while data.get(at).is_some_and(u8::is_ascii_whitespace) {
+            at += 1;
+        }
+        let start = at;
+        while data.get(at).is_some_and(|b| !b.is_ascii_whitespace()) {
+            at += 1;
+        }
+        fields.push(String::from_utf8_lossy(&data[start..at]).to_string());
+    }
+    at += 1;
+    let (w, h): (usize, usize) = (
+        fields[1].parse().map_err(|_| "ppm width")?,
+        fields[2].parse().map_err(|_| "ppm height")?,
+    );
+    if fields[0] != "P6" || fields[3] != "255" || data.len() < at + w * h * 3 {
+        return Err(format!("not a P6 PPM: {fields:?}"));
+    }
+    Ok((w, h, data[at..at + w * h * 3].to_vec()))
+}
+
+/// The loader draws the unlock screen through GOP under OVMF. Compared
+/// loosely (firmware output is not pixel-stable): the most common colour is
+/// the theme's background, the frame's corners are background, and the
+/// middle holds text (many pixels of other colours).
+fn graphical_unlock(env: &Env) -> R<()> {
+    let name = "graphical-unlock";
+    let (vars, state) = fresh(env, name, "OVMF_VARS_4M.fd")?;
+    let esp = make_esp(env, name, &env.efi, &[])?;
+    let data = make_data_disk(env)?;
+    let sock = state.join("qmp.sock");
+    let mut vm = Vm::start_with(env, name, false, &esp, &data, &vars, &state, Some(&sock))?;
+    let r = (|| {
+        let line = vm.capture("paguro: graphics ", BOOT_WAIT)?;
+        vm.expect("Unlock Linux", 30)?;
+        // The frame is presented right after the serial mirror.
+        std::thread::sleep(Duration::from_secs(2));
+        let (w, h, rgb) = screendump(&sock, &env.work.join(format!("{name}.ppm")))?;
+        if !line.starts_with(&format!("{w}x{h}")) {
+            return Err(format!("loader reported {line:?}, screen is {w}x{h}"));
+        }
+        let bg = paguro_ui::builtin::THEMES[0].palette.background;
+        let near = |p: &[u8]| {
+            p[0].abs_diff(bg.r) <= 4 && p[1].abs_diff(bg.g) <= 4 && p[2].abs_diff(bg.b) <= 4
+        };
+        let px = |x: usize, y: usize| &rgb[(y * w + x) * 3..(y * w + x) * 3 + 3];
+        let mut counts = std::collections::HashMap::new();
+        for p in rgb.chunks_exact(3) {
+            *counts.entry((p[0], p[1], p[2])).or_insert(0usize) += 1;
+        }
+        let (dominant, n) = counts
+            .iter()
+            .max_by_key(|(_, n)| **n)
+            .map(|(c, n)| (*c, *n))
+            .ok_or("empty frame")?;
+        if !near(&[dominant.0, dominant.1, dominant.2]) || n * 2 < w * h {
+            return Err(format!(
+                "dominant colour {dominant:?} ({n} of {} pixels), theme background {bg:?}",
+                w * h
+            ));
+        }
+        for (x, y) in [(1, 1), (w - 2, 1), (1, h - 2), (w - 2, h - 2)] {
+            if !near(px(x, y)) {
+                return Err(format!("corner ({x},{y}) is {:?}", px(x, y)));
+            }
+        }
+        let mut text = 0usize;
+        for y in h / 4..h * 3 / 4 {
+            for x in w / 4..w * 3 / 4 {
+                if !near(px(x, y)) {
+                    text += 1;
+                }
+            }
+        }
+        if text < 2000 {
+            return Err(format!("only {text} non-background pixels in the middle"));
+        }
+        println!("  {w}x{h}, background {dominant:?} on {n} pixels, {text} content pixels");
+        Ok(())
+    })();
+    vm.stop();
+    r
+}
+
 type Scenario = (&'static str, fn(&Env) -> R<()>);
 
 const SCENARIOS: &[Scenario] = &[
@@ -800,6 +958,7 @@ const SCENARIOS: &[Scenario] = &[
     ("sb-hash-missing", secure_boot_hash_missing),
     ("sb-hash-mismatch", secure_boot_hash_mismatch),
     ("sb-verified", secure_boot_verified),
+    ("graphical-unlock", graphical_unlock),
 ];
 
 fn main() {
