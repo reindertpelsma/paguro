@@ -340,6 +340,19 @@ Vendor GUID from §1.
 
 Plus the standard `BootNext` / `Boot####` (the bootstrap entry, §9).
 
+**`PaguroTpmBroken` lifecycle.** It means "the standing TPM seal does not match
+this machine any more", and whoever makes it match again clears it:
+
+| Event | Who | Flag |
+|---|---|---|
+| TPM rung fails its policy (PCRs moved) | loader | set |
+| Windows sees the flag, stages `setupTPM`, reboots into Linux | Windows tool | cleared when staging |
+| a boot on another rung (passphrase, recovery) whose initrd re-seals against this boot's PCR values (handoff `PCRS`) and writes the new `tpm_seal.bin` | initrd | cleared after the file is written |
+| a later boot whose TPM rung succeeds (a stale flag) | initrd | cleared |
+
+A successful boot alone does not clear it: only a seal that matches again
+does. If the `setupTPM` boot itself fails, the loader sets it again.
+
 Any size mismatch → the variable is treated as absent.
 
 ## 6. Measurements (PCR 12) — FROZEN
