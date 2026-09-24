@@ -535,11 +535,11 @@ component (DESIGN §4.4).
 | `paguro uninstall` | DESIGN §6b |
 | `paguro config ...` | the only editor of `paguro.ini` |
 
-### 11.4 Installing a distribution: through WSL2, never an ISO — DRAFT
+### 11.4 Installing a distribution: the distribution's ISO, in a WSL2 container — DRAFT
 
 **WSL2 is a requirement** (Windows 10 2004+ / 11, any edition). **No
-distribution installer ever runs against the real disk, and no ISO is booted to
-install.** A stock installer on bare metal would see the physical disk with
+distribution installer ever runs against the real disk, and no ISO is ever
+booted.** A stock installer on bare metal would see the physical disk with
 Windows on it; a stock live initramfs cannot find its media inside a VHD inside
 NTFS, or behind BitLocker, without our driver injected into it. Building the
 image from Windows removes both problems, and inside WSL2 the only disk an
@@ -551,12 +551,16 @@ paguro install <distro>              (Windows, admin)
   2. create the file      fixed VHD, diskpart `create vdisk type=fixed`
                           (works on Home; no Hyper-V module)
   3. wsl --mount --vhd --bare   the VHD is the only extra disk in WSL2
-  4. in a throwaway WSL2 distribution, one of:
-       a. scripted: debootstrap / dnf --installroot / pacstrap into the VHD
-       b. the distribution's own installer, GUI through WSLg, restricted to
-          that disk (per-distribution adapter, below)
-     then in the target chroot: kernel, firmware and drivers from the
-     manifest, paguro-initramfs, GRUB or a UKI into the nested ESP
+  4. the distribution's own live system, as a privileged container in WSL2:
+       download the ISO, verify SHA256SUMS and its signature
+       mount the ISO at /cdrom, its squashfs as the rootfs (overlay on top)
+       systemd-nspawn -b: the live system's own systemd, dbus, udisks
+         /dev/sdX (the VHD) the only real disk it is given
+         WSLg sockets bound in, so the installer's GUI shows on Windows
+       run the distribution's installer, unchanged except the adapter's
+         overrides (below); it partitions the VHD like any disk
+     then in the target chroot: firmware and drivers from the manifest
+     (§11.5), paguro-initramfs, the bootloader into the nested ESP
      (`grub-install --removable --no-nvram`: WSL2 has no efivarfs)
   5. wsl --unmount
   6. write paguro.ini, PaguroConfigHash, the bootstrap Boot#### entry
@@ -566,15 +570,29 @@ paguro install <distro>              (Windows, admin)
   is in the image from its first boot — no injection problem.
 - The same path makes an existing WSL distribution bootable: its rootfs is the
   source in step 4.
-- **Distribution installers are adapters, not a generic feature.** Installers
-  assume live media (a squashfs at `/cdrom`, `efibootmgr`, the live user), so
-  each needs a small adapter: Calamares (configurable module list, used by many
-  distributions), Anaconda's image/directory install, Ubuntu's `curtin`
-  backend. Where no adapter exists, the scripted path (4a) is the installer,
-  with the distribution chosen from a list in the paguro app.
+- **Why the ISO and not a bootstrap tool.** The install is the distribution's
+  own: its installer, its package selection and defaults, the bits it ships,
+  offline if the ISO is local. The live system already contains every tool the
+  installer needs; we only give it a container instead of a machine.
+- **The adapter is a small set of overrides per distribution**, not a port:
+  the bootloader step (`--no-nvram --removable`, no `efibootmgr`), hiding
+  WSL2's own disks, and a post-install hook that runs the chroot step above.
+  Expected difficulty, easiest first: Calamares-based ISOs (Debian live and
+  many others; configurable module list), Fedora's Anaconda (`liveinst`, needs
+  systemd and dbus, which `nspawn -b` provides), Ubuntu (its installer is a
+  snap, and snapd inside a container is the hard part; its `curtin` backend
+  is the fallback).
+- **To verify first** (§11): that the WSL2 kernel mounts ISO 9660 and squashfs
+  (fallback: `squashfuse`, `bsdtar`), that partition nodes created by the
+  installer appear inside the container, and that the GUI works over WSLg.
+- **The scripted path stays** as the fallback for distributions without an
+  adapter: debootstrap / `dnf --installroot` / pacstrap into the VHD, then the
+  same chroot step.
+- The same flow makes an existing WSL distribution bootable: its rootfs is the
+  source instead of an installer.
 
-ISO 9660 stays readable by Linux (`isofs` on a claimed file) but is not a loader
-format.
+The loader has no ISO support: ISOs are opened in WSL2 at install time, and
+Linux can still mount one from a claimed file with `isofs`.
 
 ### 11.5 Host hardware manifest — DRAFT
 
