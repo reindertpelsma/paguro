@@ -314,15 +314,16 @@ fn pcr12_not_zero_is_refused() {
 
 #[test]
 fn ui_section_is_applied_after_stage2_and_dropped_by_recovery() {
-    use paguro_core::config::{Ui, UiMode, UiTheme};
+    use paguro_core::config::{Keyboard, Ui, UiMode, UiTheme};
     let with_ui = |w: &mut World| {
         let mut ini = w.ini.clone();
-        ini.extend_from_slice(b"\n[UI]\ntheme = light-contrast\nmode = text\n");
+        ini.extend_from_slice(b"\n[UI]\ntheme = light-contrast\nmode = text\nkeyboard = de\n");
         w.set_ini(ini, true);
     };
     let light = Ui {
         theme: UiTheme::LightContrast,
         mode: UiMode::Text,
+        keyboard: Keyboard::De,
     };
     // Applied once the file has verified and parsed.
     let mut w = World::new();
@@ -331,7 +332,7 @@ fn ui_section_is_applied_after_stage2_and_dropped_by_recovery() {
     pin(&mut w, PIN);
     assert_eq!(w.run(), Outcome::Started(Rung::Tpm));
     assert_eq!(w.m.ui, vec![light]);
-    assert!(w.m.logged("paguro: ui light-contrast text"));
+    assert!(w.m.logged("paguro: ui light-contrast text de"));
 
     // Absent: nothing to apply, the platform keeps dark / auto.
     let mut w = World::new();
@@ -1866,7 +1867,7 @@ fn typed_paths_on_both_levels() {
 fn a_bad_typed_path_is_refused_and_the_browser_returns() {
     let mut w = recovery_world();
     w.v.dir("\\paguro", &[]);
-    w.m.input(Input::TypePath).secret("no-backslash.vhd");
+    w.m.input(Input::TypePath).secret("\\a*b.vhd");
     w.m.input(Input::TypePath).secret("\\a\\..\\b.vhd");
     w.m.input(Input::TypePath).secret("\\paguro\\debian.vhd");
     w.m.input(Input::UseDefault);
@@ -1883,6 +1884,31 @@ fn a_bad_typed_path_is_refused_and_the_browser_returns() {
         w.v.saw_entry.clone().unwrap().root.as_deref(),
         Some("\\paguro\\debian.vhd")
     );
+}
+
+#[test]
+fn typed_paths_take_slashes_and_ignore_drive_letters() {
+    for typed in [
+        "C:\\paguro\\debian.vhd",
+        "d:/paguro/debian.vhd",
+        "paguro/debian.vhd",
+    ] {
+        let mut w = recovery_world();
+        w.v.dir("\\paguro", &[]);
+        w.m.input(Input::TypePath).secret(typed);
+        w.m.input(Input::UseDefault);
+        assert_eq!(w.run(), Outcome::Started(Rung::ClearKey), "{typed}");
+        assert_eq!(
+            w.v.saw_entry.clone().unwrap().root.as_deref(),
+            Some("\\paguro\\debian.vhd"),
+            "{typed}"
+        );
+        assert_eq!(
+            w.m.logged("drive letter ignored"),
+            typed.contains(':'),
+            "{typed}"
+        );
+    }
 }
 
 #[test]

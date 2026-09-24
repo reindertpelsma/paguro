@@ -513,9 +513,10 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         if cfg.ui != config::Ui::DEFAULT {
             // Enums selecting compiled-in data (INTERFACES.md §13.2a).
             self.log(format_args!(
-                "paguro: ui {} {}",
+                "paguro: ui {} {} {}",
                 cfg.ui.theme.name(),
-                cfg.ui.mode.name()
+                cfg.ui.mode.name(),
+                cfg.ui.keyboard.name()
             ));
             self.p.ui_prefs(cfg.ui);
             self.st.ui_from_ini = true;
@@ -770,13 +771,19 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             Input::Secret(n) => path.get(..n).and_then(|b| core::str::from_utf8(b).ok()),
             _ => None,
         };
-        let ok = match got {
-            Some(t) if config::check_path(t).is_ok() => out.set(t),
-            Some(_) => false,
-            None => {
-                path.zeroize();
-                return None;
+        let Some(typed) = got else {
+            path.zeroize();
+            return None;
+        };
+        let mut norm = [0u8; config::MAX_PATH_BYTES + 1];
+        let ok = match ui::normalize_path(typed, &mut norm) {
+            Some((t, drive)) => {
+                if drive {
+                    self.log(format_args!("paguro: typed path: drive letter ignored"));
+                }
+                config::check_path(t).is_ok() && out.set(t)
             }
+            None => false,
         };
         path.zeroize();
         if !ok {

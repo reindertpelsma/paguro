@@ -2,7 +2,11 @@
 # `{name}` is a placeholder filled at run time (numbers or names); the build
 # rejects unknown placeholders and missing or unknown keys. A "\n" starts a
 # new paragraph; lines are wrapped to the layout automatically.
+#
+# The file is shared with the Windows app: the loader reads [loader]
+# (loader.* keys); [win] is the app's.
 
+[loader]
 brand = "paguro"
 unattested = "Unattested — paguro could not verify its configuration"
 incorrect = "That did not unlock Linux. Check the keyboard layout and try again."
@@ -14,13 +18,21 @@ hint_back = "back"
 hint_other = "other options"
 hint_show = "show"
 hint_hide = "hide"
-hint_contrast = "contrast"
+hint_theme = "theme"
+# F3: switch the display to the text UI, and back.
+hint_text = "text"
+hint_graphics = "graphics"
 hint_windows = "Start Windows"
 key_arrows = "↑ ↓"
 key_enter = "Enter"
 key_esc = "Esc"
 key_insert = "Insert"
 key_theme = "F2"
+key_mode = "F3"
+key_keyboard = "F4"
+key_language = "F5"
+hint_keyboard = "keyboard"
+hint_language = "language"
 key_w = "W"
 key_r = "R"
 
@@ -125,3 +137,22 @@ unit_mb = "MB"
 unit_gb = "GB"
 unit_tb = "TB"
 decimal = "."
+
+keyboard_title = "Keyboard layout"
+keyboard_help = "At startup the keyboard is read as a US keyboard. Choose the layout printed on yours; it applies until the computer restarts."
+keyboard_line = "Keyboard: {layout}"
+layout_us = "English (US)"
+layout_uk = "English (UK)"
+layout_de = "German"
+layout_fr = "French"
+layout_es = "Spanish"
+layout_be = "Belgian (AZERTY)"
+layout_ch_de = "Swiss German"
+layout_nl_intl = "US International (Dutch)"
+in_use = "in use"
+language_title = "Language"
+# This language's own name, as the language list shows it.
+language_name = "English"
+more_above = "↑ {n} more"
+more_below = "↓ {n} more"
+path_note = "/ works as well as \\. A drive letter such as C: is ignored: the path is on the volume you chose."

@@ -5,187 +5,26 @@
 //! firmware.
 #![allow(clippy::indexing_slicing, dead_code)]
 
+mod common;
 #[path = "../../paguro-boot/tests/mock/mod.rs"]
 mod mock;
 
-use std::collections::VecDeque;
-use std::fmt;
-
+use common::*;
 use mock::*;
-use paguro_boot::platform::{DirView, DiskInfo, Input, Level, Platform, PlatformError, Screen};
+use paguro_boot::Outcome;
+use paguro_boot::platform::{Level, Screen};
 use paguro_boot::ui::Key;
-use paguro_boot::{Buffers, Outcome};
-use paguro_core::guid::Guid;
 use paguro_core::handoff::Rung;
 use paguro_ui::builtin::THEMES;
-use paguro_ui::driver::{self, Display, Session};
 use paguro_ui::theme::Color;
 use paguro_ui::{Canvas, View, render};
 
 const W: u32 = 800;
 const H: u32 = 600;
 
-struct Frame {
-    screen: Screen,
-    px: Vec<u8>,
-}
-
-/// A frame buffer and a keyboard in memory.
-struct MemGop {
-    frame: Vec<u8>,
-    keys: VecDeque<Key>,
-    shown: Vec<Frame>,
-    current: Option<Screen>,
-    mirrored: Vec<Screen>,
-}
-
-impl Display for MemGop {
-    fn size(&self) -> (u32, u32) {
-        (W, H)
-    }
-    fn frame(&mut self) -> &mut [u8] {
-        &mut self.frame
-    }
-    fn present(&mut self) {
-        let screen = self.current.unwrap_or(Screen::Incorrect);
-        self.shown.push(Frame {
-            screen,
-            px: self.frame.clone(),
-        });
-    }
-    fn read_key(&mut self) -> Key {
-        // An exhausted script leaves every screen the way Esc does.
-        self.keys.pop_front().unwrap_or(Key::Escape)
-    }
-    fn mirror(&mut self, screen: &Screen) {
-        self.mirrored.push(*screen);
-    }
-}
-
-/// The mock platform with a graphical `prompt`.
-struct Gop {
-    m: Mock,
-    d: MemGop,
-    s: Session,
-}
-
-impl Platform for Gop {
-    fn read_esp_file(
-        &mut self,
-        name: &str,
-        buf: &mut [u8],
-    ) -> Result<Option<usize>, PlatformError> {
-        self.m.read_esp_file(name, buf)
-    }
-    fn get_var(
-        &mut self,
-        name: &str,
-        vendor: &Guid,
-        buf: &mut [u8],
-    ) -> Result<Option<usize>, PlatformError> {
-        self.m.get_var(name, vendor, buf)
-    }
-    fn set_var(
-        &mut self,
-        name: &str,
-        vendor: &Guid,
-        attrs: u32,
-        data: &[u8],
-    ) -> Result<(), PlatformError> {
-        self.m.set_var(name, vendor, attrs, data)
-    }
-    fn delete_var(&mut self, name: &str, vendor: &Guid) -> Result<(), PlatformError> {
-        self.m.delete_var(name, vendor)
-    }
-    fn secure_boot(&mut self) -> bool {
-        self.m.secure_boot()
-    }
-    fn tpm_present(&mut self) -> bool {
-        self.m.tpm_present()
-    }
-    fn hash_log_extend(
-        &mut self,
-        pcr: u32,
-        data: &[u8],
-        event: &[u8],
-    ) -> Result<(), PlatformError> {
-        self.m.hash_log_extend(pcr, data, event)
-    }
-    fn tpm_submit(&mut self, cmd: &[u8], resp: &mut [u8]) -> Result<usize, PlatformError> {
-        self.m.tpm_submit(cmd, resp)
-    }
-    fn disk_count(&mut self) -> usize {
-        self.m.disk_count()
-    }
-    fn disk_info(&mut self, disk: usize) -> Option<DiskInfo> {
-        self.m.disk_info(disk)
-    }
-    fn read_blocks(&mut self, disk: usize, lba: u64, buf: &mut [u8]) -> Result<(), PlatformError> {
-        self.m.read_blocks(disk, lba, buf)
-    }
-    fn random(&mut self, buf: &mut [u8]) -> Result<(), PlatformError> {
-        self.m.random(buf)
-    }
-    fn prompt(&mut self, screen: &Screen, secret: &mut [u8]) -> Input {
-        self.m.screens.push(*screen);
-        self.d.current = Some(*screen);
-        driver::prompt(&mut self.d, &mut self.s, screen, secret)
-    }
-    fn prompt_browse(&mut self, screen: &Screen, dir: &DirView<'_>) -> Input {
-        self.m.screens.push(*screen);
-        self.d.current = Some(*screen);
-        driver::prompt_browse(&mut self.d, &mut self.s, screen, dir)
-    }
-    fn log(&mut self, args: fmt::Arguments<'_>) {
-        self.m.log(args)
-    }
-    fn publish_handoff(&mut self, blob: &[u8]) -> Result<(), PlatformError> {
-        self.m.publish_handoff(blob)
-    }
-    fn load_start_image(&mut self, dp: &[u8]) -> Result<(), PlatformError> {
-        self.m.load_start_image(dp)
-    }
-    fn load_start_image_buffer(&mut self, image: &[u8]) -> Result<(), PlatformError> {
-        self.m.load_start_image_buffer(image)
-    }
-    fn reset(&mut self) {
-        self.m.reset()
-    }
-}
-
-fn keys(s: &str) -> Vec<Key> {
-    s.chars().map(Key::Char).collect()
-}
-
-/// Run `w`'s boot with `script` typed on the keyboard.
-fn boot(w: &mut World, script: &[Key]) -> (Outcome, Gop) {
-    let m = std::mem::replace(&mut w.m, Mock::new());
-    let mut g = Gop {
-        m,
-        d: MemGop {
-            frame: vec![0; (W * H * 4) as usize],
-            keys: script.iter().copied().collect(),
-            shown: Vec::new(),
-            current: None,
-            mirrored: Vec::new(),
-        },
-        s: Session::new(),
-    };
-    let mut bufs = Box::new(Buffers::new());
-    let out = paguro_boot::run(&mut g, &mut w.v, &mut bufs, &PARAMS);
-    assert!(bufs.secret.iter().all(|&b| b == 0), "secret buffer wiped");
-    assert!(bufs.path.iter().all(|&b| b == 0), "path buffer wiped");
-    (out, g)
-}
-
 fn px(f: &[u8], x: u32, y: u32) -> Color {
     let i = ((y * W + x) * 4) as usize;
     Color::rgb(f[i + 2], f[i + 1], f[i])
-}
-
-fn has_color(f: &[u8], c: Color) -> bool {
-    f.chunks_exact(4)
-        .any(|p| (p[2], p[1], p[0]) == (c.r, c.g, c.b))
 }
 
 fn render_plain(screen: &Screen, theme: usize) -> Vec<u8> {
@@ -207,7 +46,7 @@ fn tpm_unlock_by_keyboard() {
     assert_eq!(out, Outcome::Started(Rung::Tpm));
     let theme = &THEMES[0];
     let first = &g.d.shown[0];
-    assert!(matches!(first.screen, Screen::Unlock(_)));
+    assert!(matches!(first.screen, Some(Screen::Unlock(_))));
     assert_eq!(
         px(&first.px, 2, 2),
         theme.palette.background,
@@ -221,16 +60,16 @@ fn tpm_unlock_by_keyboard() {
     let secret: Vec<_> =
         g.d.shown
             .iter()
-            .filter(|f| matches!(f.screen, Screen::EnterSecret { .. }))
+            .filter(|f| matches!(f.screen, Some(Screen::EnterSecret { .. })))
             .collect();
     assert_eq!(secret.len(), 1 + PIN.len() + 1);
     let last = secret.last().unwrap();
     assert_eq!(
         last.px,
-        render_plain(&last.screen, 0),
+        render_plain(&last.screen.unwrap(), 0),
         "no typed text left on screen"
     );
-    assert_eq!(g.d.mirrored.len(), 2, "each screen mirrored once, as text");
+    assert_eq!(g.d.shown_screens.len(), 2, "each screen announced once");
 }
 
 #[test]
@@ -250,12 +89,14 @@ fn a_wrong_pin_shows_a_toast_on_the_next_screen() {
     let unlocks: Vec<_> =
         g.d.shown
             .iter()
-            .filter(|f| matches!(f.screen, Screen::Unlock(_)))
+            .filter(|f| matches!(f.screen, Some(Screen::Unlock(_))))
             .collect();
     assert!(!has_color(&unlocks[0].px, toast));
     assert!(has_color(&unlocks[1].px, toast), "the retry says why");
     assert!(
-        !g.d.shown.iter().any(|f| f.screen == Screen::Incorrect),
+        !g.d.shown
+            .iter()
+            .any(|f| f.screen == Some(Screen::Incorrect)),
         "no extra key"
     );
 }
@@ -287,7 +128,7 @@ fn mock_recovery_key() -> [u8; 16] {
 }
 
 #[test]
-fn f2_switches_to_high_contrast_for_the_rest_of_the_boot() {
+fn f2_switches_to_the_light_variant_for_the_rest_of_the_boot() {
     let mut w = World::new();
     w.with_tpm_seal(PIN);
     let mut script = vec![Key::Function(2), Key::Enter];
@@ -352,8 +193,8 @@ fn browse_to_a_uki_then_choose_its_root_by_keyboard() {
             "recovery screens say they are unattested"
         );
     }
-    assert!(g.d.mirrored.contains(&Screen::Browse(Level::Volume)));
-    assert!(g.d.mirrored.contains(&Screen::Browse(Level::Root)));
+    assert!(g.d.shown_screens.contains(&Screen::Browse(Level::Volume)));
+    assert!(g.d.shown_screens.contains(&Screen::Browse(Level::Root)));
 }
 
 #[test]
@@ -396,7 +237,10 @@ fn browse_a_disk_efi_partition_by_keyboard() {
         )
     );
     assert_eq!(saw.root.as_deref(), Some("\\paguro\\debian.vhd"));
-    assert!(g.d.mirrored.contains(&Screen::Browse(Level::EfiPartition)));
+    assert!(
+        g.d.shown_screens
+            .contains(&Screen::Browse(Level::EfiPartition))
+    );
     assert_eq!(
         g.m.events.last(),
         Some(&Event::Start(

@@ -1,0 +1,31 @@
+# The light variant: a proper light theme, not an inversion. Warm off-white
+# paper, near-black text (15:1), secondary text at 6:1, and the same warm
+# accent taken darker so it still reads as text and as a focus ring on a
+# light background (4.8:1). Everything else is inherited from theme.toml.
+# paguro.ini [UI] theme = light starts here.
+
+[theme]
+name = "light"
+description = "Light, calm, warm accent"
+
+[colors]
+background = "#f7f5f2"
+text = "#1c2026"
+muted = "#565d67"
+faint = "#9aa0a8"
+accent = "#c2552b"
+surface = "#ffffff"
+surface_selected = "#f6e7de"
+border = "#d9d4cd"
+border_focus = "#c2552b"
+cursor = "#c2552b"
+key_border = "#c5bfb7"
+key_text = "#3a4048"
+banner_background = "#fbeccb"
+banner_text = "#7a4a00"
+toast_background = "#fbe1d9"
+toast_text = "#9c2f15"
+
+[images]
+logo = { file = "images/logo-light.png", size = [40, 40] }
+cursor = { file = "images/cursor-on-light.png", size = [18, 27] }

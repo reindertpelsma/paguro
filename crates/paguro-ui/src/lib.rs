@@ -23,7 +23,9 @@ pub mod draw;
 pub mod driver;
 pub mod fixtures;
 pub mod layout;
+pub mod pointer;
 pub mod text;
+pub mod textui;
 pub mod theme;
 
 /// The string catalogue ([`strings::Str`]), generated from

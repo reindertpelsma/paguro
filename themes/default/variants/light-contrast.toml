@@ -1,0 +1,39 @@
+# High contrast and large text on white: black on white, a deep warm accent
+# (7:1 on white, so it works as text and as the selection outline), inverted
+# banner and toast, and everything one scale step larger like dark-contrast.
+# paguro.ini [UI] theme = light-contrast starts here.
+
+[theme]
+name = "light-contrast"
+description = "Black on white, larger text"
+
+[colors]
+background = "#ffffff"
+text = "#000000"
+muted = "#000000"
+faint = "#595959"
+accent = "#a33400"
+surface = "#ffffff"
+surface_selected = "#ececec"
+border = "#000000"
+border_focus = "#a33400"
+cursor = "#a33400"
+key_border = "#000000"
+key_text = "#000000"
+banner_background = "#000000"
+banner_text = "#ffffff"
+toast_background = "#000000"
+toast_text = "#ffffff"
+
+[images]
+logo = { file = "images/logo-light.png", size = [40, 40] }
+cursor = { file = "images/cursor-on-light.png", size = [18, 27] }
+
+[options]
+selection = "outline"
+scale_bias = 1
+
+[layout]
+row = { height = 60, padding = 20, gap = 8, radius = 4, marker = 3 }
+field = { height = 62, padding = 18, radius = 4, border = 3, cursor = 3, group_gap = 14 }
+keycap = { padding = 7, radius = 3, border = 2, gap = 8 }

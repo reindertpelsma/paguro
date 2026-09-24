@@ -168,18 +168,76 @@ impl UiMode {
     }
 }
 
-/// The `[UI]` section. Absent: dark / auto — which is also what recovery,
-/// which never reads the file, starts with.
+/// `[UI] keyboard`: the layout typed text is read in (INTERFACES.md §13.5).
+/// Firmware maps keys as a US keyboard; the loader turns that back into what
+/// this layout produces for the same physical key, from a compiled-in table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Keyboard {
+    #[default]
+    Us,
+    Uk,
+    De,
+    Fr,
+    Es,
+    Be,
+    ChDe,
+    NlIntl,
+}
+
+impl Keyboard {
+    /// In F4 order.
+    pub const ALL: [Keyboard; 8] = [
+        Keyboard::Us,
+        Keyboard::Uk,
+        Keyboard::De,
+        Keyboard::Fr,
+        Keyboard::Es,
+        Keyboard::Be,
+        Keyboard::ChDe,
+        Keyboard::NlIntl,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Keyboard::Us => "us",
+            Keyboard::Uk => "uk",
+            Keyboard::De => "de",
+            Keyboard::Fr => "fr",
+            Keyboard::Es => "es",
+            Keyboard::Be => "be",
+            Keyboard::ChDe => "ch-de",
+            Keyboard::NlIntl => "nl-intl",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Keyboard> {
+        Keyboard::ALL.into_iter().find(|k| k.name() == s)
+    }
+
+    /// The next layout (F4).
+    pub fn next(self) -> Keyboard {
+        let i = Keyboard::ALL.iter().position(|k| *k == self).unwrap_or(0);
+        Keyboard::ALL
+            .get((i + 1) % Keyboard::ALL.len())
+            .copied()
+            .unwrap_or(Keyboard::Us)
+    }
+}
+
+/// The `[UI]` section. Absent: dark / auto / us — which is also what
+/// recovery, which never reads the file, starts with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Ui {
     pub theme: UiTheme,
     pub mode: UiMode,
+    pub keyboard: Keyboard,
 }
 
 impl Ui {
     pub const DEFAULT: Ui = Ui {
         theme: UiTheme::Dark,
         mode: UiMode::Auto,
+        keyboard: Keyboard::Us,
     };
 }
 
@@ -359,6 +417,7 @@ const K_EFI_FILE: u8 = 16;
 const K_ENABLED: u8 = 1;
 const K_THEME: u8 = 1;
 const K_MODE: u8 = 2;
+const K_KEYBOARD: u8 = 4;
 
 fn mark(seen: &mut u8, bit: u8, line: usize) -> Result<(), ConfigError> {
     if *seen & bit != 0 {
@@ -513,6 +572,11 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
                     mark(&mut ui_seen, K_MODE, line)?;
                     cfg.ui.mode = UiMode::from_name(v).ok_or(ConfigError::BadChoice { line })?;
                 }
+                "keyboard" => {
+                    mark(&mut ui_seen, K_KEYBOARD, line)?;
+                    cfg.ui.keyboard =
+                        Keyboard::from_name(v).ok_or(ConfigError::BadChoice { line })?;
+                }
                 _ => return Err(ConfigError::UnknownKey { line }),
             },
             Section::Tpm | Section::SetupTpm | Section::Passphrase => {
@@ -586,7 +650,7 @@ impl From<crate::bytes::Full> for WriteError {
 /// when present; `efi_disk` only when it differs from `root`; `efi` (with a
 /// disk) is always written, so an
 /// authored file does not depend on the reader's architecture default;
-/// `[UI]` only when it differs from dark / auto.
+/// `[UI]` only when it differs from dark / auto / us.
 pub fn write(cfg: &Config<'_>, out: &mut [u8]) -> Result<usize, WriteError> {
     if cfg.entry_count == 0 || cfg.entry_count > MAX_ENTRIES {
         return Err(WriteError::Invalid);
@@ -647,6 +711,8 @@ pub fn write(cfg: &Config<'_>, out: &mut [u8]) -> Result<usize, WriteError> {
         w.put(cfg.ui.theme.name().as_bytes())?;
         w.put(b"\nmode = ")?;
         w.put(cfg.ui.mode.name().as_bytes())?;
+        w.put(b"\nkeyboard = ")?;
+        w.put(cfg.ui.keyboard.name().as_bytes())?;
         w.put(b"\n")?;
     }
     if w.len() > ini::MAX_LEN {
@@ -1022,23 +1088,39 @@ anything = goes
         assert_eq!(ui("[UI]\n"), Ok(Ui::DEFAULT));
         for t in UiTheme::ALL {
             for m in UiMode::ALL {
-                let src = std::format!("[UI]\ntheme = {}\nmode = {}\n", t.name(), m.name());
-                assert_eq!(ui(&src), Ok(Ui { theme: t, mode: m }), "{src}");
+                for k in Keyboard::ALL {
+                    let src = std::format!(
+                        "[UI]\ntheme = {}\nmode = {}\nkeyboard = {}\n",
+                        t.name(),
+                        m.name(),
+                        k.name()
+                    );
+                    assert_eq!(
+                        ui(&src),
+                        Ok(Ui {
+                            theme: t,
+                            mode: m,
+                            keyboard: k
+                        }),
+                        "{src}"
+                    );
+                }
             }
         }
         assert_eq!(
             ui("[UI]\nmode=text\n"),
             Ok(Ui {
-                theme: UiTheme::Dark,
-                mode: UiMode::Text
+                mode: UiMode::Text,
+                ..Ui::DEFAULT
             }),
             "each key defaults on its own"
         );
         assert_eq!(
-            ui("[UI]\ntheme=light\n[TPM]\nenabled=1\n[UI]\nmode=graphics\n"),
+            ui("[UI]\ntheme=light\n[TPM]\nenabled=1\n[UI]\nmode=graphics\nkeyboard=fr\n"),
             Ok(Ui {
                 theme: UiTheme::Light,
-                mode: UiMode::Graphics
+                mode: UiMode::Graphics,
+                keyboard: Keyboard::Fr,
             }),
             "repeated headers merge"
         );
@@ -1053,6 +1135,10 @@ anything = goes
             "mode=serial",
             "mode=",
             "theme=/EFI/x.png",
+            "keyboard=US",
+            "keyboard=ch",
+            "keyboard=de-nodeadkeys",
+            "keyboard=",
         ] {
             let v = ui(&std::format!("[UI]\n{bad}\n"));
             // `dark ` is trimmed by the grammar and so is valid.
@@ -1071,6 +1157,10 @@ anything = goes
             Err(ConfigError::DuplicateKey { line: 10 })
         );
         assert_eq!(
+            ui("[UI]\nkeyboard=de\nkeyboard=de\n"),
+            Err(ConfigError::DuplicateKey { line: 9 })
+        );
+        assert_eq!(
             ui("[UI]\nlanguage=en\n"),
             Err(ConfigError::UnknownKey { line: 8 })
         );
@@ -1084,6 +1174,15 @@ anything = goes
         }
         for m in UiMode::ALL {
             assert_eq!(UiMode::from_name(m.name()), Some(m));
+        }
+        for k in Keyboard::ALL {
+            assert_eq!(Keyboard::from_name(k.name()), Some(k));
+        }
+        // F4 visits every layout and comes back.
+        let mut k = Keyboard::Us;
+        for want in Keyboard::ALL.iter().skip(1).chain([&Keyboard::Us]) {
+            k = k.next();
+            assert_eq!(k, *want);
         }
     }
 
@@ -1099,11 +1198,17 @@ anything = goes
         );
         for t in UiTheme::ALL {
             for m in UiMode::ALL {
-                c.ui = Ui { theme: t, mode: m };
-                let n = write(&c, &mut buf).unwrap();
-                let text = std::string::String::from_utf8(buf[..n].to_vec()).unwrap();
-                assert_eq!(text.contains("[UI]"), c.ui != Ui::DEFAULT, "{text}");
-                assert_eq!(parse(&buf[..n]).unwrap(), c);
+                for k in Keyboard::ALL {
+                    c.ui = Ui {
+                        theme: t,
+                        mode: m,
+                        keyboard: k,
+                    };
+                    let n = write(&c, &mut buf).unwrap();
+                    let text = std::string::String::from_utf8(buf[..n].to_vec()).unwrap();
+                    assert_eq!(text.contains("[UI]"), c.ui != Ui::DEFAULT, "{text}");
+                    assert_eq!(parse(&buf[..n]).unwrap(), c);
+                }
             }
         }
     }

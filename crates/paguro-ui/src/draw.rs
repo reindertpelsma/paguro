@@ -5,12 +5,145 @@
 
 use core::fmt;
 
+use paguro_boot::ui::Key;
+
 use crate::canvas::{Canvas, Rect};
 use crate::text;
 use crate::theme::{Color, Font, Image};
 
 pub const MAX_CMDS: usize = 224;
 pub const ARENA: usize = 4096;
+/// Clickable elements per screen: list rows, the field, actions, hints.
+pub const MAX_HITS: usize = 32;
+/// Text-cursor stops in the field: one per visible character boundary.
+pub const MAX_STOPS: usize = 160;
+/// Boxes of the field (the recovery key's eight groups, else one).
+pub const MAX_BOXES: usize = 8;
+
+/// What a click on an element does (INTERFACES.md §13.2b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// List row `i` (the browser's rows too): select it and act.
+    Row(usize),
+    /// The text field: move the cursor ([`Hits::char_at`]).
+    Field,
+    /// An action or a key hint: as if the key were pressed.
+    Key(Key),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hit {
+    pub rect: Rect,
+    pub target: Target,
+}
+
+/// A text-cursor position in the field: before character `index`, at `x`
+/// in box `boxi`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stop {
+    pub boxi: u8,
+    pub x: i32,
+    pub index: u16,
+}
+
+/// The layout's clickable rectangles, for hit-testing. Recorded while the
+/// frame is laid out, so a click hits exactly what is drawn.
+#[derive(Clone, Copy, Debug)]
+pub struct Hits {
+    hits: [Hit; MAX_HITS],
+    n: usize,
+    boxes: [Rect; MAX_BOXES],
+    n_boxes: usize,
+    stops: [Stop; MAX_STOPS],
+    n_stops: usize,
+}
+
+impl Default for Hits {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Hits {
+    pub const fn new() -> Hits {
+        Hits {
+            hits: [Hit {
+                rect: Rect::new(0, 0, 0, 0),
+                target: Target::Field,
+            }; MAX_HITS],
+            n: 0,
+            boxes: [Rect::new(0, 0, 0, 0); MAX_BOXES],
+            n_boxes: 0,
+            stops: [Stop {
+                boxi: 0,
+                x: 0,
+                index: 0,
+            }; MAX_STOPS],
+            n_stops: 0,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Hits::new();
+    }
+
+    pub fn push(&mut self, rect: Rect, target: Target) {
+        if rect.is_empty() {
+            return;
+        }
+        if let Some(slot) = self.hits.get_mut(self.n) {
+            *slot = Hit { rect, target };
+            self.n += 1;
+        }
+    }
+
+    pub fn as_slice(&self) -> &[Hit] {
+        self.hits.get(..self.n).unwrap_or(&[])
+    }
+
+    /// Start a field box; its stops follow.
+    pub fn field_box(&mut self, r: Rect) -> Option<u8> {
+        let i = self.n_boxes;
+        let slot = self.boxes.get_mut(i)?;
+        *slot = r;
+        self.n_boxes += 1;
+        u8::try_from(i).ok()
+    }
+
+    pub fn stop(&mut self, boxi: u8, x: i32, index: usize) {
+        if let (Some(slot), Ok(index)) = (self.stops.get_mut(self.n_stops), u16::try_from(index)) {
+            *slot = Stop { boxi, x, index };
+            self.n_stops += 1;
+        }
+    }
+
+    /// The topmost element at (`x`, `y`) — the last one recorded.
+    pub fn at(&self, x: i32, y: i32) -> Option<Target> {
+        let p = Rect::new(x, y, 1, 1);
+        self.as_slice()
+            .iter()
+            .rev()
+            .find(|h| h.rect.contains(&p))
+            .map(|h| h.target)
+    }
+
+    /// The field's character boundary nearest to (`x`, `y`), in the box
+    /// under it.
+    pub fn char_at(&self, x: i32, y: i32) -> Option<usize> {
+        let p = Rect::new(x, y, 1, 1);
+        let b = self
+            .boxes
+            .get(..self.n_boxes)?
+            .iter()
+            .position(|r| r.contains(&p))?;
+        self.stops
+            .get(..self.n_stops)?
+            .iter()
+            .filter(|s| usize::from(s.boxi) == b)
+            .min_by_key(|s| (s.x - x).unsigned_abs())
+            .map(|s| usize::from(s.index))
+    }
+}
 
 /// Where a text run's characters come from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +206,8 @@ pub struct DrawList<'a> {
     pub height: u32,
     /// Rows the list shows at once (PageUp/PageDown move this far).
     pub page: usize,
+    /// What a click at each position hits.
+    pub hits: Hits,
 }
 
 impl<'a> DrawList<'a> {
@@ -86,6 +221,7 @@ impl<'a> DrawList<'a> {
             width: 0,
             height: 0,
             page: 0,
+            hits: Hits::new(),
         }
     }
 
@@ -96,6 +232,7 @@ impl<'a> DrawList<'a> {
         self.width = width;
         self.height = height;
         self.page = 0;
+        self.hits.clear();
         // The arena may have held typed text composed into a template.
         self.arena.fill(0);
     }

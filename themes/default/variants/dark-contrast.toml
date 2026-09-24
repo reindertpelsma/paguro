@@ -1,11 +1,12 @@
-# High contrast and large text: pure black and white, a strong accent, and
-# everything one scale step larger (the same compiled glyphs, so the variant
-# costs no font data). A variant overrides any keys of theme.toml; the rest
-# is inherited. F2 cycles through the variants at run time.
+# High contrast and large text on black: pure black and white, a strong
+# accent, and everything one scale step larger (the same compiled glyphs, so
+# the variant costs no font data). A variant overrides any keys of
+# theme.toml; the rest is inherited. F2 cycles through the variants at run
+# time; paguro.ini [UI] theme = dark-contrast starts here.
 
 [theme]
-name = "high-contrast"
-description = "Black and white, larger text"
+name = "dark-contrast"
+description = "White on black, larger text"
 
 [colors]
 background = "#000000"

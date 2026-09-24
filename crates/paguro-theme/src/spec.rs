@@ -32,13 +32,20 @@ pub const STRINGS: &[StringSpec] = &[
     s("hint_other", "hint"),
     s("hint_show", "hint"),
     s("hint_hide", "hint"),
-    s("hint_contrast", "hint"),
+    s("hint_theme", "hint"),
+    s("hint_text", "hint"),
+    s("hint_graphics", "hint"),
     s("hint_windows", "hint"),
     s("key_arrows", "key"),
     s("key_enter", "key"),
     s("key_esc", "key"),
     s("key_insert", "key"),
     s("key_theme", "key"),
+    s("key_mode", "key"),
+    s("key_keyboard", "key"),
+    s("key_language", "key"),
+    s("hint_keyboard", "hint"),
+    s("hint_language", "hint"),
     s("key_w", "key"),
     s("key_r", "key"),
     s("unlock_title", "title"),
@@ -133,6 +140,38 @@ pub const STRINGS: &[StringSpec] = &[
     s("roots_body", "body"),
     s("no_root", "label"),
     s("no_root_why", "detail"),
+    // The layout and language choosers (F4, F5), and the passphrase
+    // screen's layout line. Names are drawn as list labels (latin1).
+    s("keyboard_title", "title"),
+    s("keyboard_help", "body"),
+    StringSpec {
+        key: "keyboard_line",
+        style: "label",
+        args: &["layout"],
+    },
+    s("layout_us", "label"),
+    s("layout_uk", "label"),
+    s("layout_de", "label"),
+    s("layout_fr", "label"),
+    s("layout_es", "label"),
+    s("layout_be", "label"),
+    s("layout_ch_de", "label"),
+    s("layout_nl_intl", "label"),
+    s("in_use", "detail"),
+    s("language_title", "title"),
+    s("language_name", "label"),
+    // Lists that scroll: what is above and below the visible rows.
+    StringSpec {
+        key: "more_above",
+        style: "detail",
+        args: &["n"],
+    },
+    StringSpec {
+        key: "more_below",
+        style: "detail",
+        args: &["n"],
+    },
+    s("path_note", "body"),
     s("unit_b", "detail"),
     s("unit_kb", "detail"),
     s("unit_mb", "detail"),
@@ -140,6 +179,10 @@ pub const STRINGS: &[StringSpec] = &[
     s("unit_tb", "detail"),
     s("decimal", "detail"),
 ];
+
+/// The variants every theme provides, in F2 order: `THEMES[i]` is
+/// `paguro_core::config::UiTheme::ALL[i]` (INTERFACES.md §13.2a).
+pub const VARIANTS: &[&str] = &["dark", "light", "dark-contrast", "light-contrast"];
 
 /// Colour roles, in `Palette` field order.
 pub const COLORS: &[&str] = &[

@@ -311,6 +311,72 @@ fn ascii_lower_eq(a: &str, b: &str) -> bool {
             .all(|(x, y)| x.eq_ignore_ascii_case(&y))
 }
 
+/// Natural order: case-insensitive, with runs of ASCII digits compared by
+/// value (`disk2` < `disk10`; `a01` = `a1` by value, then the shorter run
+/// first). Total and allocation-free; any length of digits.
+pub fn natural_cmp(a: &str, b: &str) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    let (mut x, mut y) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (x.peek().copied(), y.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(p), Some(q)) if p.is_ascii_digit() && q.is_ascii_digit() => {
+                // Skip leading zeros, then compare the significant digits:
+                // longer is larger, else digit by digit.
+                let (mut za, mut zb) = (0usize, 0usize);
+                while x.peek() == Some(&'0') {
+                    x.next();
+                    za += 1;
+                }
+                while y.peek() == Some(&'0') {
+                    y.next();
+                    zb += 1;
+                }
+                let mut ord = Ordering::Equal;
+                let (mut la, mut lb) = (0usize, 0usize);
+                loop {
+                    let dp = x.peek().copied().filter(char::is_ascii_digit);
+                    let dq = y.peek().copied().filter(char::is_ascii_digit);
+                    match (dp, dq) {
+                        (Some(p), Some(q)) => {
+                            if ord == Ordering::Equal {
+                                ord = p.cmp(&q);
+                            }
+                            x.next();
+                            y.next();
+                            la += 1;
+                            lb += 1;
+                        }
+                        (Some(_), None) => {
+                            x.next();
+                            la += 1;
+                        }
+                        (None, Some(_)) => {
+                            y.next();
+                            lb += 1;
+                        }
+                        (None, None) => break,
+                    }
+                }
+                let o = la.cmp(&lb).then(ord).then(za.cmp(&zb));
+                if o != Ordering::Equal {
+                    return o;
+                }
+            }
+            (Some(p), Some(q)) => {
+                let o = p.to_lowercase().cmp(q.to_lowercase());
+                if o != Ordering::Equal {
+                    return o;
+                }
+                x.next();
+                y.next();
+            }
+        }
+    }
+}
+
 /// The kind a file name has on `level`, or `None` when it is not shown.
 pub fn file_kind(level: Level, name: &str) -> Option<EntryKind> {
     let ext = name.rsplit_once('.').map(|(_, e)| e)?;
@@ -411,7 +477,8 @@ impl DirListing {
         core::str::from_utf8(self.names.get(o..o + l).unwrap_or(&[])).unwrap_or("")
     }
 
-    /// Folders first, then case-insensitively by name (ties by exact name).
+    /// Folders first, then by name: case-insensitively, digit runs by value
+    /// (`disk2` before `disk10`), ties by exact name.
     pub fn sort(&mut self) {
         let names = &self.names;
         let name = |s: &Slot| {
@@ -423,12 +490,7 @@ impl DirListing {
             slots.sort_unstable_by(|a, b| {
                 let (da, db) = (a.kind != EntryKind::Dir, b.kind != EntryKind::Dir);
                 da.cmp(&db)
-                    .then_with(|| {
-                        name(a)
-                            .chars()
-                            .flat_map(char::to_lowercase)
-                            .cmp(name(b).chars().flat_map(char::to_lowercase))
-                    })
+                    .then_with(|| natural_cmp(name(a), name(b)))
                     .then_with(|| name(a).cmp(name(b)))
             });
         }
@@ -528,6 +590,18 @@ pub enum Screen {
     /// The chosen disk has no FAT32 EFI partition the loader can read
     /// (shown like [`Screen::Incorrect`]: no key, the browser follows).
     NoEfiPartition,
+    /// The keyboard layout list (F4, from any prompt): a front-end overlay,
+    /// never shown by the stage machine. [`Input::Choose`] is the index in
+    /// [`Keyboard::ALL`](paguro_core::config::Keyboard::ALL).
+    ChooseKeyboard {
+        current: paguro_core::config::Keyboard,
+    },
+    /// The language list (F5, from any prompt): a front-end overlay over
+    /// the `count` compiled-in languages; [`Input::Choose`] is the index.
+    ChooseLanguage {
+        current: u8,
+        count: u8,
+    },
 }
 
 /// What the user did on a screen.

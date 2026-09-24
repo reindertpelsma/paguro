@@ -91,6 +91,9 @@ struct OptionsSpec {
     selection: String,
     #[serde(default)]
     scale_bias: u8,
+    /// The pointer's cursor: an `[images]` name, drawn with its top-left
+    /// pixel at the pointer's position.
+    pointer: String,
 }
 
 #[derive(Deserialize)]
@@ -448,6 +451,12 @@ fn load_theme(dir: &Path, t: &Table, file: &str) -> Result<Theme, Error> {
             "{file}: [options] scale_bias must be below the number of scales"
         ));
     }
+    if !images.contains_key(&options.pointer) {
+        return Err(format!(
+            "{file}: [options] pointer {:?} is not in [images]",
+            options.pointer
+        ));
+    }
     if !["bar", "fill", "outline"].contains(&options.selection.as_str()) {
         return Err(format!(
             "{file}: [options] selection must be \"bar\", \"fill\" or \"outline\""
@@ -597,19 +606,38 @@ enum Part {
     Break,
 }
 
+/// The loader's strings of one language: the `[loader]` table of
+/// `strings/<lang>.toml` (`loader.*` keys). The file is shared with the
+/// Windows app, whose strings live under `[win]` (`win.*`) and are not
+/// read here; any other top-level key is an error.
 fn load_strings(path: &Path, inputs: &mut Vec<PathBuf>) -> Result<Vec<Vec<Part>>, Error> {
     let file = path.display().to_string();
-    let t = parse_toml(path, inputs)?;
+    let top = parse_toml(path, inputs)?;
+    for k in top.keys() {
+        match (k.as_str(), top.get(k)) {
+            ("loader" | "win", Some(Value::Table(_))) => {}
+            ("loader" | "win", _) => return Err(format!("{file}: [{k}] must be a table")),
+            _ => {
+                return Err(format!(
+                    "{file}: unknown key {k:?}: strings live in [loader] (and [win] for the Windows app)"
+                ));
+            }
+        }
+    }
+    let t = match top.get("loader") {
+        Some(Value::Table(t)) => t.clone(),
+        _ => return Err(format!("{file}: no [loader] table")),
+    };
     for k in t.keys() {
         if !spec::STRINGS.iter().any(|s| s.key == k) {
-            return Err(format!("{file}: unknown string {k:?}"));
+            return Err(format!("{file}: unknown string loader.{k}"));
         }
     }
     let mut out = Vec::new();
     for s in spec::STRINGS {
         let v = t
             .get(s.key)
-            .ok_or_else(|| format!("{file}: missing string {:?}", s.key))?
+            .ok_or_else(|| format!("{file}: missing string loader.{}", s.key))?
             .as_str()
             .ok_or_else(|| format!("{file}: {} must be a string", s.key))?;
         if v.trim().is_empty() {
@@ -1135,7 +1163,32 @@ pub fn compile(o: &Options) -> Result<Output, Error> {
             ));
         }
     }
-    let strings_file = dir.join("strings").join(format!("{}.toml", o.lang));
+    // Every build carries the variants paguro.ini can name, in F2 order
+    // (INTERFACES.md §13.2a); any others follow.
+    for want in spec::VARIANTS {
+        if !seen.contains(*want) {
+            return Err(format!(
+                "{}: no variant named {want:?}: every theme provides {} (theme.toml or variants/*.toml)",
+                dir.display(),
+                spec::VARIANTS.join(", ")
+            ));
+        }
+    }
+    let rank = |n: &str| {
+        spec::VARIANTS
+            .iter()
+            .position(|v| *v == n)
+            .unwrap_or(spec::VARIANTS.len())
+    };
+    themes.sort_by(|a, b| {
+        rank(&a.meta.name)
+            .cmp(&rank(&b.meta.name))
+            .then_with(|| a.meta.name.cmp(&b.meta.name))
+    });
+    // Every language in strings/ is compiled in (on-screen choice, F5);
+    // PAGURO_LANG is the one the loader starts in, then English.
+    let sdir = dir.join("strings");
+    let strings_file = sdir.join(format!("{}.toml", o.lang));
     if !strings_file.is_file() {
         return Err(format!(
             "theme {:?} has no strings for language {:?} ({} is missing)",
@@ -1144,22 +1197,45 @@ pub fn compile(o: &Options) -> Result<Output, Error> {
             strings_file.display()
         ));
     }
-    let strings = load_strings(&strings_file, &mut inputs)?;
+    inputs.push(sdir.clone());
+    let mut codes: Vec<String> = std::fs::read_dir(&sdir)
+        .map_err(|e| format!("{}: {e}", sdir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .collect();
+    codes.sort_by_key(|c| (c != &o.lang, c != "en", c.clone()));
+    for c in &codes {
+        if c.is_empty()
+            || !c
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(format!("{}: {c:?} is not a language code", sdir.display()));
+        }
+    }
+    let mut langs = Vec::new();
+    for c in &codes {
+        langs.push(load_strings(&sdir.join(format!("{c}.toml")), &mut inputs)?);
+    }
 
-    // Characters each style needs: the strings drawn in it, digits and the
-    // fallback, and the options' bullet and ellipsis.
+    // Characters each style needs: the strings drawn in it (in every
+    // language), digits and the fallback, and the options' bullet and
+    // ellipsis.
     let mut needed: Vec<BTreeSet<char>> = spec::STYLES
         .iter()
         .map(|_| spec::ALWAYS.chars().collect())
         .collect();
-    for (sp, parts) in spec::STRINGS.iter().zip(&strings) {
-        let i = spec::STYLES
-            .iter()
-            .position(|(n, _)| *n == sp.style)
-            .ok_or_else(|| format!("string {:?}: unknown style {:?}", sp.key, sp.style))?;
-        for p in parts {
-            if let Part::Lit(s) = p {
-                needed[i].extend(s.chars());
+    for strings in &langs {
+        for (sp, parts) in spec::STRINGS.iter().zip(strings) {
+            let i = spec::STYLES
+                .iter()
+                .position(|(n, _)| *n == sp.style)
+                .ok_or_else(|| format!("string {:?}: unknown style {:?}", sp.key, sp.style))?;
+            for p in parts {
+                if let Part::Lit(s) = p {
+                    needed[i].extend(s.chars());
+                }
             }
         }
     }
@@ -1178,7 +1254,8 @@ pub fn compile(o: &Options) -> Result<Output, Error> {
     };
     let mut font_cache: HashMap<PathBuf, fontdue::Font> = HashMap::new();
     let mut theme_code = Vec::new();
-    for t in &themes {
+    let mut shared = String::new();
+    for (ti, t) in themes.iter().enumerate() {
         let file = &t.meta.name;
         let bullet = one_char(&t.options.bullet, "bullet", file)?;
         let ellipsis = one_char(&t.options.ellipsis, "ellipsis", file)?;
@@ -1265,51 +1342,91 @@ pub fn compile(o: &Options) -> Result<Output, Error> {
             .iter()
             .map(|l| layout_code(l, &t.images))
             .collect();
+        let pointer = t
+            .images
+            .keys()
+            .position(|k| *k == t.options.pointer)
+            .unwrap_or(0);
+        let _ = writeln!(
+            shared,
+            "static STEPS_{ti}: [Step; {}] = [{}];\nstatic LAYOUTS_{ti}: [Layout; SCREEN_KINDS] = [{}];",
+            steps.len(),
+            steps.join(", "),
+            layouts.join(", "),
+        );
         theme_code.push(format!(
             "Theme {{ name: {}, description: {}, reference: ({}, {}), \
              palette: Palette {{ {} }}, \
-             options: Options {{ bullet: {bullet:?}, ellipsis: {ellipsis:?}, selection: Selection::{selection}, scale_bias: {} }}, \
-             steps: &[{}], layouts: [{}], strings: &STRINGS }}",
+             options: Options {{ bullet: {bullet:?}, ellipsis: {ellipsis:?}, selection: Selection::{selection}, scale_bias: {}, pointer: {pointer} }}, \
+             steps: &STEPS_{ti}, layouts: &LAYOUTS_{ti}, strings: &STRINGS_@L }}",
             rust_str(&t.meta.name),
             rust_str(&t.meta.description),
             t.meta.reference[0],
             t.meta.reference[1],
             palette.join(", "),
             t.options.scale_bias,
-            steps.join(", "),
-            layouts.join(", "),
         ));
     }
 
     let mut code = format!(
-        "// @generated by paguro-theme from {} (language {:?}). Do not edit.\n\
+        "// @generated by paguro-theme from {} (languages {:?}). Do not edit.\n\
          /// The theme directory this build compiled.\npub const THEME_SOURCE: &str = {};\n\
-         /// The language of [`STRINGS`].\npub const LANG: &str = {};\n\n",
+         /// The language the loader starts in (PAGURO_LANG): [`LANGS`]`[0]`.\npub const LANG: &str = {};\n\n",
         dir.display(),
-        o.lang,
+        codes,
         rust_str(&o.theme),
         rust_str(&o.lang)
     );
     code.push_str(&em.code);
-    let _ = writeln!(code, "\n/// The strings, as literal and placeholder parts.");
-    let _ = write!(code, "pub static STRINGS: [Tpl; STR_COUNT] = [");
-    for parts in &strings {
-        let ps: Vec<String> = parts
-            .iter()
-            .map(|p| match p {
-                Part::Lit(s) => format!("Part::Lit({})", rust_str(s)),
-                Part::Arg(i) => format!("Part::Arg({i})"),
-                Part::Break => "Part::Break".to_string(),
-            })
-            .collect();
-        let _ = write!(code, "Tpl(&[{}]), ", ps.join(", "));
+    code.push_str(&shared);
+    for (li, strings) in langs.iter().enumerate() {
+        let _ = writeln!(code, "\n/// Strings of language `{}`.", codes[li]);
+        let _ = write!(code, "static STRINGS_{li}: [Tpl; STR_COUNT] = [");
+        for parts in strings {
+            let ps: Vec<String> = parts
+                .iter()
+                .map(|p| match p {
+                    Part::Lit(s) => format!("Part::Lit({})", rust_str(s)),
+                    Part::Arg(i) => format!("Part::Arg({i})"),
+                    Part::Break => "Part::Break".to_string(),
+                })
+                .collect();
+            let _ = write!(code, "Tpl(&[{}]), ", ps.join(", "));
+        }
+        let _ = writeln!(code, "];");
     }
-    let _ = writeln!(code, "];\n");
     let _ = writeln!(
         code,
-        "/// The base theme first, then its variants (F2 cycles them).\npub static THEMES: [Theme; {}] = [{}];",
-        theme_code.len(),
-        theme_code.join(",\n")
+        "\n/// The compiled-in languages' codes, the starting one first, then English.\npub static LANGS: [&str; {}] = [{}];",
+        codes.len(),
+        codes
+            .iter()
+            .map(|c| rust_str(c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let by_lang: Vec<String> = (0..langs.len())
+        .map(|li| {
+            format!(
+                "[{}]",
+                theme_code
+                    .iter()
+                    .map(|t| t.replace("STRINGS_@L", &format!("STRINGS_{li}")))
+                    .collect::<Vec<_>>()
+                    .join(",\n")
+            )
+        })
+        .collect();
+    let _ = writeln!(
+        code,
+        "\n/// Every variant in every language: `BY_LANG[language][variant]`.\n\
+         /// Variants: dark, light, dark-contrast, light-contrast (F2 order, and the order\n\
+         /// of `paguro_core::config::UiTheme::ALL`), then any others.\n\
+         pub static BY_LANG: [[Theme; {v}]; {l}] = [{}];\n\
+         /// The variants in the starting language.\npub static THEMES: &[Theme; {v}] = &BY_LANG[0];",
+        by_lang.join(",\n"),
+        v = theme_code.len(),
+        l = langs.len(),
     );
     std::fs::write(o.out_dir.join("theme.rs"), code)
         .map_err(|e| format!("writing theme.rs: {e}"))?;
@@ -1317,10 +1434,10 @@ pub fn compile(o: &Options) -> Result<Output, Error> {
         .map_err(|e| format!("writing strings.rs: {e}"))?;
 
     let summary = format!(
-        "theme {:?} ({} variant(s)), language {:?}: {} glyphs, {} KiB glyph data, {} KiB images",
+        "theme {:?} ({} variant(s)), languages {:?}: {} glyphs, {} KiB glyph data, {} KiB images",
         o.theme,
         themes.len(),
-        o.lang,
+        codes,
         em.glyph_count,
         em.font_bytes / 1024,
         em.image_bytes / 1024
@@ -1380,7 +1497,7 @@ mod tests {
     #[test]
     fn the_default_theme_compiles() {
         let out = compile_edited("ok", |t| t).unwrap();
-        assert!(out.summary.contains("2 variant(s)"), "{}", out.summary);
+        assert!(out.summary.contains("4 variant(s)"), "{}", out.summary);
     }
 
     #[test]
@@ -1458,6 +1575,16 @@ mod tests {
                 "bullet",
                 &|t| t.replace("bullet = \"•\"", "bullet = \"**\""),
                 "bullet must be exactly one character",
+            ),
+            (
+                "pointer",
+                &|t| t.replace("pointer = \"cursor\"", "pointer = \"arrow\""),
+                "[options] pointer \"arrow\" is not in [images]",
+            ),
+            (
+                "variant-name",
+                &|t| t.replace("name = \"dark\"", "name = \"midnight\""),
+                "no variant named \"dark\"",
             ),
             (
                 "glyph",

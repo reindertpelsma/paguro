@@ -1,0 +1,1276 @@
+# The text UI (80×24) of every fixture in the starting language
+# (tests/golden.rs; PAGURO_BLESS=1 regenerates).
+
+== unlock ==
+ paguro
+
+   Unlock Linux
+
+ > 1  Password or PIN                                     3 TPM attempts left
+   3  Recovery key                                                  48 digits
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [W] Start Windows
+   [Esc] other options   [F5] language   [F3] graphics
+
+== unlock-all-rows ==
+ paguro
+
+   Unlock Linux
+
+   1  Password or PIN                                        last TPM attempt
+ > 2  Recovery passphrase                                    no attempt limit
+   3  Recovery key                                                  48 digits
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [W] Start Windows
+   [Esc] other options   [F5] language   [F3] graphics
+
+== unlock-first-boot ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Unlock Linux
+
+   | From now on this replaces your Linux login password -- and restarting
+   | into Linux from Windows skips it.
+
+ > 1  Password or PIN
+   3  Recovery key                                                  48 digits
+
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [W] Start Windows
+   [Esc] other options   [F5] language   [F3] graphics
+
+== unlock-recovery ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Unlock Linux
+
+   1  Password or PIN                     unavailable until restart - reco...
+ > 2  Recovery passphrase                                    no attempt limit
+   3  Recovery key                                                  48 digits
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [W] Start Windows
+   [Esc] other options   [F5] language   [F3] graphics
+
+== unlock-locked ==
+ paguro
+
+   Unlock Linux
+
+   1  Password or PIN                         TPM locked - use another option
+ > 3  Recovery key                                                  48 digits
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [W] Start Windows
+   [Esc] other options   [F5] language   [F3] graphics
+
+== unlock-incorrect ==
+ paguro
+
+   ! That did not unlock Linux. Check the keyboard layout and try again.
+
+   Unlock Linux
+
+ > 1  Password or PIN                                     3 TPM attempts left
+   3  Recovery key                                                  48 digits
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [W] Start Windows
+   [Esc] other options   [F5] language   [F3] graphics
+
+== password-empty ==
+ paguro
+
+   Enter your password or PIN
+
+   >
+
+   Keyboard: English (US)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Enter] continue   [Insert] show   [Esc] back   [F4] keyboard
+   [F5] language   [F3] graphics
+
+== password-hidden ==
+ paguro
+
+   Enter your password or PIN
+
+   > *************
+
+   Keyboard: English (US)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Enter] continue   [Insert] show   [Esc] back   [F4] keyboard
+   [F5] language   [F3] graphics
+
+== password-revealed ==
+ paguro
+
+   Enter your password or PIN
+
+   > correct horse
+
+   Keyboard: English (US)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Enter] continue   [Insert] hide   [Esc] back   [F4] keyboard
+   [F5] language   [F3] graphics
+
+== password-cursor-mid ==
+ paguro
+
+   Enter your password or PIN
+
+   > correct horse
+
+   Keyboard: English (US)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Enter] continue   [Insert] hide   [Esc] back   [F4] keyboard
+   [F5] language   [F3] graphics
+
+== password-long ==
+ paguro
+
+   Enter your password or PIN
+
+   >  passphrase is much longer than the field can show at once, so it scrolls
+
+   Keyboard: English (US)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Enter] continue   [Insert] hide   [Esc] back   [F4] keyboard
+   [F5] language   [F3] graphics
+
+== passphrase-unattested ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Enter your recovery passphrase
+
+   >
+
+   Keyboard: English (US)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Enter] continue   [Insert] show   [Esc] back   [F4] keyboard
+   [F5] language   [F3] graphics
+
+== recovery-key-empty ==
+ paguro
+
+   Enter your recovery key
+
+   > ______-______-______-______-______-______-______-______
+
+   48 digits in groups of six. Find it at aka.ms/myrecoverykey
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Enter] continue   [Insert] show   [Esc] back   [F5] language
+   [F3] graphics
+
+== recovery-key-half ==
+ paguro
+
+   Enter your recovery key
+
+   > ******-******-******-******-______-______-______-______
+
+   48 digits in groups of six. Find it at aka.ms/myrecoverykey
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Enter] continue   [Insert] show   [Esc] back   [F5] language
+   [F3] graphics
+
+== recovery-key-revealed ==
+ paguro
+
+   Enter your recovery key
+
+   > 000011-000022-000033-000044-000055-______-______-______
+
+   48 digits in groups of six. Find it at aka.ms/myrecoverykey
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Enter] continue   [Insert] hide   [Esc] back   [F5] language
+   [F3] graphics
+
+== cannot-unlock ==
+ paguro
+
+   Cannot unlock Linux
+
+   Windows will almost certainly start normally. Try that first -- you
+   probably do not need your recovery key.
+
+   [Enter]  Start Windows
+   [R]      I need Linux now -- enter recovery key
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [F5] language   [F3] graphics
+
+== config-invalid ==
+ paguro
+
+   Configuration is not valid
+
+   paguro.ini has changed since it was installed, or is damaged. Linux cannot
+   start from it.
+
+   If you did not change it, this may indicate tampering.
+
+   [Enter]  Start Windows
+   [R]      Recover Linux -- needs a password or key
+
+
+
+
+
+
+
+
+
+
+
+
+   [F5] language   [F3] graphics
+
+== tpm-locked ==
+ paguro
+
+   Too many incorrect attempts
+
+   The TPM has locked itself to prevent guessing. Waiting will restore it --
+   nothing is damaged.
+
+   Your other unlock options still work.
+
+   [Enter]  Try another option
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [F5] language   [F3] graphics
+
+== hibernated ==
+ paguro
+
+   Windows saved a session -- starting Linux read-only
+
+   This is normal after shutting Windows down. Your disk is fine. Linux will
+   start, but cannot write until Windows resumes once.
+
+   [Enter]  Continue read-only -- get to your files
+   [W]      Restart into Windows -- then restart into Linux
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [F5] language   [F3] graphics
+
+== dirty ==
+ paguro
+
+   Windows didn't shut down cleanly last time
+
+   This is usually harmless and your disk is fine. Linux will start read-only
+   until Windows has started and shut down once.
+
+   [Enter]  Continue read-only -- get to your files
+   [W]      Restart into Windows -- then restart into Linux
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [F5] language   [F3] graphics
+
+== pcr12 ==
+ paguro
+
+   This firmware already used paguro's measurement slot
+
+   The TPM cannot protect the key on this boot. Windows is not affected.
+
+   [Enter]  Start Windows
+   [R]      Recover Linux
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [F5] language   [F3] graphics
+
+== plaintext ==
+ paguro
+
+   This configuration protects nothing
+
+   A TPM seal over an unencrypted volume would only look like protection, so
+   paguro refuses it. Start Windows and run the paguro repair tool.
+
+   [Enter]  Continue
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [F5] language   [F3] graphics
+
+== volume-missing ==
+ paguro
+
+   The Linux volume was not found
+
+   The volume named in the configuration is not on any disk connected now.
+
+   [Enter]  Start Windows
+   [R]      Recover Linux
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [F5] language   [F3] graphics
+
+== not-implemented ==
+ paguro
+
+   This build cannot finish starting Linux
+
+   A later stage of paguro is not implemented yet. Nothing was changed.
+
+   [Enter]  Continue
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [F5] language   [F3] graphics
+
+== no-installation ==
+ paguro
+
+   No Linux installation found
+
+   paguro searched every disk and found no volume to start Linux from.
+
+   | To fix: start Windows and run the paguro repair tool.
+
+   [Enter]  Start Windows
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [F5] language   [F3] graphics
+
+== volumes-1 ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Which volume holds your Linux installation?
+
+ > 1  Basic data partition - Disk 0, partition 3           931 GB - BitLocker
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [W] Start Windows   [F5] language
+   [F3] graphics
+
+== volumes-8 ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Which volume holds your Linux installation?
+
+   1  Basic data partition - Disk 0, partition 3           931 GB - BitLocker
+   2  A partition whose name is far longer than any ro...  466 GB - BitLocker
+ > 3  Data - Disk 1, partition 3                 311 GB - NTFS, not encrypted
+   4  Windows - Disk 1, partition 4                        234 GB - BitLocker
+   5  Games - Disk 2, partition 3                          187 GB - BitLocker
+   6  Disk 2, partition 4                        156 GB - NTFS, not encrypted
+   7  Backup - Disk 3, partition 3                         135 GB - BitLocker
+   8  Scratch - Disk 3, partition 4                        118 GB - BitLocker
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [W] Start Windows   [F5] language
+   [F3] graphics
+
+== volumes-8-bottom ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Which volume holds your Linux installation?
+
+   1  Basic data partition - Disk 0, partition 3           931 GB - BitLocker
+   2  Disk 0, partition 4                                  466 GB - BitLocker
+   3  Data - Disk 1, partition 3                 311 GB - NTFS, not encrypted
+   4  Windows - Disk 1, partition 4                        234 GB - BitLocker
+   5  Games - Disk 2, partition 3                          187 GB - BitLocker
+   6  Disk 2, partition 4                        156 GB - NTFS, not encrypted
+   7  Backup - Disk 3, partition 3                         135 GB - BitLocker
+ > 8  Scratch - Disk 3, partition 4                        118 GB - BitLocker
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [W] Start Windows   [F5] language
+   [F3] graphics
+
+== browse-paguro ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Choose what to start
+   \paguro
+ >    Old                                                              Folder
+      tools                                                            Folder
+      arch.vhdx                                            Linux disk - 64 GB
+      debian.vhd                                          Linux disk - 214 GB
+      rescue.efi                                    UEFI application - 112 MB
+      Type a path...                              a disk image or a .efi file
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Left] parent folder   [Esc] back
+   [F5] language   [F3] graphics
+
+== browse-disk-selected ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Choose what to start
+   \paguro
+      Old                                                              Folder
+      tools                                                            Folder
+      arch.vhdx                                            Linux disk - 64 GB
+ >    debian.vhd                                          Linux disk - 214 GB
+      rescue.efi                                    UEFI application - 112 MB
+      Type a path...                              a disk image or a .efi file
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Left] parent folder   [Esc] back
+   [F5] language   [F3] graphics
+
+== browse-efi-selected ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Choose what to start
+   \paguro
+      Old                                                              Folder
+      tools                                                            Folder
+      arch.vhdx                                            Linux disk - 64 GB
+      debian.vhd                                          Linux disk - 214 GB
+ >    rescue.efi                                    UEFI application - 112 MB
+      Type a path...                              a disk image or a .efi file
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Left] parent folder   [Esc] back
+   [F5] language   [F3] graphics
+
+== browse-empty ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Choose what to start
+   \paguro\Old
+
+   Nothing here can start Linux: no folders, disk images or UEFI
+   applications.
+
+ >    Type a path...                              a disk image or a .efi file
+
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Left] parent folder   [Esc] back
+   [F5] language   [F3] graphics
+
+== browse-long-top ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Choose what to start
+   \paguro\tools                                                       1 / 41
+
+ >    backup-00                                                        Folder
+      backup-01                                                        Folder
+      backup-02                                                        Folder
+      backup-03                                                        Folder
+      backup-04                                                        Folder
+      backup-05                                                        Folder
+      backup-06                                                        Folder
+      backup-07                                                        Folder
+      kernel-6.0.0-generic.efi                       UEFI application - 20 MB
+      kernel-6.1.3-generic.efi                       UEFI application - 21 MB
+      v 31 more
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Left] parent folder   [Esc] back
+   [F5] language   [F3] graphics
+
+== browse-long-scrolled ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Choose what to start
+   \paguro\tools                                                      31 / 41
+      ^ 21 more
+      kernel-6.13.6-generic.efi                      UEFI application - 33 MB
+      kernel-6.14.9-generic.efi                      UEFI application - 34 MB
+      kernel-6.15.1-generic.efi                      UEFI application - 35 MB
+      vm-a-test.vhdx                                      Linux disk - 8.0 GB
+      vm-b.vhdx                                            Linux disk - 16 GB
+      vm-c.vhdx                                            Linux disk - 24 GB
+      vm-d-test.vhdx                                       Linux disk - 32 GB
+      vm-e.vhdx                                            Linux disk - 40 GB
+      vm-f.vhdx                                            Linux disk - 48 GB
+ >    vm-g-test.vhdx                                       Linux disk - 56 GB
+      v 10 more
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Left] parent folder   [Esc] back
+   [F5] language   [F3] graphics
+
+== browse-long-bottom ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Choose what to start
+   \paguro\tools                                                      41 / 41
+      ^ 31 more
+      vm-h.vhdx                                            Linux disk - 64 GB
+      vm-i.vhdx                                            Linux disk - 72 GB
+      vm-j-test.vhdx                                       Linux disk - 80 GB
+      vm-k.vhdx                                            Linux disk - 88 GB
+      vm-l.vhdx                                            Linux disk - 96 GB
+      vm-m-test.vhdx                                      Linux disk - 104 GB
+      vm-n.vhdx                                           Linux disk - 112 GB
+      vm-o.vhdx                                           Linux disk - 120 GB
+      vm-p-test.vhdx                                      Linux disk - 128 GB
+ >    Type a path...                              a disk image or a .efi file
+
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Left] parent folder   [Esc] back
+   [F5] language   [F3] graphics
+
+== browse-deep ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Choose what to start
+   ...\Documents\Virtual Machines\Linux\Ubuntu 24.04 LTS (desktop)\disks\2024
+      snapshot-before-upgrade-2024-06-01.vhdx              Linux disk - 88 GB
+ >    ubuntu-24.04.vhdx                                   Linux disk - 120 GB
+      Type a path...                              a disk image or a .efi file
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Left] parent folder   [Esc] back
+   [F5] language   [F3] graphics
+
+== browse-esp ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Choose a UEFI application
+   \EFI
+      BOOT                                                             Folder
+      Linux                                                            Folder
+ >    systemd                                                          Folder
+      ubuntu                                                           Folder
+      grubx64.efi                                   UEFI application - 2.0 MB
+      Type a path...                            a .efi file on this partition
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Left] parent folder   [Esc] back
+   [F5] language   [F3] graphics
+
+== browse-more ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Choose what to start
+   \
+ >    a                                                                Folder
+      b                                                                Folder
+      c.vhd                                               Linux disk - 1.0 GB
+      d.efi                                         UEFI application - 1.0 MB
+      Type a path...                              a disk image or a .efi file
+
+   This folder has more entries than can be listed; only the first 4 are
+   shown.
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Esc] back   [F5] language
+   [F3] graphics
+
+== browse-path-refused ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   ! That is not a usable path on this volume.
+
+   Choose what to start
+   \paguro
+      Old                                                              Folder
+      tools                                                            Folder
+      arch.vhdx                                            Linux disk - 64 GB
+      debian.vhd                                          Linux disk - 214 GB
+      rescue.efi                                    UEFI application - 112 MB
+ >    Type a path...                              a disk image or a .efi file
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Left] parent folder   [Esc] back
+   [F5] language   [F3] graphics
+
+== disk-start ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   How should this disk start?
+   debian.vhd
+
+ > 1  Its default UEFI application                      \EFI\BOOT\BOOTX64.EFI
+   2  Choose another on its EFI partition...        systemd-boot, a UKI, shim
+   3  Type a path...                            a .efi file on this partition
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [Esc] back   [F5] language
+   [F3] graphics
+
+== disk-start-no-esp ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   ! This disk has no EFI partition paguro can read.
+
+   How should this disk start?
+   debian.vhd
+
+   1  Its default UEFI application                      \EFI\BOOT\BOOTX64.EFI
+ > 2  Choose another on its EFI partition...        systemd-boot, a UKI, shim
+   3  Type a path...                            a .efi file on this partition
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [Esc] back   [F5] language
+   [F3] graphics
+
+== path-typing ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Type the path of what to start
+
+   Path
+   > \paguro\rescue.efi
+
+   Keyboard: English (US)
+
+   A path on this volume, such as \paguro\debian.vhd. A name ending in .efi
+   starts as a UEFI application.
+
+   / works as well as \. A drive letter such as C: is ignored: the path is on
+   the volume you chose.
+
+
+
+
+
+
+
+   [Enter] continue   [Esc] back   [F4] keyboard   [F5] language
+   [F3] graphics
+
+== path-typing-esp ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Type the path of a UEFI application
+
+   Path
+   > \EFI\systemd\systemd-bootx64.efi
+
+   Keyboard: English (US)
+
+   A path on the disk's EFI partition, such as
+   \EFI\systemd\systemd-bootx64.efi.
+
+   / works as well as \. A drive letter such as C: is ignored: the path is on
+   the volume you chose.
+
+
+
+
+
+
+
+   [Enter] continue   [Esc] back   [F4] keyboard   [F5] language
+   [F3] graphics
+
+== browse-root ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Which disk holds Linux?
+
+   The UEFI application you chose starts Linux, which then needs its root
+   disk.
+
+   \paguro
+      vms                                                              Folder
+      arch.vhdx                                            Linux disk - 64 GB
+ >    debian.vhd                                          Linux disk - 214 GB
+      Type a path...                      a disk image anywhere on the volume
+      None                                      Linux will ask when it starts
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Left] parent folder   [Esc] back
+   [F5] language   [F3] graphics
+
+== browse-root-none ==
+ paguro
+   ! Unattested -- paguro could not verify its configuration
+
+   Which disk holds Linux?
+
+   The UEFI application you chose starts Linux, which then needs its root
+   disk.
+
+   \paguro
+      vms                                                              Folder
+      arch.vhdx                                            Linux disk - 64 GB
+      debian.vhd                                          Linux disk - 214 GB
+      Type a path...                      a disk image anywhere on the volume
+ >    None                                      Linux will ask when it starts
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] open   [Left] parent folder   [Esc] back
+   [F5] language   [F3] graphics
+
+== password-keyboard-de ==
+ paguro
+
+   Enter your recovery passphrase
+
+   > *****
+
+   Keyboard: German
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Enter] continue   [Insert] show   [Esc] back   [F4] keyboard
+   [F5] language   [F3] graphics
+
+== keyboards ==
+ paguro
+
+   Keyboard layout
+
+   At startup the keyboard is read as a US keyboard. Choose the layout
+   printed on yours; it applies until the computer restarts.
+
+      English (US)
+      English (UK)
+ >    German                                                           in use
+      French
+      Spanish
+      Belgian (AZERTY)
+      Swiss German
+      US International (Dutch)
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [Esc] back   [F5] language
+   [F3] graphics
+
+== keyboards-bottom ==
+ paguro
+
+   Keyboard layout
+
+   At startup the keyboard is read as a US keyboard. Choose the layout
+   printed on yours; it applies until the computer restarts.
+
+      English (US)                                                     in use
+      English (UK)
+      German
+      French
+      Spanish
+      Belgian (AZERTY)
+      Swiss German
+ >    US International (Dutch)
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [Esc] back   [F5] language
+   [F3] graphics
+
+== languages ==
+ paguro
+
+   Language
+
+ >    English                                                          in use
+      Deutsch
+      Español
+      Français
+      Nederlands
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [Up Down] select   [Enter] continue   [Esc] back   [F5] language
+   [F3] graphics

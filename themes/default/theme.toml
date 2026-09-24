@@ -1,9 +1,11 @@
-# The default paguro theme: calm, dark, generous spacing.
-# Format: themes/README.md. Every length is in reference pixels, scaled per
-# resolution (see [theme] reference / scales).
+# The default paguro theme: calm, generous spacing, a warm accent. This file
+# is its `dark` variant; variants/ holds `light` and a high-contrast version
+# of each (every theme provides these four: paguro.ini [UI] theme names
+# them, F2 cycles them). Format: themes/README.md. Every length is in
+# reference pixels, scaled per resolution (see [theme] reference / scales).
 
 [theme]
-name = "default"
+name = "dark"
 description = "Dark, calm, warm accent"
 # The UI is laid out for this size; the scale is min(width / 1280,
 # height / 900), snapped down to the nearest entry of `scales` (the smallest
@@ -53,6 +55,9 @@ toast_text = "#f2a58f"
 
 [images]
 logo = { file = "images/logo.png", size = [40, 40] }
+# The pointer (shown once a mouse or touch device moves; the tip is the
+# top-left pixel). A light arrow on dark variants, a dark one on light.
+cursor = { file = "images/cursor-on-dark.png", size = [18, 27] }
 
 [options]
 bullet = "•"
@@ -64,6 +69,8 @@ selection = "bar"
 # "large text" variant sets 1: everything, text included, one step larger,
 # with no extra glyphs compiled in.
 scale_bias = 0
+# The [images] entry drawn as the pointer's cursor.
+pointer = "cursor"
 
 # Layout defaults for every screen. [primitive.<name>] (list, field,
 # message) and then [screen.<name>] (unlock, secret, recovery_key, path,

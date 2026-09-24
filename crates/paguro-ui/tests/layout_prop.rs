@@ -97,6 +97,13 @@ fn screen() -> impl Strategy<Value = Screen> {
         Screen::Notice(Notice::SealOverPlaintext),
         Screen::Notice(Notice::VolumeMissing),
         Screen::Notice(Notice::NotImplemented),
+        Screen::ChooseKeyboard {
+            current: paguro_core::config::Keyboard::Fr,
+        },
+        Screen::ChooseLanguage {
+            current: 0,
+            count: paguro_ui::builtin::BY_LANG.len() as u8,
+        },
     ]);
     let secret = (
         prop::sample::select(vec![
@@ -190,8 +197,11 @@ proptest! {
         keys in keys(),
         theme in 0usize..8,
         toast in prop::option::of(prop::bool::ANY),
+        lang in 0usize..8,
+        kb in 0usize..8,
     ) {
-        let theme = &THEMES[theme % THEMES.len()];
+        let langs = &paguro_ui::builtin::BY_LANG;
+        let theme = &langs[lang % langs.len()][theme % THEMES.len()];
         let mut buf = [0u8; 256];
         let mut p = Prompt::new(&screen, &mut buf);
         for k in &keys {
@@ -203,6 +213,7 @@ proptest! {
             buf: &buf,
             toast: toast.map(|b| if b { Toast::Incorrect } else { Toast::PathRefused }),
             dir: None,
+            keyboard: paguro_core::config::Keyboard::ALL[kb],
         };
         let mut list = DrawList::new();
         layout(&screen, &view, theme, w, h, &mut list);
@@ -224,7 +235,7 @@ proptest! {
         for k in &keys {
             p.feed(&screen, *k, &mut buf);
         }
-        let view = View { selected: p.selected(), field: p.field().copied(), buf: &buf, toast: None, dir: None };
+        let view = View { selected: p.selected(), field: p.field().copied(), buf: &buf, toast: None, dir: None, keyboard: Default::default() };
         let mut list = DrawList::new();
         layout(&screen, &view, theme, w, h, &mut list);
         let stride = w + stride_extra;
@@ -328,7 +339,7 @@ proptest! {
             if let paguro_boot::ui::Reaction::Done(paguro_boot::platform::Input::Entry(i)) = r {
                 prop_assert!(usize::from(i) < dir.items.len());
             }
-            let v = View { selected: b.selected(), field: None, buf: &[], toast: None, dir: Some(view) };
+            let v = View { selected: b.selected(), field: None, buf: &[], toast: None, dir: Some(view), keyboard: Default::default() };
             let mut list = DrawList::new();
             layout(&screen, &v, theme, w, h, &mut list);
             check(&list, w, h)?;

@@ -119,7 +119,12 @@ proptest! {
                     p = Prompt::new(&screen, &mut buf);
                 }
                 Reaction::Done(other) => prop_assert!(false, "unexpected {:?}", other),
-                Reaction::Redraw | Reaction::Ignore | Reaction::NextTheme | Reaction::ToggleMode => {}
+                Reaction::Redraw
+                | Reaction::Ignore
+                | Reaction::NextTheme
+                | Reaction::ToggleMode
+                | Reaction::ChooseKeyboard
+                | Reaction::ChooseLanguage => {}
             }
             let f = p.field().unwrap();
             prop_assert!(buf[f.len()..].iter().all(|&b| b == 0));
@@ -159,8 +164,11 @@ proptest! {
             prop_assert!(!e.name.is_empty() && !e.name.contains('\\') && !e.name.chars().any(char::is_control));
             if i > 0 {
                 let p = d.item(i - 1).unwrap();
-                let key = |e: &paguro_boot::platform::DirItem<'_>| (e.kind != paguro_boot::platform::EntryKind::Dir, e.name.to_lowercase());
-                prop_assert!(key(&p) <= key(&e), "sorted: {:?} before {:?}", p.name, e.name);
+                let dir = |e: &paguro_boot::platform::DirItem<'_>| e.kind != paguro_boot::platform::EntryKind::Dir;
+                let order = dir(&p)
+                    .cmp(&dir(&e))
+                    .then_with(|| paguro_boot::platform::natural_cmp(p.name, e.name));
+                prop_assert!(order.is_le(), "sorted: {:?} before {:?}", p.name, e.name);
             }
             match level {
                 Level::EfiPartition => prop_assert!(e.kind != paguro_boot::platform::EntryKind::Disk),
@@ -174,6 +182,8 @@ proptest! {
         for k in keys {
             match b.feed(&view, k) {
                 Reaction::Done(Input::Entry(i)) => prop_assert!(usize::from(i) < d.len()),
+                // '/' or '\\' starts typing a path from any row.
+                Reaction::Done(Input::TypePath) if matches!(k, Key::Char('/' | '\\')) => {}
                 Reaction::Done(Input::TypePath) => prop_assert_eq!(b.selected(), d.len()),
                 Reaction::Done(Input::NoRoot) => {
                     prop_assert_eq!(level, Level::Root);

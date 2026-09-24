@@ -1,8 +1,8 @@
 //! What every front end shares: the key model, the text-entry editor of
-//! INTERFACES.md §13.3, list navigation, the key → [`Input`] mapping, and the
-//! text rendering used when there is no graphics output. Pure functions and
-//! plain state, so the firmware adapter only draws and forwards keys, and all
-//! of this is tested on the host.
+//! INTERFACES.md §13.3, list navigation, the key → [`Input`] mapping. Pure
+//! functions and plain state, so the firmware adapter only draws and
+//! forwards keys, and all of this is tested on the host. What screens say is
+//! the theme's (`paguro-ui`, graphics and the text UI alike).
 //!
 //! Rules from DESIGN.md §4.1 "Screens" that apply here: the name on every
 //! screen; Esc always leads somewhere; rows labelled by cost; an unattested
@@ -12,12 +12,9 @@
 //! a copy, and wipes whatever it removes; bytes past the entered text are
 //! always zero.
 
-use core::fmt::{self, Write};
+use core::fmt;
 
-use crate::platform::{
-    DirView, EntryKind, Grey, Input, Level, Notice, Row, Screen, UnlockMenu, VolumeChoice,
-    VolumeFormat,
-};
+use crate::platform::{DirView, EntryKind, Grey, Input, Level, Notice, Row, Screen, UnlockMenu};
 
 /// A key, already decoded from the firmware's `EFI_INPUT_KEY` (or
 /// `EFI_KEY_DATA`, whose modifiers the adapter applies before this point).
@@ -47,6 +44,10 @@ pub const THEME_KEY: Key = Key::Function(2);
 /// The key that toggles the local display between graphics and the text UI
 /// (INTERFACES.md §13.2a).
 pub const MODE_KEY: Key = Key::Function(3);
+/// The key that opens the keyboard layout list (INTERFACES.md §13.5).
+pub const KEYBOARD_KEY: Key = Key::Function(4);
+/// The key that opens the language list (INTERFACES.md §13.5).
+pub const LANGUAGE_KEY: Key = Key::Function(5);
 
 // ---------------------------------------------------------------------------
 // Text entry (INTERFACES.md §13.3)
@@ -287,6 +288,9 @@ pub enum Item {
     /// The disk screen's rows.
     DiskDefault,
     DiskBrowse,
+    /// A keyboard layout (index in `Keyboard::ALL`) or a language.
+    Keyboard(u8),
+    Language(u8),
 }
 
 impl Item {
@@ -302,6 +306,7 @@ impl Item {
             Item::TypePath => Some(Input::TypePath),
             Item::DiskDefault => Some(Input::UseDefault),
             Item::DiskBrowse => Some(Input::BrowseDisk),
+            Item::Keyboard(i) | Item::Language(i) => Some(Input::Choose(i)),
         }
     }
 }
@@ -390,9 +395,32 @@ pub fn items(screen: &Screen) -> Items {
             out.push(Item::DiskBrowse);
             out.push(Item::TypePath);
         }
+        Screen::ChooseKeyboard { .. } => {
+            for i in 0..paguro_core::config::Keyboard::ALL.len() {
+                out.push(Item::Keyboard(i as u8));
+            }
+        }
+        Screen::ChooseLanguage { count, .. } => {
+            for i in 0..*count {
+                out.push(Item::Language(i));
+            }
+        }
         _ => {}
     }
     out
+}
+
+/// Where a list starts: the current choice on the choosers, else the first
+/// enabled row.
+fn initial_row(screen: &Screen, items: &Items) -> usize {
+    match screen {
+        Screen::ChooseKeyboard { current } => paguro_core::config::Keyboard::ALL
+            .iter()
+            .position(|k| k == current)
+            .unwrap_or(0),
+        Screen::ChooseLanguage { current, count } => usize::from(*current.min(count)),
+        _ => items.as_slice().iter().position(Item::enabled).unwrap_or(0),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +436,10 @@ pub enum Reaction {
     NextTheme,
     /// Toggle the local display between graphics and text and draw again.
     ToggleMode,
+    /// Open the keyboard layout list (and come back to this prompt).
+    ChooseKeyboard,
+    /// Open the language list (and come back to this prompt).
+    ChooseLanguage,
     Done(Input),
 }
 
@@ -417,17 +449,25 @@ pub enum Reaction {
 pub struct Prompt {
     selected: usize,
     field: Option<Field>,
+    /// Rows the list shows at once (PageUp/PageDown).
+    page: usize,
 }
 
 impl Prompt {
     /// Start a prompt for `screen`. A field's buffer is wiped first.
     pub fn new(screen: &Screen, buf: &mut [u8]) -> Prompt {
         let items = items(screen);
-        let selected = items.as_slice().iter().position(Item::enabled).unwrap_or(0);
+        let selected = initial_row(screen, &items);
         Prompt {
             selected,
             field: field_kind(screen).map(|k| Field::begin(k, buf)),
+            page: 8,
         }
+    }
+
+    /// Rows per page, as many as the screen shows.
+    pub fn set_page(&mut self, rows: usize) {
+        self.page = rows.max(1);
     }
 
     /// The highlighted list row.
@@ -489,6 +529,12 @@ impl Prompt {
         if key == MODE_KEY {
             return Reaction::ToggleMode;
         }
+        if key == KEYBOARD_KEY {
+            return Reaction::ChooseKeyboard;
+        }
+        if key == LANGUAGE_KEY {
+            return Reaction::ChooseLanguage;
+        }
         if let Some(f) = self.field.as_mut() {
             return match f.feed(key, buf) {
                 FieldEvent::Changed => Reaction::Redraw,
@@ -500,15 +546,21 @@ impl Prompt {
         let items = items(screen);
         if !items.is_empty() {
             match key {
-                Key::Up | Key::PageUp => {
-                    return if self.step(&items, false) {
-                        Reaction::Redraw
+                Key::Up | Key::Down | Key::PageUp | Key::PageDown => {
+                    let forward = matches!(key, Key::Down | Key::PageDown);
+                    let n = if matches!(key, Key::PageUp | Key::PageDown) {
+                        self.page
                     } else {
-                        Reaction::Ignore
+                        1
                     };
-                }
-                Key::Down | Key::PageDown => {
-                    return if self.step(&items, true) {
+                    let mut moved = false;
+                    for _ in 0..n {
+                        if !self.step(&items, forward) {
+                            break;
+                        }
+                        moved = true;
+                    }
+                    return if moved {
                         Reaction::Redraw
                     } else {
                         Reaction::Ignore
@@ -608,6 +660,10 @@ impl Browser {
         match key {
             k if k == THEME_KEY => Reaction::NextTheme,
             k if k == MODE_KEY => Reaction::ToggleMode,
+            k if k == KEYBOARD_KEY => Reaction::ChooseKeyboard,
+            k if k == LANGUAGE_KEY => Reaction::ChooseLanguage,
+            // Start typing a path, from anywhere in the browser.
+            Key::Char('/' | '\\') => Reaction::Done(Input::TypePath),
             Key::Up => self.go(self.selected.saturating_sub(1), rows),
             Key::Down => self.go(self.selected + 1, rows),
             Key::PageUp => self.go(self.selected.saturating_sub(self.page), rows),
@@ -649,60 +705,6 @@ impl Browser {
             _ => Reaction::Ignore,
         }
     }
-}
-
-/// The text fallback's browser: the path, then up to ten rows around the
-/// highlighted one.
-pub fn render_browse(dir: &DirView<'_>, selected: usize, w: &mut dyn Write) -> fmt::Result {
-    let rows = browse_rows(dir);
-    write!(
-        w,
-        "\r\n   {}\r\n",
-        if dir.path.is_empty() { "\\" } else { dir.path }
-    )?;
-    let first = selected.saturating_sub(4).min(rows.saturating_sub(10));
-    for i in first..rows.min(first + 10) {
-        let mark = if i == selected { '>' } else { ' ' };
-        match dir.listing.item(i) {
-            Some(e) => {
-                let kind = match e.kind {
-                    EntryKind::Dir => "folder".into(),
-                    EntryKind::Disk => SizeKind("disk", e.bytes),
-                    EntryKind::Efi => SizeKind("UEFI application", e.bytes),
-                };
-                writeln_crlf(w, format_args!(" {mark} {}   {kind}", e.name))?;
-            }
-            None if i == dir.listing.len() => writeln_crlf(w, format_args!(" {mark} Type a path"))?,
-            None => writeln_crlf(w, format_args!(" {mark} None -- Linux asks"))?,
-        }
-    }
-    if dir.listing.more() {
-        w.write_str("   (only the first entries are shown)\r\n")?;
-    }
-    w.write_str("   Enter open   <- parent   Esc back\r\n")
-}
-
-struct SizeKind(&'static str, u64);
-
-impl From<&'static str> for SizeKind {
-    fn from(s: &'static str) -> Self {
-        SizeKind(s, u64::MAX)
-    }
-}
-
-impl fmt::Display for SizeKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.1 == u64::MAX {
-            f.write_str(self.0)
-        } else {
-            write!(f, "{}, {}", self.0, Size::of(self.1))
-        }
-    }
-}
-
-fn writeln_crlf(w: &mut dyn Write, a: fmt::Arguments<'_>) -> fmt::Result {
-    w.write_fmt(a)?;
-    w.write_str("\r\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -814,193 +816,32 @@ pub fn classify_path(path: &str) -> EntryKind {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Text fallback (no graphics output)
-
-fn header(w: &mut dyn Write) -> fmt::Result {
-    w.write_str("\r\n                     paguro\r\n\r\n")
-}
-
-fn tpm_note(menu: &UnlockMenu) -> &'static str {
-    match menu.tpm {
-        Ok(_) => "",
-        Err(Grey::RecoveryMode) => "   [x] TPM unavailable until restart -- recovery mode",
-        Err(Grey::Locked) => "   [x] TPM locked -- use another option",
-        Err(Grey::Unavailable) => "",
-    }
-}
-
-const UNATTESTED: &str = "   (configuration unverified: this prompt is unattested)\r\n";
-
-fn volume_line(w: &mut dyn Write, i: usize, v: &VolumeChoice) -> fmt::Result {
-    let fmt = match v.format {
-        VolumeFormat::BitLocker => "BitLocker",
-        VolumeFormat::Ntfs => "NTFS",
+/// A typed path as the volume knows it: `/` taken as `\\`, a leading drive
+/// letter (`C:`) dropped — the loader cannot know Windows' drive letters —
+/// runs of separators and a trailing one removed, and a leading `\\` added
+/// (paths are on the chosen volume). Returns the path and whether a drive
+/// letter was dropped; `None` when it does not fit `out`.
+pub fn normalize_path<'o>(typed: &str, out: &'o mut [u8]) -> Option<(&'o str, bool)> {
+    // Separators first ("/C:/…" from the browser's "/"), then a drive.
+    let t = typed.trim().trim_start_matches(['\\', '/']);
+    let mut c = t.chars();
+    let drive = matches!((c.next(), c.next()), (Some(d), Some(':')) if d.is_ascii_alphabetic());
+    let rest = if drive { t.get(2..).unwrap_or("") } else { t };
+    let mut n = 0usize;
+    let mut put = |b: &[u8], n: &mut usize| -> Option<()> {
+        out.get_mut(*n..*n + b.len())?.copy_from_slice(b);
+        *n += b.len();
+        Some(())
     };
-    write!(
-        w,
-        " {} Disk {}, partition {}   {}   {fmt}",
-        i + 1,
-        v.disk,
-        v.partition,
-        Size::of(v.bytes)
-    )?;
-    if !v.name.is_empty() {
-        write!(w, "   {}", v.name.as_str())?;
+    for comp in rest.split(['\\', '/']).filter(|s| !s.is_empty()) {
+        put(b"\\", &mut n)?;
+        put(comp.as_bytes(), &mut n)?;
     }
-    w.write_str("\r\n")
-}
-
-/// Render `screen` as CRLF-terminated lines (the no-GOP fallback, and the
-/// serial mirror of what the graphical front end shows).
-pub fn render(screen: &Screen, w: &mut dyn Write) -> fmt::Result {
-    header(w)?;
-    match screen {
-        Screen::Unlock(m) => {
-            w.write_str("   Unlock Linux\r\n")?;
-            if m.unattested {
-                w.write_str(UNATTESTED)?;
-            }
-            if m.first_boot {
-                w.write_str("   From now on this replaces your Linux login password --\r\n")?;
-                w.write_str("   and restarting into Linux from Windows skips it.\r\n")?;
-            }
-            w.write_str("\r\n")?;
-            if m.password_or_pin {
-                match m.tpm {
-                    Ok(Some(n)) => write!(w, " 1 Password or PIN            {n} TPM attempts left\r\n")?,
-                    _ => w.write_str(" 1 Password or PIN\r\n")?,
-                }
-            }
-            if m.recovery_passphrase {
-                w.write_str(" 2 Recovery passphrase        no attempt limit\r\n")?;
-            }
-            if m.recovery_key {
-                w.write_str(" 3 Recovery key               48 digits\r\n")?;
-            }
-            let note = tpm_note(m);
-            if !note.is_empty() {
-                write!(w, "{note}\r\n")?;
-            }
-            w.write_str("\r\n   W Start Windows   R Recover   Esc other options\r\n")
-        }
-        Screen::EnterSecret { row, unattested } => {
-            let what = match row {
-                Row::PasswordOrPin => "Password or PIN",
-                Row::RecoveryPassphrase => "Recovery passphrase",
-                Row::RecoveryKey => "Recovery key (48 digits, aka.ms/myrecoverykey)",
-            };
-            if *unattested {
-                w.write_str("   (unattested prompt)\r\n")?;
-            }
-            write!(w, "   {what}: ")
-        }
-        Screen::Incorrect => w.write_str("   That did not unlock the volume.\r\n"),
-        Screen::PathRefused => w.write_str("   That is not a usable path on this volume.\r\n"),
-        Screen::CannotUnlock => w.write_str(
-            "   Cannot unlock Linux\r\n\r\n   Windows will almost certainly start normally.\r\n   Try that first -- you probably do not need\r\n   your recovery key.\r\n\r\n   Enter Start Windows\r\n   R     I need Linux now -- enter recovery key\r\n",
-        ),
-        Screen::ConfigInvalid => w.write_str(
-            "   Configuration is not valid\r\n\r\n   paguro.ini has changed since it was installed,\r\n   or is damaged. Linux cannot start from it.\r\n\r\n   If you did not change it, this may indicate\r\n   tampering.\r\n\r\n   Enter Start Windows\r\n   R     Recover Linux -- needs a password or key\r\n",
-        ),
-        Screen::TpmLocked => w.write_str(
-            "   Too many incorrect attempts\r\n\r\n   The TPM has locked itself to prevent guessing.\r\n   Waiting will restore it -- nothing is damaged.\r\n   Your other unlock options still work.\r\n",
-        ),
-        Screen::NoInstallation => w.write_str(
-            "   No Linux installation found\r\n\r\n   To fix   Start Windows and run the paguro repair tool\r\n\r\n   W Start Windows\r\n",
-        ),
-        Screen::SelectVolume(v) => {
-            w.write_str("   Which volume holds your Linux installation?\r\n")?;
-            w.write_str(UNATTESTED)?;
-            w.write_str("\r\n")?;
-            for (i, c) in v.as_slice().iter().enumerate() {
-                volume_line(w, i, c)?;
-            }
-            Ok(())
-        }
-        Screen::Browse(level) => {
-            w.write_str(match level {
-                Level::Volume => "   Choose what to start\r\n",
-                Level::EfiPartition => "   Choose a UEFI application on the disk\r\n",
-                Level::Root => "   Which disk holds Linux?\r\n",
-            })?;
-            w.write_str(UNATTESTED)
-        }
-        Screen::EnterPath(level) => {
-            w.write_str(UNATTESTED)?;
-            w.write_str(match level {
-                Level::Volume | Level::Root => "   Path on the volume: ",
-                Level::EfiPartition => "   Path on the disk's EFI partition: ",
-            })
-        }
-        Screen::DiskStart { disk } => {
-            write!(w, "   Start {}\r\n", disk.as_str())?;
-            w.write_str(UNATTESTED)?;
-            write!(
-                w,
-                "\r\n 1 Its default UEFI application   {}\r\n 2 Choose one on its EFI partition\r\n 3 Type a path\r\n",
-                paguro_core::config::DEFAULT_EFI
-            )
-        }
-        Screen::NoEfiPartition => {
-            w.write_str("   This disk has no EFI partition paguro can read.\r\n")
-        }
-        Screen::Notice(n) => {
-            let (title, body, actions) = match n {
-                Notice::Hibernated => (
-                    "Windows saved a session -- starting Linux read-only",
-                    "This is normal after shutting Windows down.\r\n   Your disk is fine. Linux will start, but cannot\r\n   write until Windows resumes once.",
-                    "Enter Continue read-only   W Restart into Windows",
-                ),
-                Notice::Dirty => (
-                    "Windows didn't shut down cleanly last time",
-                    "Your disk is fine. Linux will start read-only.",
-                    "Enter Continue read-only   W Restart into Windows",
-                ),
-                Notice::Pcr12NotZero => (
-                    "This firmware already used paguro's measurement slot",
-                    "The TPM cannot be trusted to protect the key on this boot.",
-                    "Enter Start Windows   R Recover Linux",
-                ),
-                Notice::SealOverPlaintext => (
-                    "Refusing an illusory configuration",
-                    "A TPM seal over an unencrypted volume protects nothing.",
-                    "Enter Start Windows",
-                ),
-                Notice::VolumeMissing => (
-                    "The Linux volume was not found",
-                    "The configured volume is not on any disk.",
-                    "Enter Start Windows   R Recover Linux",
-                ),
-                Notice::NotImplemented => (
-                    "This build cannot finish starting Linux",
-                    "A later stage is not implemented yet.",
-                    "Any key",
-                ),
-                Notice::StartFailed => (
-                    "Linux could not be started",
-                    "Its boot image is missing or was refused.\r\n   Nothing was changed on your disk.",
-                    "Any key",
-                ),
-            };
-            write!(w, "   {title}\r\n\r\n   {body}\r\n\r\n   {actions}\r\n")
-        }
+    if n == 0 {
+        put(b"\\", &mut n)?;
     }
-}
-
-/// The text fallback's field line after an edit: CR, the prompt's
-/// indentation, the text (bullets while hidden, the recovery key grouped),
-/// and blanks over what was there.
-pub fn render_field_line(f: &Field, buf: &[u8], w: &mut dyn Write) -> fmt::Result {
-    w.write_str("\r   > ")?;
-    for (i, c) in f.text(buf).chars().enumerate() {
-        if f.kind() == FieldKind::RecoveryKey && i > 0 && i % RECOVERY_GROUP == 0 {
-            w.write_char('-')?;
-        }
-        w.write_char(if f.revealed() { c } else { '*' })?;
-    }
-    // One blank covers the character a Backspace or Delete removed.
-    w.write_str(" ")
+    let s = core::str::from_utf8(out.get(..n)?).ok()?;
+    Some((s, drive))
 }
 
 /// Whether a screen waits for a key. "That did not unlock" is shown and the
@@ -1079,6 +920,10 @@ pub fn map_key(screen: &Screen, key: Key) -> Option<Input> {
         | Screen::Notice(Notice::SealOverPlaintext)
         | Screen::Notice(Notice::NotImplemented)
         | Screen::Notice(Notice::StartFailed) => Some(Input::Continue),
+        Screen::ChooseKeyboard { .. } | Screen::ChooseLanguage { .. } => match key {
+            Key::Escape => Some(Input::Escape),
+            _ => None,
+        },
         Screen::EnterSecret { .. } | Screen::EnterPath(_) | Screen::Browse(_) => None,
     }
 }
@@ -1087,8 +932,7 @@ pub fn map_key(screen: &Screen, key: Key) -> Option<Input> {
 mod tests {
     extern crate std;
     use super::*;
-    use crate::platform::{DirListing, Label, VolumeList};
-    use std::string::String;
+    use crate::platform::{DirListing, Label, VolumeChoice, VolumeFormat, VolumeList};
 
     fn menu() -> UnlockMenu {
         UnlockMenu {
@@ -1099,12 +943,6 @@ mod tests {
             unattested: false,
             first_boot: false,
         }
-    }
-
-    fn text(s: &Screen) -> String {
-        let mut out = String::new();
-        render(s, &mut out).unwrap();
-        out
     }
 
     fn volumes(n: u8) -> VolumeList {
@@ -1119,86 +957,6 @@ mod tests {
             });
         }
         v
-    }
-
-    #[test]
-    fn every_screen_renders_with_the_name() {
-        let screens = [
-            Screen::Unlock(menu()),
-            Screen::Unlock(UnlockMenu {
-                tpm: Err(Grey::RecoveryMode),
-                unattested: true,
-                first_boot: true,
-                recovery_passphrase: true,
-                ..menu()
-            }),
-            Screen::Unlock(UnlockMenu {
-                tpm: Err(Grey::Locked),
-                ..menu()
-            }),
-            Screen::Unlock(UnlockMenu {
-                tpm: Err(Grey::Unavailable),
-                ..menu()
-            }),
-            Screen::EnterSecret {
-                row: Row::PasswordOrPin,
-                unattested: true,
-            },
-            Screen::EnterSecret {
-                row: Row::RecoveryPassphrase,
-                unattested: false,
-            },
-            Screen::EnterSecret {
-                row: Row::RecoveryKey,
-                unattested: false,
-            },
-            Screen::Incorrect,
-            Screen::PathRefused,
-            Screen::CannotUnlock,
-            Screen::ConfigInvalid,
-            Screen::TpmLocked,
-            Screen::NoInstallation,
-            Screen::SelectVolume(volumes(2)),
-            Screen::DiskStart {
-                disk: Label::new("debian.vhd").unwrap(),
-            },
-            Screen::Browse(Level::Volume),
-            Screen::Browse(Level::EfiPartition),
-            Screen::EnterPath(Level::Volume),
-            Screen::EnterPath(Level::EfiPartition),
-            Screen::NoEfiPartition,
-            Screen::Browse(Level::Root),
-            Screen::Notice(Notice::Hibernated),
-            Screen::Notice(Notice::Dirty),
-            Screen::Notice(Notice::Pcr12NotZero),
-            Screen::Notice(Notice::SealOverPlaintext),
-            Screen::Notice(Notice::VolumeMissing),
-            Screen::Notice(Notice::NotImplemented),
-            Screen::Notice(Notice::StartFailed),
-        ];
-        for s in &screens {
-            let t = text(s);
-            assert!(t.contains("paguro"), "{s:?}");
-            assert!(
-                !t.contains("error"),
-                "codes live behind D, not in messages: {s:?}"
-            );
-        }
-        assert!(text(&screens[0]).contains("3 TPM attempts left"));
-        assert!(text(&screens[1]).contains("unattested"));
-        assert!(text(&screens[1]).contains("recovery mode"));
-        assert!(text(&screens[1]).contains("replaces your Linux login password"));
-        assert!(text(&screens[2]).contains("TPM locked"));
-        assert!(text(&Screen::Notice(Notice::Hibernated)).contains("This is normal"));
-        assert!(!text(&Screen::Notice(Notice::Hibernated)).contains("cannot start"));
-        let vl = text(&Screen::SelectVolume(volumes(2)));
-        assert!(vl.contains("Disk 1, partition 3   931 GB   BitLocker   Basic data partition"));
-        assert!(vl.contains("unattested"));
-        let ds = text(&screens[14]);
-        assert!(
-            ds.contains("Start debian.vhd") && ds.contains("\\EFI\\BOOT\\"),
-            "{ds}"
-        );
     }
 
     #[test]
@@ -1432,9 +1190,6 @@ mod tests {
         assert_eq!(f.len(), RECOVERY_DIGITS);
         assert!(f.text(&buf).starts_with("123456777"));
         assert!(buf[48..].iter().all(|&b| b == 0));
-        let mut out = String::new();
-        render_field_line(&f, &buf, &mut out).unwrap();
-        assert!(out.starts_with("\r   > ******-******-"), "{out:?}");
     }
 
     #[test]
@@ -1739,15 +1494,93 @@ mod tests {
         assert_eq!(b.feed(&rv, Key::Enter), Reaction::Done(Input::NoRoot));
         assert_eq!(b.feed(&rv, Key::Up), Reaction::Redraw);
         assert_eq!(b.feed(&rv, Key::Enter), Reaction::Done(Input::TypePath));
-        let mut out = String::new();
-        render_browse(&rv, 3, &mut out).unwrap();
-        assert!(out.contains(" > None -- Linux asks"), "{out}");
-        let mut out = String::new();
-        render_browse(&view, 3, &mut out).unwrap();
-        assert!(
-            out.contains(" > rescue.efi   UEFI application, 1.0 MB"),
-            "{out}"
+        // '/' or '\\' starts typing a path from any row.
+        assert_eq!(b.feed(&rv, Key::Char('/')), Reaction::Done(Input::TypePath));
+        assert_eq!(
+            b.feed(&view, Key::Char('\\')),
+            Reaction::Done(Input::TypePath)
         );
-        assert!(out.contains("   boot   folder"));
+        assert_eq!(b.feed(&view, KEYBOARD_KEY), Reaction::ChooseKeyboard);
+        assert_eq!(b.feed(&view, LANGUAGE_KEY), Reaction::ChooseLanguage);
+    }
+
+    #[test]
+    fn typed_paths_are_normalized() {
+        let mut out = [0u8; 64];
+        for (typed, want, drive) in [
+            ("\\paguro\\debian.vhd", "\\paguro\\debian.vhd", false),
+            ("/paguro/debian.vhd", "\\paguro\\debian.vhd", false),
+            ("paguro\\debian.vhd", "\\paguro\\debian.vhd", false),
+            ("C:\\paguro\\debian.vhd", "\\paguro\\debian.vhd", true),
+            ("d:/paguro//x.efi/", "\\paguro\\x.efi", true),
+            ("  \\a\\\\b  ", "\\a\\b", false),
+            ("C:", "\\", true),
+            ("", "\\", false),
+            ("1:\\a", "\\1:\\a", false),
+            ("\\C:\\a", "\\a", true),
+        ] {
+            assert_eq!(
+                normalize_path(typed, &mut out),
+                Some((want, drive)),
+                "{typed:?}"
+            );
+        }
+        assert_eq!(normalize_path("\\abcdef", &mut [0u8; 4]), None, "too long");
+    }
+
+    #[test]
+    fn natural_order() {
+        use crate::platform::natural_cmp;
+        use core::cmp::Ordering::*;
+        for (a, b, o) in [
+            ("disk2", "disk10", Less),
+            ("Disk2", "disk10", Less),
+            ("disk10", "disk9", Greater),
+            ("a", "B", Less),
+            ("a01", "a1", Greater),
+            ("a1", "a01", Less),
+            ("a1b", "a1b", Equal),
+            ("x", "x1", Less),
+            ("v1.10.img", "v1.9.img", Greater),
+            ("99999999999999999999999", "100000000000000000000000", Less),
+            ("", "", Equal),
+        ] {
+            assert_eq!(natural_cmp(a, b), o, "{a} vs {b}");
+            assert_eq!(natural_cmp(b, a), o.reverse(), "{b} vs {a}");
+        }
+    }
+
+    #[test]
+    fn choosers_start_on_the_current_choice() {
+        use paguro_core::config::Keyboard;
+        let s = Screen::ChooseKeyboard {
+            current: Keyboard::Fr,
+        };
+        let mut p = Prompt::new(&s, &mut []);
+        assert_eq!(p.selected(), 3);
+        assert_eq!(items(&s).len(), Keyboard::ALL.len());
+        assert_eq!(p.feed(&s, Key::Down, &mut []), Reaction::Redraw);
+        assert_eq!(
+            p.feed(&s, Key::Enter, &mut []),
+            Reaction::Done(Input::Choose(4))
+        );
+        assert_eq!(
+            p.feed(&s, Key::Escape, &mut []),
+            Reaction::Done(Input::Escape)
+        );
+        let s = Screen::ChooseLanguage {
+            current: 2,
+            count: 5,
+        };
+        let mut p = Prompt::new(&s, &mut []);
+        assert_eq!(p.selected(), 2);
+        p.set_page(2);
+        assert_eq!(p.feed(&s, Key::PageDown, &mut []), Reaction::Redraw);
+        assert_eq!(p.selected(), 4);
+        assert_eq!(p.feed(&s, Key::PageDown, &mut []), Reaction::Ignore);
+        assert_eq!(p.feed(&s, Key::PageUp, &mut []), Reaction::Redraw);
+        assert_eq!(p.selected(), 2);
+        assert_eq!(p.feed(&s, KEYBOARD_KEY, &mut []), Reaction::ChooseKeyboard);
+        assert_eq!(p.feed(&s, LANGUAGE_KEY, &mut []), Reaction::ChooseLanguage);
     }
 }

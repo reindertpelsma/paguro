@@ -7,6 +7,7 @@ use paguro_boot::platform::{
     VolumeChoice, VolumeFormat, VolumeList,
 };
 use paguro_boot::ui::{Field, Key, Prompt};
+use paguro_core::config::Keyboard;
 
 use crate::layout::{Toast, View};
 
@@ -20,6 +21,8 @@ pub struct Fixture {
     pub toast: Option<Toast>,
     /// The browsed directory: its path and entries.
     pub dir: Option<(&'static str, &'static StaticListing)>,
+    /// The keyboard layout named on typed-text screens.
+    pub keyboard: Keyboard,
 }
 
 impl Fixture {
@@ -38,6 +41,7 @@ impl Fixture {
                     _ => Level::Volume,
                 },
             }),
+            keyboard: self.keyboard,
         }
     }
 }
@@ -217,6 +221,7 @@ fn typed(name: &'static str, screen: Screen, keys: &[Key]) -> Fixture {
         buf: [0; 256],
         toast: None,
         dir: None,
+        keyboard: Keyboard::Us,
     };
     let mut p = Prompt::new(&f.screen, &mut f.buf);
     for k in keys {
@@ -271,6 +276,7 @@ pub fn all() -> [Fixture; FIXTURES] {
         buf: [0; 256],
         toast: None,
         dir: Some((path, listing)),
+        keyboard: Keyboard::Us,
     };
     let mut refused = browse("browse-path-refused", Level::Volume, "\\paguro", &PAGURO, 5);
     refused.toast = Some(Toast::PathRefused);
@@ -280,6 +286,16 @@ pub fn all() -> [Fixture; FIXTURES] {
     let mut no_esp = plain("disk-start-no-esp", disk);
     no_esp.toast = Some(Toast::NoEfiPartition);
     no_esp.selected = 1;
+    let mut german = with(
+        "password-keyboard-de",
+        Screen::EnterSecret {
+            row: Row::RecoveryPassphrase,
+            unattested: false,
+        },
+        text_then("Grüße", &[]),
+    );
+    german.keyboard = Keyboard::De;
+    let langs = u8::try_from(crate::builtin::BY_LANG.len()).unwrap_or(1);
     [
         plain("unlock", Screen::Unlock(MENU)),
         with(
@@ -383,6 +399,11 @@ pub fn all() -> [Fixture; FIXTURES] {
             Screen::SelectVolume(volumes(8, true)),
             text_then("", &[Key::Down, Key::Down]),
         ),
+        with(
+            "volumes-8-bottom",
+            Screen::SelectVolume(volumes(8, false)),
+            text_then("", &[Key::End]),
+        ),
         browse("browse-paguro", Level::Volume, "\\paguro", &PAGURO, 0),
         browse(
             "browse-disk-selected",
@@ -394,11 +415,25 @@ pub fn all() -> [Fixture; FIXTURES] {
         browse("browse-efi-selected", Level::Volume, "\\paguro", &PAGURO, 4),
         browse("browse-empty", Level::Volume, "\\paguro\\Old", &EMPTY, 0),
         browse(
+            "browse-long-top",
+            Level::Volume,
+            "\\paguro\\tools",
+            &LONG,
+            0,
+        ),
+        browse(
             "browse-long-scrolled",
             Level::Volume,
             "\\paguro\\tools",
             &LONG,
             30,
+        ),
+        browse(
+            "browse-long-bottom",
+            Level::Volume,
+            "\\paguro\\tools",
+            &LONG,
+            40,
         ),
         browse("browse-deep", Level::Volume, DEEP_PATH, &DEEP, 1),
         browse("browse-esp", Level::EfiPartition, "\\EFI", &ESP, 2),
@@ -418,10 +453,31 @@ pub fn all() -> [Fixture; FIXTURES] {
         ),
         browse("browse-root", Level::Root, "\\paguro", &ROOTS, 2),
         browse("browse-root-none", Level::Root, "\\paguro", &ROOTS, 4),
+        german,
+        plain(
+            "keyboards",
+            Screen::ChooseKeyboard {
+                current: Keyboard::De,
+            },
+        ),
+        with(
+            "keyboards-bottom",
+            Screen::ChooseKeyboard {
+                current: Keyboard::Us,
+            },
+            text_then("", &[Key::End]),
+        ),
+        plain(
+            "languages",
+            Screen::ChooseLanguage {
+                current: 0,
+                count: langs,
+            },
+        ),
     ]
 }
 
-pub const FIXTURES: usize = 42;
+pub const FIXTURES: usize = 49;
 
 /// The resolutions the golden tests and `--all` render.
 pub const RESOLUTIONS: [(u32, u32); 4] = [(800, 600), (1366, 768), (1920, 1080), (3840, 2160)];

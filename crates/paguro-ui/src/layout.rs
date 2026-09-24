@@ -16,8 +16,11 @@ use paguro_boot::platform::{
 };
 use paguro_boot::ui::{self, Field, FieldKind, Item, RECOVERY_DIGITS, RECOVERY_GROUP, Size, Unit};
 
+use paguro_boot::ui::{KEYBOARD_KEY, Key, LANGUAGE_KEY, MODE_KEY, THEME_KEY};
+use paguro_core::config::Keyboard;
+
 use crate::canvas::Rect;
-use crate::draw::{Cmd, DrawList, TextRun, TextSrc};
+use crate::draw::{Cmd, DrawList, Target, TextRun, TextSrc};
 use crate::strings::Str;
 use crate::text;
 use crate::theme::{
@@ -53,6 +56,9 @@ pub struct View<'a> {
     pub toast: Option<Toast>,
     /// The browsed directory ([`Screen::Browse`]).
     pub dir: Option<DirView<'a>>,
+    /// The keyboard layout typed text is read in: named on the screens
+    /// that take typed text (INTERFACES.md §13.5).
+    pub keyboard: Keyboard,
 }
 
 impl View<'static> {
@@ -62,7 +68,57 @@ impl View<'static> {
         buf: &[],
         toast: None,
         dir: None,
+        keyboard: Keyboard::Us,
     };
+}
+
+/// The name string of a keyboard layout.
+pub const fn layout_name(k: Keyboard) -> Str {
+    match k {
+        Keyboard::Us => Str::LayoutUs,
+        Keyboard::Uk => Str::LayoutUk,
+        Keyboard::De => Str::LayoutDe,
+        Keyboard::Fr => Str::LayoutFr,
+        Keyboard::Es => Str::LayoutEs,
+        Keyboard::Be => Str::LayoutBe,
+        Keyboard::ChDe => Str::LayoutChDe,
+        Keyboard::NlIntl => Str::LayoutNlIntl,
+    }
+}
+
+/// A string that is one literal (a name), as `&'static str`.
+pub fn literal(theme: &Theme, s: Str) -> &'static str {
+    match theme.tpl(s).0 {
+        [Part::Lit(l)] => l,
+        _ => "",
+    }
+}
+
+/// Language `i`'s own name, from its strings.
+pub fn language_name(i: usize) -> &'static str {
+    crate::builtin::BY_LANG
+        .get(i)
+        .and_then(|l| l.first())
+        .map_or("", |t| literal(t, Str::LanguageName))
+}
+
+/// The key a keycap string stands for: what a click on the action or hint
+/// does (INTERFACES.md §13.2b). `None` for a hint that is not one key
+/// (the arrows).
+pub fn key_of(s: Str) -> Option<Key> {
+    Some(match s {
+        Str::KeyEnter => Key::Enter,
+        Str::KeyEsc => Key::Escape,
+        Str::KeyInsert => Key::Insert,
+        Str::KeyTheme => THEME_KEY,
+        Str::KeyMode => MODE_KEY,
+        Str::KeyW => Key::Char('w'),
+        Str::KeyR => Key::Char('r'),
+        Str::KeyLeft => Key::Left,
+        Str::KeyKeyboard => KEYBOARD_KEY,
+        Str::KeyLanguage => LANGUAGE_KEY,
+        _ => return None,
+    })
 }
 
 /// Rows the browser shows at most, however tall the screen.
@@ -80,6 +136,7 @@ pub fn kind(screen: &Screen) -> ScreenKind {
         Screen::SelectVolume(_) => ScreenKind::Volumes,
         Screen::Browse(_) => ScreenKind::Browser,
         Screen::DiskStart { .. } => ScreenKind::Disk,
+        Screen::ChooseKeyboard { .. } | Screen::ChooseLanguage { .. } => ScreenKind::Volumes,
         _ => ScreenKind::Message,
     }
 }
@@ -92,12 +149,12 @@ pub enum Arg<'a> {
     Size(u64),
 }
 
-const MAX_BLOCKS: usize = 10;
-const MAX_ACTIONS: usize = 3;
-const MAX_HINTS: usize = 5;
+pub(crate) const MAX_BLOCKS: usize = 10;
+pub(crate) const MAX_ACTIONS: usize = 3;
+pub(crate) const MAX_HINTS: usize = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BlockKind {
+pub(crate) enum BlockKind {
     Toast,
     Title,
     Para,
@@ -106,20 +163,22 @@ enum BlockKind {
     Name,
     /// The browser's path, cut at the front, and its position.
     Crumb,
+    /// One line in the label style (latin1), muted: the keyboard layout.
+    Note,
     List,
     Field,
     Actions,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Block<'a> {
-    kind: BlockKind,
-    src: TextSrc<'a>,
-    color: Color,
-    bar: bool,
+pub(crate) struct Block<'a> {
+    pub(crate) kind: BlockKind,
+    pub(crate) src: TextSrc<'a>,
+    pub(crate) color: Color,
+    pub(crate) bar: bool,
     /// Lines (text) or rows (list) the block may use.
-    max: usize,
-    min: usize,
+    pub(crate) max: usize,
+    pub(crate) min: usize,
 }
 
 struct Ctx<'t> {
@@ -321,11 +380,11 @@ fn line<'a>(
 // ---------------------------------------------------------------------------
 // What each screen shows
 
-struct Spec<'a> {
-    blocks: [Option<Block<'a>>; MAX_BLOCKS],
-    actions: [Option<(Str, Str)>; MAX_ACTIONS],
-    hints: [Option<(Str, Str)>; MAX_HINTS],
-    unattested: bool,
+pub(crate) struct Spec<'a> {
+    pub(crate) blocks: [Option<Block<'a>>; MAX_BLOCKS],
+    pub(crate) actions: [Option<(Str, Str)>; MAX_ACTIONS],
+    pub(crate) hints: [Option<(Str, Str)>; MAX_HINTS],
+    pub(crate) unattested: bool,
 }
 
 impl<'a> Spec<'a> {
@@ -379,7 +438,7 @@ fn paras<'a>(
     }
 }
 
-fn describe<'a>(
+pub(crate) fn describe<'a>(
     screen: &'a Screen,
     view: &View<'a>,
     theme: &Theme,
@@ -458,6 +517,8 @@ fn describe<'a>(
             sp.block(field_block);
             if *row == Row::RecoveryKey {
                 paras(&mut sp, list, theme, Str::RecoveryKeyHelp, &[], pal.muted);
+            } else {
+                keyboard_note(&mut sp, list, theme, view.keyboard);
             }
             sp.hint(Str::KeyEnter, Str::HintContinue);
             let shown = view.field.is_some_and(|f| f.revealed());
@@ -466,6 +527,9 @@ fn describe<'a>(
                 if shown { Str::HintHide } else { Str::HintShow },
             );
             sp.hint(Str::KeyEsc, Str::HintBack);
+            if *row != Row::RecoveryKey {
+                sp.hint(Str::KeyKeyboard, Str::HintKeyboard);
+            }
         }
         Screen::EnterPath(level) => {
             sp.unattested = true;
@@ -481,8 +545,29 @@ fn describe<'a>(
                 1,
             ));
             sp.block(field_block);
+            keyboard_note(&mut sp, list, theme, view.keyboard);
             paras(&mut sp, list, theme, help, &[], pal.muted);
+            paras(&mut sp, list, theme, Str::PathNote, &[], pal.muted);
             sp.hint(Str::KeyEnter, Str::HintContinue);
+            sp.hint(Str::KeyEsc, Str::HintBack);
+            sp.hint(Str::KeyKeyboard, Str::HintKeyboard);
+        }
+        Screen::ChooseKeyboard { .. } | Screen::ChooseLanguage { .. } => {
+            let kb = matches!(screen, Screen::ChooseKeyboard { .. });
+            title(
+                &mut sp,
+                list,
+                if kb {
+                    Str::KeyboardTitle
+                } else {
+                    Str::LanguageTitle
+                },
+            );
+            if kb {
+                paras(&mut sp, list, theme, Str::KeyboardHelp, &[], pal.muted);
+            }
+            sp.block(list_block);
+            nav(&mut sp);
             sp.hint(Str::KeyEsc, Str::HintBack);
         }
         Screen::SelectVolume(_) => {
@@ -672,8 +757,16 @@ fn describe<'a>(
             });
         }
     }
-    sp.hint(Str::KeyTheme, Str::HintContrast);
+    sp.hint(Str::KeyLanguage, Str::HintLanguage);
+    sp.hint(Str::KeyTheme, Str::HintTheme);
     sp
+}
+
+/// "Keyboard: German", under a field that takes typed text.
+fn keyboard_note<'a>(sp: &mut Spec<'a>, list: &mut DrawList<'a>, theme: &Theme, k: Keyboard) {
+    let name = literal(theme, layout_name(k));
+    let src = compose(list, theme, Str::KeyboardLine, &[Arg::Text(name)], 0);
+    sp.block(text_block(BlockKind::Note, src, theme.palette.muted, 1));
 }
 
 // ---------------------------------------------------------------------------
@@ -754,6 +847,26 @@ fn row_texts<'a>(
             compose(list, theme, Str::DiskBrowse, &[], 0),
             compose(list, theme, Str::DiskBrowseWhy, &[], 0),
         ),
+        (Item::Keyboard(i), Screen::ChooseKeyboard { current }) => {
+            let k = Keyboard::ALL
+                .get(usize::from(i))
+                .copied()
+                .unwrap_or_default();
+            let detail = if k == *current {
+                compose(list, theme, Str::InUse, &[], 0)
+            } else {
+                none
+            };
+            (compose(list, theme, layout_name(k), &[], 0), detail)
+        }
+        (Item::Language(i), Screen::ChooseLanguage { current, .. }) => {
+            let detail = if i == *current {
+                compose(list, theme, Str::InUse, &[], 0)
+            } else {
+                none
+            };
+            (TextSrc::Str(language_name(usize::from(i))), detail)
+        }
         _ => (none, none),
     }
 }
@@ -938,10 +1051,13 @@ fn block_height(
             line_h(d.body) * n.clamp(b.min, b.max) as i32
         }
         BlockKind::Label => line_h(d.detail),
-        BlockKind::Name | BlockKind::Crumb => line_h(d.label),
+        BlockKind::Name | BlockKind::Crumb | BlockKind::Note => line_h(d.label),
         BlockKind::List => {
             let n = n_items.clamp(b.min, b.max) as i32;
-            n * d.row_h + (n - 1).max(0) * d.row_gap
+            // A list that scrolls keeps a line above and below its rows for
+            // what is out of view.
+            let more = if n_items > b.max { 2 * more_h(d) } else { 0 };
+            n * d.row_h + (n - 1).max(0) * d.row_gap + more
         }
         BlockKind::Field => match fkind {
             Some(FieldKind::RecoveryKey) => {
@@ -959,6 +1075,11 @@ fn block_height(
     }
 }
 
+/// The height of a list's "↑ 3 more" line.
+fn more_h(d: &Dims) -> i32 {
+    line_h(d.detail)
+}
+
 fn bar_inset(ctx: &Ctx<'_>) -> i32 {
     ctx.px(ctx.lay.row.marker).max(2) + ctx.px(ctx.lay.row.padding)
 }
@@ -970,7 +1091,8 @@ fn gap_between(ctx: &Ctx<'_>, a: BlockKind, b: BlockKind) -> i32 {
         (BlockKind::Crumb, BlockKind::Para | BlockKind::List) => s.paragraph,
         (BlockKind::Para, BlockKind::Para) => s.paragraph,
         (BlockKind::Label, BlockKind::Field) => s.paragraph / 2,
-        (BlockKind::Field, BlockKind::Para) => s.paragraph + s.paragraph / 2,
+        (BlockKind::Field, BlockKind::Para | BlockKind::Note) => s.paragraph + s.paragraph / 2,
+        (BlockKind::Note, BlockKind::Para) => s.paragraph,
         _ => s.block,
     })
 }
@@ -1128,8 +1250,8 @@ pub fn layout<'a>(
         let kpad = ctx.px(lay.keycap.padding);
         let kgap = ctx.px(lay.keycap.gap);
         let hgap = ctx.px(lay.hints.gap);
-        let mut items: [(TextSrc<'a>, TextSrc<'a>, i32, i32); MAX_HINTS] =
-            [(TextSrc::Str(""), TextSrc::Str(""), 0, 0); MAX_HINTS];
+        let mut items: [(TextSrc<'a>, TextSrc<'a>, i32, i32, Option<Key>); MAX_HINTS] =
+            [(TextSrc::Str(""), TextSrc::Str(""), 0, 0, None); MAX_HINTS];
         let mut n = 0usize;
         for (k, l) in spec.hints.iter().flatten() {
             let ks = compose(list, theme, *k, &[], 0);
@@ -1137,7 +1259,7 @@ pub fn layout<'a>(
             let (kw, _) = keycap_size(&ctx, &d, list, ks);
             let lw = list.as_str(&ls).map_or(0, |s| text::width(hint_font, s));
             if let Some(slot) = items.get_mut(n) {
-                *slot = (ks, ls, kw, lw);
+                *slot = (ks, ls, kw, lw, key_of(*k));
                 n += 1;
             }
         }
@@ -1145,7 +1267,7 @@ pub fn layout<'a>(
             items
                 .iter()
                 .take(n)
-                .map(|(_, _, kw, lw)| kw + kgap + lw)
+                .map(|(_, _, kw, lw, _)| kw + kgap + lw)
                 .sum::<i32>()
                 + hgap * (n as i32 - 1).max(0)
         };
@@ -1162,7 +1284,11 @@ pub fn layout<'a>(
             let r = place(&lay.hints.place, total(n), hh, off, safe);
             if !r.intersects(&brand) && !r.intersects(&banner) {
                 let mut x = r.x;
-                for (ks, ls, kw, lw) in items.iter().take(n) {
+                for (ks, ls, kw, lw, key) in items.iter().take(n) {
+                    if let Some(k) = key {
+                        list.hits
+                            .push(Rect::new(x, r.y, kw + kgap + lw, hh), Target::Key(*k));
+                    }
                     let cap = Rect::new(x, r.y + (hh - kh) / 2, *kw, kh);
                     list.push(Cmd::Stroke {
                         r: cap,
@@ -1315,7 +1441,7 @@ pub fn layout<'a>(
                 line(list, &ctx, d.detail, b.src, b.color, r, lay.content.align);
             }
             BlockKind::List => draw_list(list, &ctx, &d, &rows, view.selected, b.max, r),
-            BlockKind::Name => {
+            BlockKind::Name | BlockKind::Note => {
                 line(list, &ctx, d.label, b.src, b.color, r, lay.content.align);
             }
             BlockKind::Crumb => {
@@ -1329,6 +1455,7 @@ pub fn layout<'a>(
                 draw_crumb(list, &ctx, &d, b, &rows, view.selected, r);
             }
             BlockKind::Field => {
+                list.hits.push(r, Target::Field);
                 if let Some(f) = view.field {
                     draw_field(list, &ctx, &d, &f, view.buf, r, cw);
                 } else if let Some(k) = fkind {
@@ -1446,31 +1573,31 @@ fn draw_para<'a>(
 
 /// Where a list's rows come from: a screen's items, or a directory.
 #[derive(Clone, Copy)]
-enum Rows<'a> {
+pub(crate) enum Rows<'a> {
     Items(&'a Screen, ui::Items),
     Dir(DirView<'a>, Level),
 }
 
 impl<'a> Rows<'a> {
-    fn of(screen: &'a Screen, view: &View<'a>) -> Rows<'a> {
+    pub(crate) fn of(screen: &'a Screen, view: &View<'a>) -> Rows<'a> {
         match (screen, view.dir) {
             (Screen::Browse(level), Some(d)) => Rows::Dir(d, *level),
             _ => Rows::Items(screen, ui::items(screen)),
         }
     }
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         match self {
             Rows::Items(_, it) => it.len(),
             Rows::Dir(d, _) => ui::browse_rows(d),
         }
     }
-    fn enabled(&self, i: usize) -> bool {
+    pub(crate) fn enabled(&self, i: usize) -> bool {
         match self {
             Rows::Items(_, it) => it.get(i).is_some_and(|x| x.enabled()),
             Rows::Dir(..) => true,
         }
     }
-    fn texts(
+    pub(crate) fn texts(
         &self,
         i: usize,
         theme: &Theme,
@@ -1497,6 +1624,7 @@ fn draw_list<'a>(
     r: Rect,
 ) {
     let n = rows.len();
+    let overflow = n > visible;
     let visible = visible.min(n).max(1);
     list.page = visible;
     let sel = selected.min(n.saturating_sub(1));
@@ -1506,9 +1634,42 @@ fn draw_list<'a>(
     let lay = ctx.lay;
     let pad = ctx.px(lay.row.padding);
     let marker = ctx.px(lay.row.marker);
+    // What is out of view, above and below: a line each, clickable (a page
+    // up or down).
+    let mh = if overflow { more_h(d) } else { 0 };
+    if overflow {
+        let above = first;
+        let below = n - (first + visible).min(n);
+        for (count, s, y, key) in [
+            (above, Str::MoreAbove, r.y, Key::PageUp),
+            (below, Str::MoreBelow, r.bottom() - mh, Key::PageDown),
+        ] {
+            if count == 0 {
+                continue;
+            }
+            let src = compose(list, ctx.theme, s, &[Arg::Num(count as u64)], 0);
+            let band = Rect::new(r.x, y, r.w, mh);
+            line(
+                list,
+                ctx,
+                d.detail,
+                src,
+                ctx.pal.muted,
+                Rect::new(r.x + pad, y, r.w - 2 * pad, mh),
+                Align::Left,
+            );
+            list.hits.push(band, Target::Key(key));
+        }
+    }
     for (k, idx) in (first..(first + visible).min(n)).enumerate() {
-        let rr = Rect::new(r.x, r.y + k as i32 * (d.row_h + d.row_gap), r.w, d.row_h);
+        let rr = Rect::new(
+            r.x,
+            r.y + mh + k as i32 * (d.row_h + d.row_gap),
+            r.w,
+            d.row_h,
+        );
         let enabled = rows.enabled(idx);
+        list.hits.push(rr, Target::Row(idx));
         let selected = idx == sel && enabled;
         let radius = ctx.px(lay.row.radius);
         list.push(Cmd::Fill {
@@ -1658,22 +1819,25 @@ fn draw_actions<'a>(
     let one = line_h(d.label).max(line_h(d.key) + kpad);
     // Keycaps share one width so the labels line up.
     let mut kw = 0;
-    let mut srcs = [(TextSrc::Str(""), TextSrc::Str("")); MAX_ACTIONS];
+    let mut srcs = [(TextSrc::Str(""), TextSrc::Str(""), None); MAX_ACTIONS];
     let mut n = 0usize;
     for (k, l) in actions.iter().flatten().take(max) {
         let ks = compose(list, ctx.theme, *k, &[], 0);
         let ls = compose(list, ctx.theme, *l, &[], 0);
         kw = kw.max(keycap_size(ctx, d, list, ks).0);
         if let Some(s) = srcs.get_mut(n) {
-            *s = (ks, ls);
+            *s = (ks, ls, key_of(*k));
             n += 1;
         }
     }
     let kh = line_h(d.key) + kpad;
     let gap = ctx.px(ctx.lay.keycap.gap) * 2;
     kw = kw.min(r.w / 3);
-    for (i, (ks, ls)) in srcs.iter().take(n).enumerate() {
+    for (i, (ks, ls, key)) in srcs.iter().take(n).enumerate() {
         let y = r.y + i as i32 * (one + d.row_gap);
+        if let Some(k) = key {
+            list.hits.push(Rect::new(r.x, y, r.w, one), Target::Key(*k));
+        }
         let cap = Rect::new(r.x, y + (one - kh) / 2, kw, kh);
         list.push(Cmd::Stroke {
             r: cap,
@@ -1745,6 +1909,7 @@ fn draw_field<'a>(
                 radius,
                 color: ctx.pal.surface,
             });
+            let bi = list.hits.field_box(gr);
             list.push(Cmd::Stroke {
                 r: gr,
                 radius,
@@ -1763,6 +1928,12 @@ fn draw_field<'a>(
                     slot,
                     lh,
                 );
+                if let Some(b) = bi {
+                    list.hits.stop(b, sr.x, k);
+                    if j + 1 == RECOVERY_GROUP {
+                        list.hits.stop(b, sr.right(), k + 1);
+                    }
+                }
                 if k < total {
                     let src = match digits.next() {
                         Some((i, c)) if f.revealed() => {
@@ -1821,6 +1992,7 @@ fn draw_field<'a>(
     if area.is_empty() {
         return;
     }
+    let bi = list.hits.field_box(r);
     // A window of the text that keeps the cursor visible.
     let (src, cur_x) = if f.revealed() {
         let cur_byte = f.cursor();
@@ -1843,6 +2015,16 @@ fn draw_field<'a>(
         }
         let src = TextSrc::Str(shown.get(..end).unwrap_or(""));
         let cx = text::width(font, text.get(start..cur_byte).unwrap_or(""));
+        if let Some(b) = bi {
+            // Where a click puts the cursor: every visible boundary.
+            let first = text.get(..start).map_or(0, |t| t.chars().count());
+            let mut m = text::Measure::new(font);
+            list.hits.stop(b, area.x, first);
+            for (k, c) in shown.get(..end).unwrap_or("").chars().enumerate() {
+                m.push(c);
+                list.hits.stop(b, area.x + m.width(), first + k + 1);
+            }
+        }
         (src, cx)
     } else {
         let bw = text::char_width(font, bullet).max(1);
@@ -1850,6 +2032,14 @@ fn draw_field<'a>(
         let start = before.saturating_sub(fit);
         let shown = (total - start).min(fit);
         let (l, rr) = text::extent(font, core::iter::repeat_n(bullet, before - start));
+        if let Some(b) = bi {
+            let mut m = text::Measure::new(font);
+            list.hits.stop(b, area.x, start);
+            for k in 0..shown {
+                m.push(bullet);
+                list.hits.stop(b, area.x + m.width(), start + k + 1);
+            }
+        }
         (TextSrc::Repeat(bullet, shown), rr - l)
     };
     let (l, _) = text::extent(font, list.chars(&src));

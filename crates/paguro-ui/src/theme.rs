@@ -201,6 +201,9 @@ pub struct Options {
     pub selection: Selection,
     /// Steps larger than the resolution calls for (a large-text variant).
     pub scale_bias: u8,
+    /// The pointer's cursor image (index into [`Step::images`]); its
+    /// top-left pixel is the pointer's position.
+    pub pointer: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -379,7 +382,7 @@ pub struct Theme {
     pub options: Options,
     /// Ascending scale.
     pub steps: &'static [Step],
-    pub layouts: [Layout; SCREEN_KINDS],
+    pub layouts: &'static [Layout; SCREEN_KINDS],
     pub strings: &'static [Tpl; STR_COUNT],
 }
 
@@ -409,7 +412,7 @@ impl Theme {
     }
 
     pub fn layout(&self, k: ScreenKind) -> &Layout {
-        let layouts: &[Layout; SCREEN_KINDS] = &self.layouts;
+        let layouts: &[Layout; SCREEN_KINDS] = self.layouts;
         match layouts.get(k as usize) {
             Some(l) => l,
             None => &layouts[0],

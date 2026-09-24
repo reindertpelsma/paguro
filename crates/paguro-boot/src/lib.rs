@@ -18,6 +18,8 @@
 #![cfg_attr(test, allow(clippy::indexing_slicing))]
 
 pub mod bde;
+pub mod keymap;
+mod keymap_tables;
 pub mod machine;
 pub mod platform;
 pub mod stage4;

@@ -14,7 +14,7 @@
 //! `.new`, not the primary; the loader then refuses the primary (Secure Boot
 //! on) and recovery takes over, and re-running the command completes it.
 
-use paguro_core::config::{self, Config, Efi, Entry, MAX_ENTRIES, Ui, UiMode, UiTheme};
+use paguro_core::config::{self, Config, Efi, Entry, Keyboard, MAX_ENTRIES, Ui, UiMode, UiTheme};
 use paguro_core::guid::{Guid, PAGURO_VENDOR};
 use paguro_core::ini;
 use serde::Serialize;
@@ -57,6 +57,8 @@ pub struct OwnedConfig {
     pub passphrase: bool,
     pub theme: String,
     pub mode: String,
+    /// `[UI] keyboard` (INTERFACES.md §13.5), kept through edits.
+    pub keyboard: String,
 }
 
 impl OwnedConfig {
@@ -70,6 +72,7 @@ impl OwnedConfig {
             passphrase: false,
             theme: UiTheme::Dark.name().into(),
             mode: UiMode::Auto.name().into(),
+            keyboard: Keyboard::Us.name().into(),
         }
     }
 
@@ -100,6 +103,7 @@ impl OwnedConfig {
             passphrase: c.passphrase,
             theme: c.ui.theme.name().into(),
             mode: c.ui.mode.name().into(),
+            keyboard: c.ui.keyboard.name().into(),
         }
     }
 
@@ -138,6 +142,9 @@ impl OwnedConfig {
                 .ok_or_else(|| CmdError::refused(format!("unknown theme {:?}", self.theme)))?,
             mode: UiMode::from_name(&self.mode)
                 .ok_or_else(|| CmdError::refused(format!("unknown mode {:?}", self.mode)))?,
+            keyboard: Keyboard::from_name(&self.keyboard).ok_or_else(|| {
+                CmdError::refused(format!("unknown keyboard layout {:?}", self.keyboard))
+            })?,
         };
         let cfg = Config {
             default,
