@@ -150,14 +150,21 @@ content:
 | ISO 9660 (`CD001` at byte 32 769) | its El Torito EFI boot image, or the ESP of a hybrid ISO's GPT; the `BlockIo` reports 2048-byte blocks so the firmware's El Torito support binds it; always read-only |
 | anything else | refuse |
 
+**`root` is a hint the loader forwards, not a disk it opens.** The loader
+resolves the path to the file's identity (MFT record and sequence number) and
+puts it in the handoff; it never reads the root's contents. Linux's module
+claims the file and exposes it as a block device, and whatever filesystem is on
+it is Linux's to mount: ext4, ISO 9660 (`isofs`), squashfs, LUKS. The loader
+only interprets `efi_disk`'s contents, and only to find the next UEFI image.
+
 **A root disk need not be partitioned.** `root` may hold a GPT, or a bare
 filesystem (ext4 directly on the payload — the same shape as a WSL distribution
 disk). The paguro host uses exactly that: its UKI as an `efi_file` on NTFS, its
 root a VHD with one ext4 and nothing else. Its kernel updates replace the UKI
 through view C (write new, rename), which the host does while the VM is off.
 
-**The structural assertion follows the content** (DESIGN §4.3: checked on view
-A before anything mounts, and it must catch extents gathered in the wrong
+**The structural assertion follows the content** (DESIGN §4.3: checked by the
+module on view A before anything mounts — in Linux, not in the loader — and it must catch extents gathered in the wrong
 order, so it reads past the first extent):
 
 | Root content | Assertion |
