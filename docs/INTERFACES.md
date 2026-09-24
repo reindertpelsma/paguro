@@ -537,37 +537,83 @@ component (DESIGN §4.4).
 
 ### 11.4 Installing a distribution: through WSL2, never an ISO — DRAFT
 
-**No distribution installer ever runs against the real disk, and no ISO is
-booted to install.** A stock installer would see the physical disk with Windows
-on it and partition it, and a stock live initramfs cannot find its media inside
-a VHD inside NTFS, or behind BitLocker, without our driver injected into it.
-Both problems disappear if the image is built from Windows:
+**WSL2 is a requirement** (Windows 10 2004+ / 11, any edition). **No
+distribution installer ever runs against the real disk, and no ISO is booted to
+install.** A stock installer on bare metal would see the physical disk with
+Windows on it; a stock live initramfs cannot find its media inside a VHD inside
+NTFS, or behind BitLocker, without our driver injected into it. Building the
+image from Windows removes both problems, and inside WSL2 the only disk an
+installer can see is the one we attach.
 
 ```text
-paguro install debian            (Windows, admin)
-  1. create the file              fixed VHD, diskpart `create vdisk type=fixed`
-                                  (works on Home; no Hyper-V module)
-  2. wsl --mount --vhd --bare     the VHD appears as a disk inside WSL2
-  3. inside WSL2, as root         GPT (ESP + ext4) or bare ext4; debootstrap /
-                                  dnf --installroot / pacstrap into it;
-                                  kernel, firmware, paguro-initramfs, UKI
-                                  (ukify) into the nested ESP
-  4. wsl --unmount
-  5. write paguro.ini, PaguroConfigHash, the bootstrap Boot#### entry
+paguro install <distro>              (Windows, admin)
+  1. collect the host hardware manifest            (§11.5)
+  2. create the file      fixed VHD, diskpart `create vdisk type=fixed`
+                          (works on Home; no Hyper-V module)
+  3. wsl --mount --vhd --bare   the VHD is the only extra disk in WSL2
+  4. in a throwaway WSL2 distribution, one of:
+       a. scripted: debootstrap / dnf --installroot / pacstrap into the VHD
+       b. the distribution's own installer, GUI through WSLg, restricted to
+          that disk (per-distribution adapter, below)
+     then in the target chroot: kernel, firmware and drivers from the
+     manifest, paguro-initramfs, GRUB or a UKI into the nested ESP
+     (`grub-install --removable --no-nvram`: WSL2 has no efivarfs)
+  5. wsl --unmount
+  6. write paguro.ini, PaguroConfigHash, the bootstrap Boot#### entry
 ```
 
-- The builder is a small script run in a throwaway WSL2 distribution (Debian
-  for `debootstrap`; others via their own bootstrap tools), so the image is
-  built by the distribution's own package manager, not by us.
-- `paguro-initramfs` is installed from inside the chroot like any package, so
-  the driver is in the image from its first boot — no injection problem.
+- `paguro-initramfs` is installed in the chroot like any package, so the driver
+  is in the image from its first boot — no injection problem.
 - The same path makes an existing WSL distribution bootable: its rootfs is the
-  source of step 3 instead of a bootstrap tool.
-- Requires WSL2 (Windows 10 2004+ / 11, any edition). Without it, the installer
-  downloads a prebuilt image for the supported list (DESIGN §8b).
+  source in step 4.
+- **Distribution installers are adapters, not a generic feature.** Installers
+  assume live media (a squashfs at `/cdrom`, `efibootmgr`, the live user), so
+  each needs a small adapter: Calamares (configurable module list, used by many
+  distributions), Anaconda's image/directory install, Ubuntu's `curtin`
+  backend. Where no adapter exists, the scripted path (4a) is the installer,
+  with the distribution chosen from a list in the paguro app.
 
 ISO 9660 stays readable by Linux (`isofs` on a claimed file) but is not a loader
 format.
+
+### 11.5 Host hardware manifest — DRAFT
+
+Inside WSL2 the installer sees Hyper-V's synthetic hardware, not the machine,
+so it would install the wrong drivers and firmware. The Windows tool therefore
+describes the real machine, and the chroot installs for that.
+
+**Collected on Windows** (SetupAPI, present devices only; SMBIOS through
+`GetSystemFirmwareTable`), written as `/etc/paguro/host-hardware.json` in the
+image:
+
+```json
+{ "version": 1,
+  "cpu":  { "vendor": "GenuineIntel", "family": 6, "model": 170 },
+  "dmi":  { "sys_vendor": "…", "product_name": "…", "board_name": "…" },
+  "pci":  [ { "vendor": "8086", "device": "51f0", "subvendor": "8086",
+              "subdevice": "0094", "class": "028000" } ],
+  "usb":  [ { "vendor": "8087", "product": "0033", "class": "e0" } ],
+  "acpi": [ "PNP0C50", "INT33D2" ],
+  "windows_drivers": [ { "hwid": "PCI\\VEN_8086&DEV_51F0…", "inf": "netwtw10.inf",
+                         "provider": "Intel" } ] }
+```
+
+**Used in the chroot:**
+
+1. Convert every entry to a kernel **modalias** (`pci:v00008086d000051F0sv…`,
+   `usb:v8087p0033…`, `acpi:PNP0C50:`, `dmi:…`) — the same strings the target
+   kernel would see in `/sys`.
+2. Match them against the target kernel's `modules.alias` → the modules this
+   machine needs → `modinfo -F firmware` → the firmware files → the packages
+   that ship them (`apt-file`/Debian's `isenkram` tables, `dnf provides`).
+3. Out-of-tree drivers by rule: NVIDIA GPU → the distribution's NVIDIA driver
+   (`ubuntu-drivers`, RPM Fusion `akmod`), Broadcom Wi-Fi → `wl`, and so on.
+
+**Priority is first-boot essentials: network (Wi-Fi and Ethernet firmware) and
+display.** Everything else the distribution's own tools can fix on the first
+native boot, when the real hardware is present — but only if the network came
+up. The manifest stays in the image so first-boot tooling can compare it with
+what it finds.
 
 ### 11.3 Guest agent (VM mode growth) — OPEN
 
