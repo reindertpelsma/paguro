@@ -1,0 +1,87 @@
+# The default paguro theme: calm, dark, generous spacing.
+# Format: themes/README.md. Every length is in reference pixels, scaled per
+# resolution (see [theme] reference / scales).
+
+[theme]
+name = "default"
+description = "Dark, calm, warm accent"
+# The UI is laid out for this size; the scale is min(width / 1280,
+# height / 900), snapped down to the nearest entry of `scales` (the smallest
+# below that). Fonts and images are rasterised for each entry at build time,
+# so every entry costs binary size.
+reference = [1280, 900]
+scales = [0.7, 0.85, 1.0, 1.4, 2.0]
+
+[fonts]
+regular = "fonts/Inter-Regular.ttf"
+semibold = "fonts/Inter-SemiBold.ttf"
+
+# Text styles. `line` is the line height; `charset = "latin1"` rasterises all
+# of Latin-1 (required for `label` and `field`, which show typed text and
+# file names), otherwise only the characters the strings drawn in the style
+# use, plus digits and a few separators.
+[text]
+brand = { font = "semibold", size = 24, line = 30 }
+title = { font = "semibold", size = 34, line = 44 }
+body = { font = "regular", size = 19, line = 29 }
+label = { font = "regular", size = 20, line = 28, charset = "latin1" }
+detail = { font = "regular", size = 16, line = 24 }
+# Same as `label`: identical styles share their glyphs in the binary.
+field = { font = "regular", size = 20, line = 28, charset = "latin1" }
+hint = { font = "regular", size = 15, line = 22 }
+key = { font = "semibold", size = 13, line = 18 }
+banner = { font = "semibold", size = 15, line = 22 }
+
+[colors]
+background = "#14171c"
+text = "#e8eaed"
+muted = "#9aa1ab"
+faint = "#5f6670"
+accent = "#e8875b"
+surface = "#1b1f25"
+surface_selected = "#252a33"
+border = "#2f353f"
+border_focus = "#e8875b"
+cursor = "#e8875b"
+key_border = "#3a414c"
+key_text = "#c3c8cf"
+banner_background = "#2a2416"
+banner_text = "#f0c26a"
+toast_background = "#2d1d1b"
+toast_text = "#f2a58f"
+
+[images]
+logo = { file = "images/logo.png", size = [40, 40] }
+
+[options]
+bullet = "•"
+ellipsis = "…"
+# How the selected list row is marked: "bar" (accent bar + raised surface),
+# "fill" (raised surface only) or "outline".
+selection = "bar"
+# Use a larger scale step than the screen size calls for (0: none). A
+# "large text" variant sets 1: everything, text included, one step larger,
+# with no extra glyphs compiled in.
+scale_bias = 0
+
+# Layout defaults for every screen. [primitive.<name>] (list, field,
+# message) and then [screen.<name>] (unlock, secret, recovery_key, path,
+# message, volumes, targets, roots) override any subset of these keys.
+[layout]
+margin = [44, 56]
+show_logo = true
+show_name = true
+show_hints = true
+brand = { anchor = "top-left", offset = [0, 0], logo = "logo", gap = 12 }
+banner = { anchor = "top-center", offset = [0, 64], padding = [8, 16], radius = 16 }
+content = { anchor = "center", offset = [0, -8], max_width = 680, align = "left" }
+hints = { anchor = "bottom-center", offset = [0, 0], gap = 28 }
+decorations = []
+spacing = { title = 12, paragraph = 10, block = 32 }
+row = { height = 60, padding = 20, gap = 6, radius = 10, marker = 4 }
+field = { height = 62, padding = 18, radius = 10, border = 2, cursor = 2, group_gap = 14 }
+keycap = { padding = 7, radius = 5, border = 1, gap = 8 }
+toast = { padding = [10, 18], radius = 10, gap = 20 }
+
+[primitive.message]
+content = { max_width = 620 }

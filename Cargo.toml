@@ -8,6 +8,7 @@ members = [
     "crates/paguro-initrd",
     "crates/paguro-win",
     "crates/paguro-harness",
+    "crates/paguro-theme",
     "test/qemu/runner",
 ]
 # paguro-efi only builds for x86_64-unknown-uefi; see its README.
@@ -18,6 +19,7 @@ default-members = [
     "crates/paguro-initrd",
     "crates/paguro-win",
     "crates/paguro-harness",
+    "crates/paguro-theme",
     "test/qemu/runner",
 ]
 
@@ -31,6 +33,7 @@ rust-version = "1.85"
 paguro-core = { path = "crates/paguro-core" }
 paguro-crypto = { path = "crates/paguro-crypto" }
 paguro-boot = { path = "crates/paguro-boot" }
+paguro-theme = { path = "crates/paguro-theme" }
 sha2 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
 
@@ -43,3 +46,4 @@ indexing_slicing = "warn"
 [profile.release]
 panic = "abort"
 lto = true
+

@@ -1,0 +1,35 @@
+# High contrast and large text: pure black and white, a strong accent, and
+# everything one scale step larger (the same compiled glyphs, so the variant
+# costs no font data). A variant overrides any keys of theme.toml; the rest
+# is inherited. F2 cycles through the variants at run time.
+
+[theme]
+name = "high-contrast"
+description = "Black and white, larger text"
+
+[colors]
+background = "#000000"
+text = "#ffffff"
+muted = "#ffffff"
+faint = "#b0b0b0"
+accent = "#ffd400"
+surface = "#000000"
+surface_selected = "#1c1c1c"
+border = "#ffffff"
+border_focus = "#ffd400"
+cursor = "#ffd400"
+key_border = "#ffffff"
+key_text = "#ffffff"
+banner_background = "#ffd400"
+banner_text = "#000000"
+toast_background = "#ffffff"
+toast_text = "#000000"
+
+[options]
+selection = "outline"
+scale_bias = 1
+
+[layout]
+row = { height = 60, padding = 20, gap = 8, radius = 4, marker = 3 }
+field = { height = 62, padding = 18, radius = 4, border = 3, cursor = 3, group_gap = 14 }
+keycap = { padding = 7, radius = 3, border = 2, gap = 8 }

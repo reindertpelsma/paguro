@@ -1,0 +1,110 @@
+# Every user-visible string of the graphical loader, in English.
+# `{name}` is a placeholder filled at run time (numbers or names); the build
+# rejects unknown placeholders and missing or unknown keys. A "\n" starts a
+# new paragraph; lines are wrapped to the layout automatically.
+
+brand = "paguro"
+unattested = "Unattested — paguro could not verify its configuration"
+incorrect = "That did not unlock Linux. Check the keyboard layout and try again."
+path_refused = "That is not a usable path on this volume."
+
+hint_select = "select"
+hint_continue = "continue"
+hint_back = "back"
+hint_other = "other options"
+hint_show = "show"
+hint_hide = "hide"
+hint_contrast = "contrast"
+hint_windows = "Start Windows"
+key_arrows = "↑ ↓"
+key_enter = "Enter"
+key_esc = "Esc"
+key_insert = "Insert"
+key_theme = "F2"
+key_w = "W"
+key_r = "R"
+
+unlock_title = "Unlock Linux"
+first_boot = "From now on this replaces your Linux login password — and restarting into Linux from Windows skips it."
+row_password = "Password or PIN"
+row_passphrase = "Recovery passphrase"
+row_recovery_key = "Recovery key"
+attempts = "{n} TPM attempts left"
+attempt_last = "last TPM attempt"
+no_limit = "no attempt limit"
+digits = "48 digits"
+grey_restart = "unavailable until restart"
+grey_restart_why = "recovery mode"
+grey_locked = "TPM locked"
+grey_locked_why = "use another option"
+
+secret_password = "Enter your password or PIN"
+secret_passphrase = "Enter your recovery passphrase"
+secret_recovery_key = "Enter your recovery key"
+recovery_key_help = "48 digits in groups of six. Find it at aka.ms/myrecoverykey"
+
+cannot_title = "Cannot unlock Linux"
+cannot_body = "Windows will almost certainly start normally. Try that first — you probably do not need your recovery key."
+act_start_windows = "Start Windows"
+act_need_linux = "I need Linux now — enter recovery key"
+
+config_title = "Configuration is not valid"
+config_body = """paguro.ini has changed since it was installed, or is damaged. Linux cannot start from it.
+If you did not change it, this may indicate tampering."""
+act_recover = "Recover Linux — needs a password or key"
+
+locked_title = "Too many incorrect attempts"
+locked_body = """The TPM has locked itself to prevent guessing. Waiting will restore it — nothing is damaged.
+Your other unlock options still work."""
+act_try_another = "Try another option"
+
+hibernated_title = "Windows saved a session — starting Linux read-only"
+hibernated_body = "This is normal after shutting Windows down. Your disk is fine. Linux will start, but cannot write until Windows resumes once."
+dirty_title = "Windows didn’t shut down cleanly last time"
+dirty_body = "This is usually harmless and your disk is fine. Linux will start read-only until Windows has started and shut down once."
+act_continue_ro = "Continue read-only — get to your files"
+act_restart_windows = "Restart into Windows — then restart into Linux"
+
+pcr12_title = "This firmware already used paguro’s measurement slot"
+pcr12_body = "The TPM cannot protect the key on this boot. Windows is not affected."
+plaintext_title = "This configuration protects nothing"
+plaintext_body = "A TPM seal over an unencrypted volume would only look like protection, so paguro refuses it. Start Windows and run the paguro repair tool."
+missing_title = "The Linux volume was not found"
+missing_body = "The volume named in the configuration is not on any disk connected now."
+act_recover_short = "Recover Linux"
+notimpl_title = "This build cannot finish starting Linux"
+notimpl_body = "A later stage of paguro is not implemented yet. Nothing was changed."
+act_continue = "Continue"
+
+noinst_title = "No Linux installation found"
+noinst_body = "paguro searched every disk and found no volume to start Linux from."
+noinst_fix = "To fix: start Windows and run the paguro repair tool."
+
+volumes_title = "Which volume holds your Linux installation?"
+volume_row = "Disk {disk}, partition {part}"
+format_bitlocker = "BitLocker"
+format_ntfs = "NTFS, not encrypted"
+
+targets_title = "What should start?"
+targets_body = "Found in \\paguro\\ on this volume."
+targets_empty = "Nothing was found in \\paguro\\ on this volume. You can type a path instead."
+target_disk = "Linux disk"
+target_efi = "UEFI application"
+type_path = "Type a path…"
+type_path_why = "a disk image or a .efi file"
+
+path_title = "Type the path of what to start"
+path_help = "A path on this volume, such as \\paguro\\debian.vhd. A name ending in .efi starts as a UEFI application."
+path_label = "Path"
+
+roots_title = "Which disk holds Linux?"
+roots_body = "The UEFI application you chose starts Linux, which then needs its root disk."
+no_root = "None"
+no_root_why = "Linux will ask when it starts"
+
+unit_b = "B"
+unit_kb = "KB"
+unit_mb = "MB"
+unit_gb = "GB"
+unit_tb = "TB"
+decimal = "."

@@ -1,0 +1,18 @@
+[package]
+name = "paguro-theme"
+description = "Build-time theme compiler: validates themes/<name>/ and emits Rust statics for paguro-ui (INTERFACES.md §13.1)"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# Host-only: runs in paguro-ui's build.rs. Nothing here reaches paguro.efi
+# except the statics it writes.
+[dependencies]
+fontdue = "0.9"
+png = "0.18"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+[lints]
+workspace = true
