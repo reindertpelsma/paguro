@@ -11,6 +11,7 @@ default-run = "paguro-harness"
 [dependencies]
 paguro-core.workspace = true
 paguro-crypto.workspace = true
+paguro-boot.workspace = true
 sha2.workspace = true
 
 [build-dependencies]

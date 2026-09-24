@@ -1,0 +1,244 @@
+[bitlk-aes-cbc-128]
+size=104857600
+password=anaconda
+recovery=042647-302313-590458-071500-554323-116567-412181-516978
+refused=layout: UnsupportedCipher(32770)
+volume_id=e9726fab-7656-4bc5-bb9e-adf115953328
+method=AES-CBC 128-bit
+description=DESKTOP-NPM7RCA F: 7/3/2019
+protector=Password cdfdf65e-42ea-4486-ac2c-db11d8b619f9
+protector=Recovery password 3fd763f9-74c7-4e90-8fa2-1f6a2e2b4e0c
+
+[bitlk-aes-cbc-256]
+size=104857600
+password=anaconda
+recovery=616319-601744-502117-534017-367994-176748-607299-663201
+refused=layout: UnsupportedCipher(32771)
+volume_id=a2e943bf-6796-483c-a492-63db9ec1835d
+method=AES-CBC 256-bit
+description=DESKTOP-NPM7RCA G: 8/15/2019
+protector=Password 3cb5abac-f56c-4a6b-9bbb-d78e48db7271
+protector=Recovery password b9859a34-8139-4d5e-a628-412bef9ba206
+
+[bitlk-aes-xts-128]
+size=104857600
+password=anaconda
+recovery=235818-357951-253979-013365-241120-245575-342914-591910
+sha256=674e3a976927fd62f3fc26df2c695cac75b8d364e3b45393717efa971f16db0f
+boot_sha256=6e854a6de14e3104115f21cc8534e247a7fde6a0691147ef85609f5559a52020
+volume_id=8f595209-f5b9-49a0-85d4-cb8f80258c27
+method=AES-XTS 128-bit
+description=DESKTOP-NPM7RCA H: 7/4/2019
+protector=Password 3e55195c-8811-4d9b-97b4-2b9e5f8f5384
+protector=Recovery password 64311dea-4587-4029-924a-ba299647998e
+
+[bitlk-aes-xts-256]
+size=104857600
+password=anaconda
+recovery=404558-436711-420860-678557-638220-018909-039941-695321
+sha256=5bb6ff5acbded10be990c6fa208ab479934a08bc2e88740a1aa2642af2f42025
+boot_sha256=6453b737ac848c18b0d0da82c01330dc43ee5f7823a99dce5701a97501dc16e2
+volume_id=635b3bdd-2ae5-453b-9bae-68d325268a11
+method=AES-XTS 256-bit
+description=DESKTOP-NPM7RCA F: 8/15/2019
+protector=Password 1c151a5a-6bcf-4d29-9393-d94e4a7d346a
+protector=Recovery password 83abdb8f-3218-4bfd-aced-215e1e189bdf
+
+[bitlk-aes-cbc-elephant-128]
+size=134217728
+password=anaconda
+recovery=529573-278784-259347-197835-171457-264044-610280-313269
+refused=layout: UnsupportedCipher(32768)
+volume_id=d1668fb9-2c16-40aa-8959-3493815234e6
+method=AES-CBC 128-bit with Diffuser
+description=WIN-TR6JK2CTSJC New Volume 8/13/2019
+protector=Recovery password b4454890-f4b2-4303-a788-e237176e400b
+protector=Password c2171489-53f5-45df-a351-f38474a08de7
+
+[bitlk-aes-cbc-elephant-256]
+size=134217728
+password=anaconda
+recovery=618871-562507-462814-555324-264660-562727-105171-668195
+refused=layout: UnsupportedCipher(32769)
+volume_id=ad0a8502-de92-4707-87ee-470afc5a9f39
+method=AES-CBC 256-bit with Diffuser
+description=WIN-TR6JK2CTSJC New Volume 8/13/2019
+protector=Password 49d36770-c9c2-4e10-8bbc-25c3f62a35eb
+protector=Recovery password 707c5e8c-ab3d-4626-9ed3-950ad508e29f
+
+[bitlk-togo-aes-cbc-128]
+size=104857600
+password=anaconda
+recovery=607552-529496-550902-707531-545787-248358-370216-060401
+refused=layout: UnsupportedCipher(32770)
+volume_id=e75379cf-8b7b-48d7-9210-84b63e730cf5
+method=AES-CBC 128-bit
+description=DESKTOP-NPM7RCA G: 7/3/2019
+protector=Password b8a05efc-7939-4393-b4a7-df3ea480530b
+protector=Recovery password 7b15c1af-defa-4a3f-a89f-45b93812337e
+
+[bitlk-togo-aes-xts-128]
+size=104857600
+password=anaconda
+recovery=243067-548680-059818-148852-287771-550088-628265-631653
+sha256=5954795eb41764b59a10d86c26fd3b43fb6d89f433c8edc1e8fd48067d198591
+boot_sha256=d96095ceaaea9e0c5eb1f833a924a771b277b9c1a13a7c1f2e548c238cf47a6c
+volume_id=dca1850a-0ef6-4ece-8acb-9f42ca63bdd1
+method=AES-XTS 128-bit
+description=DESKTOP-NPM7RCA G: 10/18/2019
+protector=Password 79e53500-f262-47b1-ae59-c3902329921f
+protector=Recovery password cfc68dda-e393-44c3-9c3b-e73480f2bd17
+
+[bitlk-partially-encrypted-aes-cbc-128]
+size=104857600
+password=anaconda
+recovery=528561-251702-140283-271590-717365-674234-182611-409563
+refused=layout: UsedSpaceOnly
+
+[bitlk-aes-xts-128-new-entry]
+size=104857600
+password=anaconda
+recovery=199067-214280-266398-508123-023584-402875-562793-012067
+sha256=794163062398ae43b796f85eafde8acf5dc7830a93ec2aa7ef0c6baaa14b2757
+boot_sha256=33857fd3807e0d129e3f26c5cef9fcfef7502878cdc8aa0a5ae6a679469ec35b
+volume_id=2c2a8753-7c64-4b95-b4bb-fd13ac73069a
+method=AES-XTS 128-bit
+description=DESKTOP-B727RA0 F: 05/11/2019
+protector=Password 703be715-ffac-49dd-9e47-c2850394ecdc
+protector=Recovery password 927bd960-c47f-41c7-9159-078469c1714b
+
+[bitlk-aes-xts-128-smart-card]
+size=104857600
+recovery=538329-080597-399190-348700-323345-161062-279807-230978
+sha256=007de1a342f49a15f97712f634aa1684e1d8c24e220652fc9796b22421413268
+boot_sha256=33ae3635785e973daefc1bd8e89124a195f42f0373d952459381f429bf40a8ca
+volume_id=e7d812df-c38b-4149-95fe-85134d2e02f7
+method=AES-XTS 128-bit
+description=DESKTOP-B727RA0 H: 12/11/2019
+protector=Unknown (0x1000) 7d2245b9-ccd5-49d0-b4f5-653162a71744
+protector=Recovery password 1f9da098-0cc4-464d-a101-188e70f434a6
+
+[bitlk-aes-xts-128-eow]
+size=104857600
+password=anaconda
+recovery=685839-373538-494868-036223-326590-515064-328416-685102
+refused=layout: UsedSpaceOnly
+
+[bitlk-aes-cbc-128-4k]
+size=104857600
+password=anaconda
+recovery=482548-408683-386023-032725-083754-344718-228228-361845
+refused=layout: UnsupportedCipher(32770)
+volume_id=e6c131e8-3875-4833-af6b-7807e8eff324
+method=AES-CBC 128-bit
+description=DESKTOP-LG39GVP New Volume 05/05/2020
+protector=Password 6c6a13c8-7d6d-47b5-a704-e151e39c0e38
+protector=Recovery password 218a3504-0990-4ea3-871f-e7e8a4c1ea85
+
+[bitlk-aes-xts-128-4k]
+size=104857600
+password=anaconda
+recovery=486552-140030-675719-163900-264671-413787-580239-152614
+sha256=b4c0416ae643537207413ed78d4bcadae697bb86a6262864ac00afda01312277
+boot_sha256=349e64a83d8a7d95cb5688369fc269309b7b85596fb3e23b8e0cdb949db7da15
+volume_id=2a66874f-3f92-4160-aab1-20ee31c1426c
+method=AES-XTS 128-bit
+description=DESKTOP-LG39GVP New Volume 01/05/2020
+protector=Password c0fe19b7-75d4-4663-81ed-ab9e3bf4b549
+protector=Recovery password 69a49ad2-6a11-41b2-bb14-bda04b1c97e1
+
+[bitlk-aes-xts-128-startup-key]
+size=104857600
+recovery=363770-230505-096371-652674-567006-579150-291038-408111
+startup_key=4381F759-C4F8-4DE0-BB61-FC33A831BDA5.BEK
+sha256=bbb68369d8f7badb2c2330349d9d0cf12e68f54eece25e718d2bb13feba23f7a
+boot_sha256=eca964d4a21ed4d5ac80fb37d196e70ca150b9c8ea2b496a868ca65ae85e2f7d
+volume_id=5a95db04-6ebc-4ba9-99a3-15a87a3d07b2
+method=AES-XTS 128-bit
+description=DESKTOP-LG39GVP E: 15/09/2020
+protector=Password 4f6ae327-f4cf-470b-a6f6-9de8fdb7c051
+protector=Recovery password 294bc732-f82f-404c-a2ce-d1094ed59506
+protector=Startup key 4381f759-c4f8-4de0-bb61-fc33a831bda5
+
+[bitlk-aes-xts-128-startup-key-win11]
+size=104857600
+recovery=512897-060621-709148-071203-357951-357302-160831-066297
+startup_key=AA80A52B-9B66-47AE-B097-33F536FFBB07.BEK
+sha256=76539fdf098cb3b9d15e318d34eace9da8645b8087282adac800094c59df6347
+boot_sha256=8943e50a4ec7f32c905b3a1f688d3c99e180870f6817a3badd0cbcec59847e57
+volume_id=e8ea9756-9cc1-4ca2-b99d-fae884f56150
+method=AES-XTS 128-bit
+description=WIN11 E: 28/11/2021
+protector=Password 6fd4714b-f3d7-4a22-a94a-94be188fa129
+protector=Recovery password 79342515-351d-4c1d-bc1d-0046b5a2c879
+protector=Startup key aa80a52b-9b66-47ae-b097-33f536ffbb07
+
+[bitlk-aes-xts-128-two-recovery]
+size=105906176
+password=anaconda
+recovery=478401-067859-043868-000935-121330-337425-718509-484979
+recovery=297693-343387-338492-284526-405482-424886-634931-555093
+sha256=15570b2a7a1255e2d0f34a0ff82b6e255d8a7e25c24c7849c91321bcb1858cb3
+boot_sha256=f52b816fa8c592a4b7aadde2392eab8d760319493e4ba5534751d467749984bd
+volume_id=316a9dd0-5d5d-48fb-a2e8-0a02bb08701c
+method=AES-XTS 128-bit
+description=WIN11 New Volume 09/03/2025
+protector=Password 2a9089bc-1e0f-4db4-ab28-323d58789d4b
+protector=Recovery password e7e48bae-ff13-4f14-8222-971d469fae0d
+protector=Recovery password b7adc334-fe6d-4ae4-b5c4-1c1d0dbc335b
+
+[bitlk-aes-xts-128-unicode]
+size=105906176
+password=anaconda£
+recovery=671979-070675-187088-665060-078518-143605-111408-569305
+sha256=8af59ba83928e7920d61696bb3d5392243a1d5c5f4178195cb32b0f21e706af0
+boot_sha256=3de954145955dcf45af52857305b45d4718236c800feafc396e2e26cc0334a53
+volume_id=564d2f72-b8c8-4035-912c-2360b3da8876
+method=AES-XTS 128-bit
+description=WIN11 New Volume 29/07/2025
+protector=Password 8122a856-7e51-4339-ae43-3184db6bfe07
+protector=Recovery password 4ce0c2e1-7684-4298-b288-aaf6d4d54bd0
+
+[bitlk-aes-xts-128-crc]
+size=104857600
+password=anaconda
+recovery=235818-357951-253979-013365-241120-245575-342914-591910
+refused=metadata: Checksum(0)
+volume_id=8f595209-f5b9-49a0-85d4-cb8f80258c27
+method=AES-XTS 128-bit
+description=佃剒偕䕔DOP-NPM7RCA H: 7/4/2019
+protector=Password 3e55195c-8811-4d9b-97b4-2b9e5f8f5384
+protector=Recovery password 64311dea-4587-4029-924a-ba299647998e
+
+[bitlk-aes-xts-128-clearkey-only]
+size=104857600
+clear_key=1
+sha256=f574a5254d31e9f27dc4ee440290875886c6c569cf02dc100e91a5c0cddaa4e1
+boot_sha256=4b1d780eb1458ff1e867f05d32c63268164578a6576953da6184ab5924ab559f
+volume_id=df73cb51-ff48-4033-8d56-a32cc2b1ab7a
+method=AES-XTS 128-bit
+description=WIN11 F: 05/11/2025
+protector=Clear key f99f18e8-0348-4a6b-afdf-58b1dd71f0d1
+
+[bitlk-aes-xts-128-first-recovery]
+size=104857600
+password=anaconda
+recovery=097702-694144-563057-330462-534446-240086-680515-664389
+sha256=61942bde31a461b5e54e2aa154a8ae6479c514400e29fcaeb9fbd7b9fe0ce862
+boot_sha256=f10d754f575b9d14dc3db739851306da9aa8d8d33df30642e7828cf80492474e
+volume_id=5b5688a7-50ec-433d-ba56-028fd0aed90e
+method=AES-XTS 128-bit
+description=WIN11 F: 11/01/2026
+protector=Recovery password e76c7ab2-69b6-44c2-ba78-c227c7c1bd07
+protector=Password 91bb4a99-433d-4979-b9ac-75f47baf6a5e
+
+[dfvfs-bdetogo]
+size=67108864
+password=bde-TEST
+refused=metadata: UnsupportedCipher(32768)
+volume_id=b1454b16-2fe6-4668-a9fa-ad1e84ba88db
+method=AES-CBC 128-bit with Diffuser
+description=TESTBOX1 H: 6/2/2014
+protector=Password 035b3bab-3b23-46e0-8a98-7291970802c6
+protector=Recovery password cde2032f-723e-4607-b916-b489b5eb6ab7
+

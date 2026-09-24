@@ -56,7 +56,8 @@ done
   || { echo "make.sh: $in is not an NTFS volume" >&2; exit 1; }
 
 work=$(mktemp -d)
-trap 'fusermount -u "$work/mnt" 2>/dev/null || true; rm -rf "$work"' EXIT
+unmount() { fusermount -u "$1" 2>/dev/null || umount "$1" 2>/dev/null; }
+trap 'unmount "$work/mnt" || true; rm -rf "$work"' EXIT
 cp --sparse=always "$in" "$work/plain.img"
 
 # Reserve the regions as ordinary (non-resident, contiguous) files.
@@ -111,7 +112,7 @@ bdemount "${bde[@]}" "$out" "$work/mnt" </dev/null >/dev/null \
   || { echo "make.sh: bdemount could not open $out" >&2; exit 1; }
 cmp -s "$work/mnt/bde1" "$out.expect" \
   || { echo "make.sh: libbde's decryption differs from the expected view" >&2; exit 1; }
-fusermount -u "$work/mnt"
+unmount "$work/mnt"
 ntfsinfo -m "$out.expect" >/dev/null 2>&1 \
   || { echo "make.sh: the decrypted view is not a valid NTFS" >&2; exit 1; }
 echo "make.sh: $out verified by dislocker and libbde"

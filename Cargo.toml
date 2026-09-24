@@ -67,3 +67,9 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.crc32fast]
 opt-level = 3
+# BitLocker tests stretch keys (2^20 SHA-256 rounds per attempt) and decrypt
+# whole volumes.
+[profile.dev.package.paguro-crypto]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
