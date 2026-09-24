@@ -156,6 +156,8 @@ pub struct Buffers {
     pub gpt: volume::GptScratch,
     pub handoff: [u8; paguro_core::handoff::MAX_LEN],
     pub secret: [u8; 256],
+    /// A path typed in recovery (INTERFACES.md §13.4).
+    pub path: [u8; machine::PATH_MAX],
     pub fvek_blob: [u8; 1024],
     pub created: tpm::CreatedObject,
     pub located: volume::Located,
@@ -171,6 +173,7 @@ impl Buffers {
             gpt: volume::GptScratch::new(),
             handoff: [0; paguro_core::handoff::MAX_LEN],
             secret: [0; 256],
+            path: [0; machine::PATH_MAX],
             fvek_blob: [0; 1024],
             created: tpm::CreatedObject::new(),
             located: volume::Located::new(),

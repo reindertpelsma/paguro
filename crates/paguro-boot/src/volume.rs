@@ -14,13 +14,15 @@ use paguro_core::guid::{GPT_BASIC_DATA, Guid};
 use paguro_core::handoff::FveLayout;
 
 use crate::BootError;
-use crate::platform::Platform;
+use crate::platform::{Label, Platform, TargetList};
 
 pub type Key = [u8; 32];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Partition {
     pub disk: usize,
+    /// 1-based GPT entry number (what Windows calls the partition number).
+    pub index: u32,
     pub guid: Guid,
     pub first_lba: u64,
     pub sectors: u64,
@@ -114,6 +116,7 @@ pub fn for_each_partition<P: Platform>(
             continue;
         };
         for i in 0..entries.count() {
+            let index = i.saturating_add(1);
             let Ok(e) = entries.get(i) else {
                 p.log(format_args!("paguro: disk {disk}: GPT entry {i} refused"));
                 break;
@@ -123,6 +126,7 @@ pub fn for_each_partition<P: Platform>(
             }
             let part = Partition {
                 disk,
+                index,
                 guid: e.unique_guid,
                 first_lba: e.first_lba,
                 sectors: e.sectors(),
@@ -153,13 +157,22 @@ pub fn find_partition<P: Platform>(
     Ok(found)
 }
 
-pub const MAX_CANDIDATES: usize = 8;
+pub const MAX_CANDIDATES: usize = crate::platform::MAX_CHOICES;
+
+/// A recovery candidate: the partition, what its first sector says, and its
+/// GPT name for the volume list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub part: Partition,
+    pub kind: VolumeKind,
+    pub name: Label,
+}
 
 /// Recovery enumeration: basic-data partitions that carry BitLocker or NTFS.
 pub fn enumerate_candidates<P: Platform>(
     p: &mut P,
     s: &mut GptScratch,
-    out: &mut [Option<(Partition, VolumeKind)>; MAX_CANDIDATES],
+    out: &mut [Option<Candidate>; MAX_CANDIDATES],
 ) -> Result<usize, BootError> {
     let mut n = 0usize;
     let mut probe_block = [0u8; 4096];
@@ -170,7 +183,11 @@ pub fn enumerate_candidates<P: Platform>(
         let kind = probe(p, &part, &mut probe_block)?;
         if kind != VolumeKind::Other {
             if let Some(slot) = out.get_mut(n) {
-                *slot = Some((part, kind));
+                *slot = Some(Candidate {
+                    part,
+                    kind,
+                    name: Label::from_utf16(&e.name),
+                });
                 n += 1;
             }
         }
@@ -308,6 +325,11 @@ pub trait Volume<P: Platform> {
     /// The `efi_file` stage 4 read (when [`Located::efi_file`] is set), for
     /// `LoadImage(SourceBuffer)`.
     fn efi_image(&mut self, p: &mut P) -> Result<&[u8], BootError>;
+    /// Recovery, step 2 (INTERFACES.md §13.4): the files in `\paguro\` on
+    /// the unlocked volume, classified by convention — `*.efi` is an
+    /// `efi_file`, anything else a disk. Names that do not fit a
+    /// [`Label`](crate::platform::Label) are skipped, never shortened.
+    fn boot_targets(&mut self, p: &mut P, out: &mut TargetList) -> Result<(), BootError>;
 }
 
 /// Production stand-in until the FVE parser and `paguro-core::ntfs` land:
@@ -347,6 +369,9 @@ impl<P: Platform> Volume<P> for Unimplemented {
     }
     fn efi_image(&mut self, _: &mut P) -> Result<&[u8], BootError> {
         Err(BootError::NotImplemented("stage 4: efi_file read"))
+    }
+    fn boot_targets(&mut self, _: &mut P, _: &mut TargetList) -> Result<(), BootError> {
+        Err(BootError::NotImplemented("stage 4: \\paguro\\ listing"))
     }
 }
 

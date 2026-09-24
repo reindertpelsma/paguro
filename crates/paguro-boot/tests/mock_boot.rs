@@ -5,7 +5,7 @@
 mod mock;
 
 use mock::*;
-use paguro_boot::platform::{Grey, Input, Notice, Row, Screen};
+use paguro_boot::platform::{Grey, Input, Notice, Row, Screen, VolumeFormat};
 use paguro_boot::{BootError, Outcome};
 use paguro_core::bootstrap;
 use paguro_core::config::Efi;
@@ -168,7 +168,19 @@ fn hash_mismatch_with_secure_boot_enters_recovery() {
     assert_eq!(h.state, state::RECOVERY_PATH | state::CONFIG_UNVERIFIED);
     assert_eq!(h.config, None);
     assert_eq!(h.rung, Rung::RecoveryKey);
-    assert_eq!(w.v.locate_saw_config, Some(false));
+    // Stage 4 was steered by the on-screen choice (the only entry in
+    // \paguro\, taken silently), never by the configuration.
+    let saw = w.v.saw_entry.clone().unwrap();
+    assert_eq!(
+        (saw.name.as_str(), saw.root.as_deref()),
+        ("debian", Some("\\paguro\\debian.vhd"))
+    );
+    assert!(w.m.logged("1 boot target(s)"));
+    assert!(
+        !w.m.screens
+            .iter()
+            .any(|s| matches!(s, Screen::SelectTarget(_)))
+    );
     // The TPM was never asked to unseal.
     assert_eq!(w.m.tpm.as_ref().unwrap().count(cc::UNSEAL), 0);
 }
@@ -838,7 +850,27 @@ fn several_candidates_ask_which_volume() {
     ];
     w.m.input(Input::Choose(1));
     assert_eq!(w.run(), Outcome::Started(Rung::Unencrypted));
-    assert!(w.m.screens.contains(&Screen::SelectVolume { count: 2 }));
+    let list =
+        w.m.screens
+            .iter()
+            .find_map(|s| match s {
+                Screen::SelectVolume(v) => Some(*v),
+                _ => None,
+            })
+            .expect("the volume list was shown");
+    let rows: Vec<_> = list
+        .as_slice()
+        .iter()
+        .map(|v| (v.disk, v.partition, v.bytes, v.format))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (0, 1, 256 * 512, VolumeFormat::BitLocker),
+            (1, 2, 256 * 512, VolumeFormat::Ntfs)
+        ],
+        "disk, 1-based partition number, size and format; the FAT32 is not a candidate"
+    );
     assert_eq!(w.v.opened.unwrap().0.guid, b);
     assert_eq!(w.v.opened.unwrap().0.disk, 1);
 }
@@ -1118,7 +1150,11 @@ fn an_entry_on_a_second_disks_volume_is_found() {
     let (part, _) = w.v.opened.unwrap();
     assert_eq!((part.guid, part.disk), (OTHER, 1));
     assert!(w.m.logged(&format!("volume {OTHER} (BitLocker) on disk 1")));
-    assert!(!w.m.screens.contains(&Screen::SelectVolume { count: 2 }));
+    assert!(
+        !w.m.screens
+            .iter()
+            .any(|s| matches!(s, Screen::SelectVolume(_)))
+    );
     let h = w.m.decoded();
     assert_eq!(h.volume.partition, OTHER);
     assert_eq!(h.root.unwrap().name, "arch");
@@ -1417,4 +1453,237 @@ fn first_boot_can_author_an_efi_file_entry() {
     assert_eq!(h.root, None);
     assert!(h.efi_file.is_some());
     assert!(matches!(w.m.events.last(), Some(Event::StartBuffer(_))));
+}
+
+// ---------------------------------------------------------------------------
+// Recovery: what to boot (INTERFACES.md §13.4)
+
+use paguro_boot::platform::TargetKind;
+
+/// No configuration (recovery), one BitLocker volume with a clear key, and
+/// `\paguro\` holding `targets`.
+fn recovery_world(targets: &[(&str, TargetKind)]) -> World {
+    let mut w = World::new();
+    w.m.files.remove("paguro.ini");
+    w.v.clear_key = Some(VMK);
+    w.v.targets = Some(
+        targets
+            .iter()
+            .map(|(n, k)| (n.to_string(), 1u64 << 30, *k))
+            .collect(),
+    );
+    w
+}
+
+fn target_lists(m: &Mock) -> Vec<Vec<String>> {
+    m.screens
+        .iter()
+        .filter_map(|s| match s {
+            Screen::SelectTarget(t) => Some(
+                t.as_slice()
+                    .iter()
+                    .map(|t| t.name.as_str().to_string())
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+fn root_lists(m: &Mock) -> Vec<(String, Vec<String>)> {
+    m.screens
+        .iter()
+        .filter_map(|s| match s {
+            Screen::SelectRoot { efi, roots } => Some((
+                efi.as_str().to_string(),
+                roots
+                    .as_slice()
+                    .iter()
+                    .map(|t| t.name.as_str().to_string())
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+const DISK: TargetKind = TargetKind::Disk;
+const FILE: TargetKind = TargetKind::EfiFile;
+
+#[test]
+fn recovery_lists_paguro_and_a_disk_is_its_own_root() {
+    let mut w = recovery_world(&[("debian.vhd", DISK), ("arch.vhdx", DISK)]);
+    w.m.input(Input::Choose(1));
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert_eq!(target_lists(&w.m), vec![vec!["debian.vhd", "arch.vhdx"]]);
+    let saw = w.v.saw_entry.clone().unwrap();
+    assert_eq!(saw.name, "arch");
+    assert_eq!(saw.root.as_deref(), Some("\\paguro\\arch.vhdx"));
+    assert_eq!(
+        saw.efi,
+        format!(
+            "{:?}",
+            Efi::Disk {
+                disk: "\\paguro\\arch.vhdx",
+                path: paguro_core::config::DEFAULT_EFI
+            }
+        )
+    );
+    let h = w.m.decoded();
+    assert_eq!(h.root.unwrap().name, "arch");
+    assert_eq!((h.efi_file, h.efi_disk), (None, None));
+    assert_eq!(h.config, None, "recovery forwards no configuration");
+    assert_eq!(h.state & state::RECOVERY_PATH, state::RECOVERY_PATH);
+    assert!(w.m.logged("recovery target \\paguro\\arch.vhdx (root \\paguro\\arch.vhdx)"));
+}
+
+#[test]
+fn an_efi_file_takes_the_only_root_candidate_silently() {
+    let mut w = recovery_world(&[("rescue.efi", FILE), ("debian.vhd", DISK)]);
+    w.m.input(Input::Choose(0));
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert!(root_lists(&w.m).is_empty(), "one candidate: no list");
+    let saw = w.v.saw_entry.clone().unwrap();
+    assert_eq!(saw.name, "rescue");
+    assert_eq!(saw.root.as_deref(), Some("\\paguro\\debian.vhd"));
+    assert_eq!(saw.efi, format!("{:?}", Efi::File("\\paguro\\rescue.efi")));
+    let h = w.m.decoded();
+    assert_eq!(h.root.unwrap().mft_record, 1234);
+    assert_eq!(h.efi_file.unwrap().mft_record, 777);
+    assert_eq!(
+        w.m.events.last(),
+        Some(&Event::StartBuffer(b"MZ-fake-uki".to_vec()))
+    );
+}
+
+#[test]
+fn an_efi_file_asks_which_root_among_several() {
+    let mut w = recovery_world(&[
+        ("a.vhd", DISK),
+        ("rescue.efi", FILE),
+        ("b.vhd", DISK),
+        ("other.efi", FILE),
+    ]);
+    w.m.input(Input::Choose(1)).input(Input::Choose(1));
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert_eq!(
+        root_lists(&w.m),
+        vec![(
+            "rescue.efi".to_string(),
+            vec!["a.vhd".into(), "b.vhd".into()]
+        )],
+        "only disks are root candidates"
+    );
+    assert_eq!(
+        w.v.saw_entry.clone().unwrap().root.as_deref(),
+        Some("\\paguro\\b.vhd")
+    );
+}
+
+#[test]
+fn no_root_leaves_the_hint_empty() {
+    let mut w = recovery_world(&[("a.vhd", DISK), ("rescue.efi", FILE), ("b.vhd", DISK)]);
+    w.m.input(Input::Choose(1)).input(Input::NoRoot);
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    let saw = w.v.saw_entry.clone().unwrap();
+    assert_eq!(saw.root, None);
+    let h = w.m.decoded();
+    assert_eq!(h.root, None, "the initrd asks");
+    assert_eq!(h.efi_file.unwrap().name, "rescue");
+}
+
+#[test]
+fn an_efi_file_alone_has_no_root() {
+    let mut w = recovery_world(&[("rescue.efi", FILE)]);
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert!(target_lists(&w.m).is_empty(), "one entry: taken silently");
+    assert!(root_lists(&w.m).is_empty());
+    assert_eq!(w.m.decoded().root, None);
+}
+
+#[test]
+fn escape_from_the_root_list_returns_to_the_targets() {
+    let mut w = recovery_world(&[("rescue.efi", FILE), ("a.vhd", DISK), ("b.vhd", DISK)]);
+    w.m.input(Input::Choose(0))
+        .input(Input::Escape)
+        .input(Input::Choose(2));
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert_eq!(target_lists(&w.m).len(), 2);
+    assert_eq!(root_lists(&w.m).len(), 1);
+    assert_eq!(
+        w.v.saw_entry.clone().unwrap().root.as_deref(),
+        Some("\\paguro\\b.vhd")
+    );
+}
+
+#[test]
+fn a_typed_path_is_classified_and_used() {
+    let mut w = recovery_world(&[("debian.vhd", DISK), ("arch.vhd", DISK)]);
+    w.m.input(Input::TypePath).secret("\\boot\\Rescue.EFI");
+    w.m.input(Input::Choose(0));
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert!(w.m.screens.contains(&Screen::EnterPath));
+    let saw = w.v.saw_entry.clone().unwrap();
+    assert_eq!(saw.name, "Rescue");
+    assert_eq!(saw.efi, format!("{:?}", Efi::File("\\boot\\Rescue.EFI")));
+    assert_eq!(saw.root.as_deref(), Some("\\paguro\\debian.vhd"));
+}
+
+#[test]
+fn a_bad_typed_path_is_refused_and_asked_again() {
+    let mut w = recovery_world(&[]);
+    w.m.input(Input::TypePath).secret("no-backslash.vhd");
+    w.m.input(Input::TypePath).secret("\\paguro\\debian.vhd");
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert!(w.m.logged("typed path refused"));
+    assert!(w.m.screens.contains(&Screen::PathRefused));
+    assert_eq!(target_lists(&w.m), vec![Vec::<String>::new(); 2]);
+    let saw = w.v.saw_entry.clone().unwrap();
+    assert_eq!(saw.root.as_deref(), Some("\\paguro\\debian.vhd"));
+}
+
+#[test]
+fn escape_from_the_path_field_returns_to_the_list() {
+    let mut w = recovery_world(&[("debian.vhd", DISK), ("arch.vhd", DISK)]);
+    w.m.input(Input::TypePath)
+        .input(Input::Escape)
+        .input(Input::Choose(0));
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert_eq!(target_lists(&w.m).len(), 2);
+}
+
+#[test]
+fn nothing_chosen_ends_in_user_abort_or_windows() {
+    let mut w = recovery_world(&[("debian.vhd", DISK), ("arch.vhd", DISK)]);
+    w.m.input(Input::Escape);
+    assert_eq!(w.run(), Outcome::Halted(BootError::UserAbort));
+    assert!(w.m.handoff.is_none());
+
+    let mut w = recovery_world(&[]);
+    w.m.input(Input::StartWindows);
+    assert_eq!(w.run(), Outcome::StartWindows);
+    assert!(w.m.handoff.is_none());
+}
+
+#[test]
+fn a_normal_boot_never_lists_paguro() {
+    let mut w = World::new();
+    w.v.clear_key = Some(VMK);
+    w.v.targets = Some(vec![("x.vhd".into(), 1, DISK), ("y.vhd".into(), 1, DISK)]);
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert!(target_lists(&w.m).is_empty());
+    assert!(!w.m.logged("boot target(s)"));
+}
+
+#[test]
+fn production_stub_refuses_the_listing() {
+    // Unimplemented refuses stage 4's listing with a typed error.
+    use paguro_boot::Volume;
+    use paguro_boot::platform::TargetList;
+    let mut m = Mock::new();
+    let mut list = TargetList::new();
+    assert!(matches!(
+        paguro_boot::Unimplemented.boot_targets(&mut m, &mut list),
+        Err(BootError::NotImplemented(_))
+    ));
 }

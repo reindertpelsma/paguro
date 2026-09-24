@@ -9,7 +9,7 @@ use core::ptr::NonNull;
 
 use log::info;
 use paguro_boot::platform::{DiskInfo, Input, Platform, PlatformError, Screen};
-use paguro_boot::ui::{self, Edit, Key, SecretEditor};
+use paguro_boot::ui::{self, Key, Prompt, Reaction};
 use paguro_core::guid::Guid;
 use uefi::boot::{
     self, AllocateType, LoadImageSource, MemoryType, OpenProtocolAttributes, OpenProtocolParams,
@@ -120,14 +120,31 @@ fn open_get<P: uefi::proto::ProtocolPointer + ?Sized>(
     }
 }
 
+/// `EFI_INPUT_KEY` → [`Key`]. Scan codes: UEFI 2.10 §12.3, Table 12-4
+/// (`SCAN_UP` 0x01 … `SCAN_ESC` 0x17), as the `uefi` crate names them.
 fn decode_key(k: UKey) -> Option<Key> {
     match k {
-        UKey::Special(ScanCode::ESCAPE) => Some(Key::Escape),
-        UKey::Special(_) => None,
+        UKey::Special(s) => match s {
+            ScanCode::ESCAPE => Some(Key::Escape),
+            ScanCode::UP => Some(Key::Up),
+            ScanCode::DOWN => Some(Key::Down),
+            ScanCode::RIGHT => Some(Key::Right),
+            ScanCode::LEFT => Some(Key::Left),
+            ScanCode::HOME => Some(Key::Home),
+            ScanCode::END => Some(Key::End),
+            ScanCode::INSERT => Some(Key::Insert),
+            ScanCode::DELETE => Some(Key::Delete),
+            ScanCode::PAGE_UP => Some(Key::PageUp),
+            ScanCode::PAGE_DOWN => Some(Key::PageDown),
+            ScanCode(f @ 0x0b..=0x16) => Some(Key::Function((f - 0x0a) as u8)),
+            _ => None,
+        },
         UKey::Printable(c) => {
             let c: char = c.into();
             match c {
                 '\r' | '\n' => Some(Key::Enter),
+                // DEL is what serial terminals send for Backspace; the Delete
+                // key arrives as SCAN_DELETE.
                 '\u{8}' | '\u{7f}' => Some(Key::Backspace),
                 '\u{1b}' => Some(Key::Escape),
                 c => Some(Key::Char(c)),
@@ -361,27 +378,19 @@ impl Platform for Efi {
         if !ui::needs_key(screen) {
             return Input::Continue;
         }
-        if let Screen::EnterSecret { .. } = screen {
-            let mut ed = SecretEditor::new();
-            loop {
-                match ed.feed(read_key(), secret) {
-                    Edit::Echo => {
-                        let _ = Out.write_str("*");
-                    }
-                    Edit::Erase => {
-                        let _ = Out.write_str("\u{8} \u{8}");
-                    }
-                    Edit::Nothing => {}
-                    Edit::Done(i) => {
-                        let _ = Out.write_str("\r\n");
-                        return i;
+        let mut p = Prompt::new(screen, secret);
+        loop {
+            match p.feed(screen, read_key(), secret) {
+                Reaction::Redraw => {
+                    if let Some(f) = p.field() {
+                        let _ = ui::render_field_line(f, secret, &mut Out);
                     }
                 }
-            }
-        }
-        loop {
-            if let Some(i) = ui::map_key(screen, read_key()) {
-                return i;
+                Reaction::Ignore | Reaction::NextTheme => {}
+                Reaction::Done(i) => {
+                    let _ = Out.write_str("\r\n");
+                    return i;
+                }
             }
         }
     }

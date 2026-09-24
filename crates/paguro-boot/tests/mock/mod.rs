@@ -5,7 +5,9 @@
 
 pub mod tpm;
 
-use paguro_boot::platform::{DiskInfo, Input, Platform, PlatformError, Screen, attrs};
+use paguro_boot::platform::{
+    DiskInfo, Input, Label, Platform, PlatformError, Screen, Target, TargetKind, TargetList, attrs,
+};
 use paguro_boot::volume::{FileId, Key, Located, Partition, Volume, VolumeKind};
 use paguro_boot::{BootError, Buffers, Outcome, Params};
 use paguro_core::bootstrap;
@@ -264,6 +266,7 @@ impl Platform for Mock {
         if matches!(
             screen,
             Screen::Incorrect
+                | Screen::PathRefused
                 | Screen::TpmLocked
                 | Screen::Notice(paguro_boot::platform::Notice::NotImplemented)
         ) {
@@ -346,6 +349,9 @@ pub struct FakeVolume {
     pub efi_image: Vec<u8>,
     /// Behave like the production stage-4 stub after recording the entry.
     pub stub_stage4: bool,
+    /// What `\paguro\` holds (recovery, step 2). `None`: derived from the
+    /// installation above — its root disk, or its efi file.
+    pub targets: Option<Vec<(String, u64, TargetKind)>>,
     pub opened: Option<(Partition, VolumeKind)>,
     pub unlocked: bool,
     pub tries: usize,
@@ -372,6 +378,7 @@ impl FakeVolume {
             efi_file: (777, 1),
             efi_image: b"MZ-fake-uki".to_vec(),
             stub_stage4: false,
+            targets: None,
             opened: None,
             unlocked: false,
             tries: 0,
@@ -476,6 +483,26 @@ impl<P: Platform> Volume<P> for FakeVolume {
     }
     fn efi_image(&mut self, _: &mut P) -> Result<&[u8], BootError> {
         Ok(&self.efi_image)
+    }
+    fn boot_targets(&mut self, _: &mut P, out: &mut TargetList) -> Result<(), BootError> {
+        let derived = |p: &str, kind| {
+            vec![(
+                p.rsplit('\\').next().unwrap_or(p).to_string(),
+                214u64 << 30,
+                kind,
+            )]
+        };
+        let list = match (&self.targets, self.efi_file_path) {
+            (Some(t), _) => t.clone(),
+            (None, Some(f)) => derived(f, TargetKind::EfiFile),
+            (None, None) => derived(self.root_path, TargetKind::Disk),
+        };
+        for (name, bytes, kind) in list {
+            if let Some(name) = Label::new(&name) {
+                out.push(Target { name, bytes, kind });
+            }
+        }
+        Ok(())
     }
 }
 
