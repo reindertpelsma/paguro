@@ -843,6 +843,57 @@ through the repair hook — deliberately (DESIGN §4.2).
 - Accessibility variants (high contrast, large text) are alternate themes or
   theme options chosen by a keypress at run time — both compiled in.
 
+### 13.2a Displays, variants and text mode
+
+**Several displays.** Firmware may expose one graphics device per output, one
+device mirrored to all outputs, or only the primary. The loader never assumes
+which output is primary: it draws the same screen on **every** GOP device,
+each at its own preferred resolution (EDID), rendering once per distinct
+resolution. It never draws one canvas across two outputs: a mode whose
+geometry does not match a single display's EDID (for example 3840×1080 where
+each display reports 1920×1080) is not used; the preferred mode of one display
+is chosen instead. A display left dark is acceptable; a UI split across two is
+not.
+
+**Compiled-in variants.** Every build carries `dark` (default), `light`, and a
+high-contrast version of each. F2 cycles them at run time. `paguro.ini` may
+pick the starting one:
+
+```ini
+[UI]
+# dark | light | dark-contrast | light-contrast
+theme = dark
+# auto | graphics | text
+mode  = auto
+```
+
+These are enums selecting compiled-in data, never display data. Recovery does
+not read the `.ini`, so it starts in `dark` / `auto`.
+
+**Text mode.** Some consoles cannot show graphics: serial terminals, firmware
+console redirection, many BMC/KVM-over-IP consoles, machines without GOP.
+
+- `auto`: graphics on every GOP device, **and** the text UI mirrored to each
+  serial console found in `ConOut` (a UART node in its device path), written
+  through `EFI_SERIAL_IO_PROTOCOL` directly — never through `ConOut`, whose
+  graphics console would paint text over the framebuffer. No GOP → text UI on
+  `ConOut`.
+- `text`: the text UI only, on `ConOut`.
+- `graphics`: GOP only, no serial mirror.
+- **F3 toggles text/graphics** at run time on the local display.
+
+Input is accepted from every console at once (keyboard, serial, pointer).
+
+### 13.2b Pointer
+
+`EFI_SIMPLE_POINTER_PROTOCOL` and `EFI_ABSOLUTE_POINTER_PROTOCOL` where the
+firmware offers them; anything missing or failing is ignored silently. The
+cursor (a theme image) appears on the first movement and hides on the next key
+press; it lives on one display. Clicks hit-test the layout's element
+rectangles: list rows, fields, and the actions in the key-hint bar. Nothing
+requires the pointer and nothing depends on hover. Moving the cursor redraws
+only the rectangles under the old and new position.
+
 ### 13.3 Text entry
 
 Every text field (passphrase, PIN, recovery key, recovery path) supports:
