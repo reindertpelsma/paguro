@@ -147,7 +147,29 @@ content:
 |---|---|
 | a GPT | the one partition of type ESP (`C12A7328-…`); zero or several → refuse |
 | a FAT32 boot sector | the whole payload (a "superfloppy" FAT32 disk) |
+| ISO 9660 (`CD001` at byte 32 769) | its El Torito EFI boot image, or the ESP of a hybrid ISO's GPT; the `BlockIo` reports 2048-byte blocks so the firmware's El Torito support binds it; always read-only |
 | anything else | refuse |
+
+**A root disk need not be partitioned.** `root` may hold a GPT, or a bare
+filesystem (ext4 directly on the payload — the same shape as a WSL distribution
+disk). The paguro host uses exactly that: its UKI as an `efi_file` on NTFS, its
+root a VHD with one ext4 and nothing else. Its kernel updates replace the UKI
+through view C (write new, rename), which the host does while the VM is off.
+
+**The structural assertion follows the content** (DESIGN §4.3: checked on view
+A before anything mounts, and it must catch extents gathered in the wrong
+order, so it reads past the first extent):
+
+| Root content | Assertion |
+|---|---|
+| GPT | primary header CRC, the backup header at the last LBA, and each partition's first sector signature where known (FAT, ext4) |
+| bare ext4 | superblock magic `0xEF53` at byte 1 080, and the backup superblock in block group 1 agreeing on UUID and block count |
+| ISO 9660 | primary volume descriptor, and the volume space size equal to the payload length |
+
+ISO images (installers, rescue, live media) boot as far as their own
+initramfs. A stock live initramfs cannot find its squashfs inside a VHD inside
+NTFS, and cannot at all behind BitLocker; paguro's own rescue/installer ISO uses
+paguro's initramfs and can.
 
 The loader publishes **the whole disk** (`efi_disk`'s payload) as a
 **read-only** `EFI_BLOCK_IO_PROTOCOL` with a device path, whose reads resolve
