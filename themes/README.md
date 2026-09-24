@@ -104,7 +104,7 @@ logo = { file = "images/logo.png", size = [40, 40] }
 
 `[layout]` holds the defaults for every screen. `[primitive.<name>]`
 (`list`, `field`, `message`) and then `[screen.<name>]` (`unlock`, `secret`,
-`recovery_key`, `path`, `message`, `volumes`, `browser`, `roots`, `disk`)
+`recovery_key`, `path`, `message`, `volumes`, `browser`, `disk`)
 override any subset of its keys, table by table:
 
 ```toml

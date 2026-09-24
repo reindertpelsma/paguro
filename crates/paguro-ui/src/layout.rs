@@ -79,7 +79,6 @@ pub fn kind(screen: &Screen) -> ScreenKind {
         Screen::EnterPath(_) => ScreenKind::Path,
         Screen::SelectVolume(_) => ScreenKind::Volumes,
         Screen::Browse(_) => ScreenKind::Browser,
-        Screen::SelectRoot { .. } => ScreenKind::Roots,
         Screen::DiskStart { .. } => ScreenKind::Disk,
         _ => ScreenKind::Message,
     }
@@ -471,7 +470,7 @@ fn describe<'a>(
         Screen::EnterPath(level) => {
             sp.unattested = true;
             let (t, help) = match level {
-                Level::Volume => (Str::PathTitle, Str::PathHelp),
+                Level::Volume | Level::Root => (Str::PathTitle, Str::PathHelp),
                 Level::EfiPartition => (Str::PathTitleEsp, Str::PathHelpEsp),
             };
             title(&mut sp, list, t);
@@ -501,8 +500,12 @@ fn describe<'a>(
                 match level {
                     Level::Volume => Str::BrowseTitle,
                     Level::EfiPartition => Str::BrowseTitleEsp,
+                    Level::Root => Str::RootsTitle,
                 },
             );
+            if *level == Level::Root {
+                paras(&mut sp, list, theme, Str::RootsBody, &[], pal.muted);
+            }
             let path = view.dir.map_or("", |d| d.path);
             sp.block(text_block(
                 BlockKind::Crumb,
@@ -544,21 +547,6 @@ fn describe<'a>(
                 pal.muted,
                 1,
             ));
-            sp.block(list_block);
-            nav(&mut sp);
-            sp.hint(Str::KeyEsc, Str::HintBack);
-        }
-        Screen::SelectRoot { efi, .. } => {
-            sp.unattested = true;
-            title(&mut sp, list, Str::RootsTitle);
-            paras(
-                &mut sp,
-                list,
-                theme,
-                Str::RootsBody,
-                &[Arg::Text(efi.as_str())],
-                pal.muted,
-            );
             sp.block(list_block);
             nav(&mut sp);
             sp.hint(Str::KeyEsc, Str::HintBack);
@@ -761,19 +749,6 @@ fn row_texts<'a>(
             compose(list, theme, Str::DiskBrowse, &[], 0),
             compose(list, theme, Str::DiskBrowseWhy, &[], 0),
         ),
-        (Item::Root(i), Screen::SelectRoot { roots, .. }) => {
-            let Some(e) = roots.get(usize::from(i)) else {
-                return (none, none);
-            };
-            (
-                TextSrc::Str(e.name.as_str()),
-                size_text(list, theme, e.bytes),
-            )
-        }
-        (Item::NoRoot, _) => (
-            compose(list, theme, Str::NoRoot, &[], 0),
-            compose(list, theme, Str::NoRootWhy, &[], 0),
-        ),
         _ => (none, none),
     }
 }
@@ -808,9 +783,16 @@ fn dir_row_texts<'a>(
     list: &mut DrawList<'a>,
 ) -> (TextSrc<'a>, TextSrc<'a>) {
     let Some(e) = dir.listing.item(i) else {
+        if i > dir.listing.len() {
+            return (
+                compose(list, theme, Str::NoRoot, &[], 0),
+                compose(list, theme, Str::NoRootWhy, &[], 0),
+            );
+        }
         let why = match level {
             Level::Volume => Str::TypePathWhy,
             Level::EfiPartition => Str::TypePathEspWhy,
+            Level::Root => Str::TypePathRootWhy,
         };
         return (
             compose(list, theme, Str::TypePath, &[], 0),

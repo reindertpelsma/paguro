@@ -325,12 +325,13 @@ fn browse_to_a_uki_then_choose_its_root_by_keyboard() {
     w.v.dir("\\paguro", &["tools/", "debian.vhd", "arch.vhdx"])
         .dir("\\paguro\\tools", &["old/", "rescue.efi"]);
     // \paguro: Enter on "tools"; in tools: type "r" to jump to rescue.efi,
-    // Enter; root list (arch, debian, None): Down, Enter → debian.
+    // Enter; the root browser (tools, arch.vhdx, debian.vhd, Type a path,
+    // None): "d" jumps to debian.vhd, Enter.
     let script = [
         Key::Enter,
         Key::Char('r'),
         Key::Enter,
-        Key::Down,
+        Key::Char('d'),
         Key::Enter,
     ];
     let (out, g) = boot(&mut w, &script);
@@ -352,6 +353,7 @@ fn browse_to_a_uki_then_choose_its_root_by_keyboard() {
         );
     }
     assert!(g.d.mirrored.contains(&Screen::Browse(Level::Volume)));
+    assert!(g.d.mirrored.contains(&Screen::Browse(Level::Root)));
 }
 
 #[test]

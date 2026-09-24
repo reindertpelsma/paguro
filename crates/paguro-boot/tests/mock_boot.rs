@@ -1475,20 +1475,13 @@ fn names(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
 }
 
+/// The root-hint browsers shown: path and entries.
 fn root_lists(m: &Mock) -> Vec<(String, Vec<String>)> {
-    m.screens
+    m.browsed
         .iter()
-        .filter_map(|s| match s {
-            Screen::SelectRoot { efi, roots } => Some((
-                efi.as_str().to_string(),
-                roots
-                    .as_slice()
-                    .iter()
-                    .map(|t| t.name.as_str().to_string())
-                    .collect(),
-            )),
-            _ => None,
-        })
+        .zip(&m.browsed_levels)
+        .filter(|(_, l)| **l == Level::Root)
+        .map(|((p, n, _), _)| (p.clone(), n.clone()))
         .collect()
 }
 
@@ -1555,7 +1548,7 @@ fn folders_open_and_parent_returns_to_the_folder_left() {
         .input(Input::Entry(0)) // paguro
         .input(Input::Entry(1)) // b
         .input(Input::Entry(1)) // rescue.efi → root hint
-        .input(Input::Choose(1)); // y.vhd
+        .input(Input::Entry(3)); // y.vhd (after the folders a, b)
     assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
     let b: Vec<_> = browsed(&w.m).into_iter().map(|(p, _, s)| (p, s)).collect();
     assert_eq!(
@@ -1570,11 +1563,13 @@ fn folders_open_and_parent_returns_to_the_folder_left() {
             ("\\".into(), 0),
             ("\\paguro".into(), 0),
             ("\\paguro\\b".into(), 0),
+            ("\\paguro".into(), 0),
         ]
     );
     assert_eq!(
         root_lists(&w.m),
-        vec![("rescue.efi".into(), names(&["x.vhd", "y.vhd"]))]
+        vec![("\\paguro".into(), names(&["a", "b", "x.vhd", "y.vhd"]))],
+        "the root-hint browser: folders and disks, no UEFI images"
     );
     let saw = w.v.saw_entry.clone().unwrap();
     assert_eq!(
@@ -1624,7 +1619,7 @@ fn no_root_leaves_the_hint_empty_and_no_disk_means_none() {
 }
 
 #[test]
-fn escape_from_the_root_list_returns_to_the_browser() {
+fn escape_from_the_root_browser_returns_to_the_first_one() {
     let mut w = recovery_world();
     w.v.dir("\\paguro", &["rescue.efi", "a.vhd", "b.vhd"]);
     w.m.input(Input::Entry(2))
@@ -1632,11 +1627,52 @@ fn escape_from_the_root_list_returns_to_the_browser() {
         .input(Input::Entry(1))
         .input(Input::UseDefault);
     assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
-    assert_eq!(browsed(&w.m).len(), 2);
+    let b: Vec<_> = browsed(&w.m).into_iter().map(|(p, _, s)| (p, s)).collect();
+    assert_eq!(
+        b,
+        vec![
+            ("\\paguro".to_string(), 0),
+            ("\\paguro".into(), 0),
+            ("\\paguro".into(), 2),
+        ],
+        "back on the UEFI image that led to the root question"
+    );
     assert_eq!(root_lists(&w.m).len(), 1);
     assert_eq!(
         w.v.saw_entry.clone().unwrap().root.as_deref(),
         Some("\\paguro\\b.vhd")
+    );
+}
+
+#[test]
+fn the_root_browser_walks_folders_and_takes_typed_paths() {
+    let mut w = recovery_world();
+    w.v.dir("\\paguro", &["rescue.efi", "a.vhd", "b.vhd", "vms/"])
+        .dir("\\paguro\\vms", &["deep.vhdx", "other.efi"]);
+    w.m.input(Input::Entry(3)) // rescue.efi (vms, a, b, rescue)
+        .input(Input::Entry(0)) // vms
+        .input(Input::Entry(0)); // deep.vhdx
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert_eq!(
+        root_lists(&w.m),
+        vec![
+            ("\\paguro".into(), names(&["vms", "a.vhd", "b.vhd"])),
+            ("\\paguro\\vms".into(), names(&["deep.vhdx"])),
+        ]
+    );
+    assert_eq!(
+        w.v.saw_entry.clone().unwrap().root.as_deref(),
+        Some("\\paguro\\vms\\deep.vhdx")
+    );
+
+    let mut w = recovery_world();
+    w.v.dir("\\paguro", &["rescue.efi", "a.vhd", "b.vhd"]);
+    w.m.input(Input::Entry(2)).input(Input::TypePath);
+    w.m.secret("\\Linux\\root.img");
+    assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
+    assert_eq!(
+        w.v.saw_entry.clone().unwrap().root.as_deref(),
+        Some("\\Linux\\root.img")
     );
 }
 
@@ -1753,7 +1789,7 @@ fn typed_paths_on_both_levels() {
     let mut w = recovery_world();
     w.v.dir("\\paguro", &["debian.vhd", "arch.vhd"]);
     w.m.input(Input::TypePath).secret("\\boot\\Rescue.EFI");
-    w.m.input(Input::Choose(0));
+    w.m.input(Input::Entry(0));
     assert_eq!(w.run(), Outcome::Started(Rung::ClearKey));
     assert!(w.m.screens.contains(&Screen::EnterPath(Level::Volume)));
     let saw = w.v.saw_entry.clone().unwrap();

@@ -30,6 +30,7 @@ const FULL_HD: &[&str] = &[
     "hibernated",
     "browse-long-scrolled",
     "browse-esp",
+    "browse-root-none",
     "disk-start",
 ];
 

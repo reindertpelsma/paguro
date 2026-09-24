@@ -232,69 +232,6 @@ impl Default for VolumeList {
     }
 }
 
-/// What a file in `\paguro\` is, by the convention of INTERFACES.md §13.4.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TargetKind {
-    /// A disk file (VHD or raw): `efi_disk`, and therefore also the root.
-    Disk,
-    /// A UEFI image directly on NTFS (`efi_file`).
-    EfiFile,
-}
-
-/// One entry found in `\paguro\` on the unlocked volume.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Target {
-    /// The file name inside `\paguro\` (exact: it becomes a path).
-    pub name: Label,
-    pub bytes: u64,
-    pub kind: TargetKind,
-}
-
-impl Target {
-    pub const EMPTY: Target = Target {
-        name: Label::EMPTY,
-        bytes: 0,
-        kind: TargetKind::Disk,
-    };
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TargetList {
-    pub items: [Target; MAX_CHOICES],
-    pub count: u8,
-}
-
-impl TargetList {
-    pub const fn new() -> Self {
-        TargetList {
-            items: [Target::EMPTY; MAX_CHOICES],
-            count: 0,
-        }
-    }
-    pub fn push(&mut self, t: Target) -> bool {
-        match self.items.get_mut(usize::from(self.count)) {
-            Some(slot) => {
-                *slot = t;
-                self.count += 1;
-                true
-            }
-            None => false,
-        }
-    }
-    pub fn as_slice(&self) -> &[Target] {
-        self.items.get(..usize::from(self.count)).unwrap_or(&[])
-    }
-    pub fn get(&self, i: usize) -> Option<&Target> {
-        self.as_slice().get(i)
-    }
-}
-
-impl Default for TargetList {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Which filesystem the recovery browser walks (INTERFACES.md §13.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
@@ -303,6 +240,9 @@ pub enum Level {
     /// The FAT32 EFI partition inside a chosen disk: folders and UEFI
     /// images.
     EfiPartition,
+    /// The unlocked NTFS volume again, for an `efi_file`'s root hint:
+    /// folders and disks, and "no root".
+    Root,
 }
 
 /// What a listed entry is, by the extension convention of INTERFACES.md
@@ -371,11 +311,10 @@ fn ascii_lower_eq(a: &str, b: &str) -> bool {
 pub fn file_kind(level: Level, name: &str) -> Option<EntryKind> {
     let ext = name.rsplit_once('.').map(|(_, e)| e)?;
     let is = |e: &str| ascii_lower_eq(ext, e);
-    if is("efi") {
-        return Some(EntryKind::Efi);
-    }
+    let disk = is("vhd") || is("vhdx") || is("img") || is("raw");
     match level {
-        Level::Volume if is("vhd") || is("vhdx") || is("img") || is("raw") => Some(EntryKind::Disk),
+        Level::Volume | Level::EfiPartition if is("efi") => Some(EntryKind::Efi),
+        Level::Volume | Level::Root if disk => Some(EntryKind::Disk),
         _ => None,
     }
 }
@@ -521,12 +460,13 @@ impl Listing for DirListing {
 }
 
 /// What the browser shows: the directory's path (for the breadcrumb), its
-/// entries, and the row to start on.
+/// entries, the row to start on, and which browser it is.
 #[derive(Clone, Copy)]
 pub struct DirView<'a> {
     pub path: &'a str,
     pub listing: &'a dyn Listing,
     pub selected: usize,
+    pub level: Level,
 }
 
 impl fmt::Debug for DirView<'_> {
@@ -535,6 +475,7 @@ impl fmt::Debug for DirView<'_> {
             .field("path", &self.path)
             .field("entries", &self.listing.len())
             .field("selected", &self.selected)
+            .field("level", &self.level)
             .finish()
     }
 }
@@ -542,6 +483,9 @@ impl fmt::Debug for DirView<'_> {
 /// Every screen the loader can show. The theme is compiled in: no screen
 /// takes display *markup*, only small typed parameters and inline labels
 /// (partition and file names), which renderers treat as plain text.
+// The volume list is held inline (~1 KiB): no allocation in the loader, and
+// a Screen is small enough to pass by reference.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Unlock(UnlockMenu),
@@ -580,13 +524,6 @@ pub enum Screen {
     /// The chosen disk has no FAT32 EFI partition the loader can read
     /// (shown like [`Screen::Incorrect`]: no key, the browser follows).
     NoEfiPartition,
-    /// The root hint for an `efi_file` (recovery, step 3): the candidates,
-    /// then "no root".
-    SelectRoot {
-        /// The chosen UEFI image's name.
-        efi: Label,
-        roots: TargetList,
-    },
 }
 
 /// What the user did on a screen.
@@ -596,7 +533,7 @@ pub enum Input {
     /// A secret (or typed path) of this many bytes (UTF-8) is in the prompt
     /// buffer.
     Secret(usize),
-    /// An index in a list (volume, root candidate).
+    /// An index in a list (volume selection).
     Choose(u8),
     /// An entry of the browsed directory, by index in its listing.
     Entry(u16),
@@ -608,7 +545,7 @@ pub enum Input {
     UseDefault,
     /// The disk screen: browse the disk's EFI partition.
     BrowseDisk,
-    /// "No root" on the root list: the initrd asks.
+    /// "No root" in the root-hint browser: the initrd asks.
     NoRoot,
     /// "Start Windows": `BootNext` + reset, never a chainload.
     StartWindows,

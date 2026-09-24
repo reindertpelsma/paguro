@@ -67,7 +67,7 @@ scale_bias = 0
 
 # Layout defaults for every screen. [primitive.<name>] (list, field,
 # message) and then [screen.<name>] (unlock, secret, recovery_key, path,
-# message, volumes, browser, roots, disk) override any subset of these keys.
+# message, volumes, browser, disk) override any subset of these keys.
 [layout]
 margin = [44, 56]
 show_logo = true

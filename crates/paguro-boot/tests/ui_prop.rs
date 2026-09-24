@@ -139,7 +139,7 @@ proptest! {
             (prop::collection::vec(any::<u16>(), 0..40), any::<bool>(), any::<u64>(), prop::sample::select(vec!["", ".efi", ".VHD", ".vhdx", ".img", ".raw", ".txt"])),
             0..200,
         ),
-        esp in any::<bool>(),
+        level in prop::sample::select(vec![Level::Volume, Level::EfiPartition, Level::Root]),
         keys in prop::collection::vec(prop_oneof![
             Just(Key::Up), Just(Key::Down), Just(Key::PageUp), Just(Key::PageDown),
             Just(Key::Home), Just(Key::End), Just(Key::Enter), Just(Key::Right),
@@ -147,7 +147,6 @@ proptest! {
         ], 0..50),
         page in 1usize..20,
     ) {
-        let level = if esp { Level::EfiPartition } else { Level::Volume };
         let mut d = Box::new(DirListing::new());
         d.clear(level);
         for (mut n, dir, bytes, ext) in names {
@@ -163,20 +162,26 @@ proptest! {
                 let key = |e: &paguro_boot::platform::DirItem<'_>| (e.kind != paguro_boot::platform::EntryKind::Dir, e.name.to_lowercase());
                 prop_assert!(key(&p) <= key(&e), "sorted: {:?} before {:?}", p.name, e.name);
             }
-            if level == Level::EfiPartition {
-                prop_assert!(e.kind != paguro_boot::platform::EntryKind::Disk);
+            match level {
+                Level::EfiPartition => prop_assert!(e.kind != paguro_boot::platform::EntryKind::Disk),
+                Level::Root => prop_assert!(e.kind != paguro_boot::platform::EntryKind::Efi),
+                Level::Volume => {}
             }
         }
-        let view = DirView { path: "\\x", listing: &*d, selected: 0 };
+        let view = DirView { path: "\\x", listing: &*d, selected: 0, level };
         let mut b = Browser::new(&view);
         b.set_page(page);
         for k in keys {
             match b.feed(&view, k) {
                 Reaction::Done(Input::Entry(i)) => prop_assert!(usize::from(i) < d.len()),
                 Reaction::Done(Input::TypePath) => prop_assert_eq!(b.selected(), d.len()),
+                Reaction::Done(Input::NoRoot) => {
+                    prop_assert_eq!(level, Level::Root);
+                    prop_assert_eq!(b.selected(), d.len() + 1);
+                }
                 _ => {}
             }
-            prop_assert!(b.selected() <= d.len());
+            prop_assert!(b.selected() < paguro_boot::ui::browse_rows(&view));
         }
     }
 }

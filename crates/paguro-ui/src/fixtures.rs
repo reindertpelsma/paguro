@@ -3,8 +3,8 @@
 //! the loader calls this (the linker drops it).
 
 use paguro_boot::platform::{
-    DirItem, DirView, EntryKind, Grey, Label, Level, Listing, Notice, Row, Screen, Target,
-    TargetKind, TargetList, UnlockMenu, VolumeChoice, VolumeFormat, VolumeList,
+    DirItem, DirView, EntryKind, Grey, Label, Level, Listing, Notice, Row, Screen, UnlockMenu,
+    VolumeChoice, VolumeFormat, VolumeList,
 };
 use paguro_boot::ui::{Field, Key, Prompt};
 
@@ -33,6 +33,10 @@ impl Fixture {
                 path,
                 listing,
                 selected: self.selected,
+                level: match self.screen {
+                    Screen::Browse(l) => l,
+                    _ => Level::Volume,
+                },
             }),
         }
     }
@@ -67,6 +71,14 @@ static PAGURO: StaticListing = StaticListing {
         ("arch.vhdx", K, 64 << 30),
         ("debian.vhd", K, 214 << 30),
         ("rescue.efi", E, 112 << 20),
+    ],
+    more: false,
+};
+static ROOTS: StaticListing = StaticListing {
+    items: &[
+        ("vms", D, 0),
+        ("arch.vhdx", K, 64 << 30),
+        ("debian.vhd", K, 214 << 30),
     ],
     more: false,
 };
@@ -193,18 +205,6 @@ fn volumes(n: u8, long: bool) -> VolumeList {
         });
     }
     v
-}
-
-fn targets(entries: &[(&str, u64, TargetKind)]) -> TargetList {
-    let mut t = TargetList::new();
-    for (n, b, k) in entries {
-        t.push(Target {
-            name: label(n),
-            bytes: *b,
-            kind: *k,
-        });
-    }
-    t
 }
 
 /// Type `keys` into a fresh prompt for `screen`.
@@ -416,21 +416,12 @@ pub fn all() -> [Fixture; FIXTURES] {
             Screen::EnterPath(Level::EfiPartition),
             text_then("\\EFI\\systemd\\systemd-bootx64.efi", &[]),
         ),
-        with(
-            "roots",
-            Screen::SelectRoot {
-                efi: label("rescue.efi"),
-                roots: targets(&[
-                    ("debian.vhd", 214 << 30, TargetKind::Disk),
-                    ("arch.vhdx", 64 << 30, TargetKind::Disk),
-                ]),
-            },
-            text_then("", &[Key::End]),
-        ),
+        browse("browse-root", Level::Root, "\\paguro", &ROOTS, 2),
+        browse("browse-root-none", Level::Root, "\\paguro", &ROOTS, 4),
     ]
 }
 
-pub const FIXTURES: usize = 41;
+pub const FIXTURES: usize = 42;
 
 /// The resolutions the golden tests and `--all` render.
 pub const RESOLUTIONS: [(u32, u32); 4] = [(800, 600), (1366, 768), (1920, 1080), (3840, 2160)];

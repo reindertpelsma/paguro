@@ -15,8 +15,8 @@
 use core::fmt::{self, Write};
 
 use crate::platform::{
-    DirView, EntryKind, Grey, Input, Level, Notice, Row, Screen, TargetKind, UnlockMenu,
-    VolumeChoice, VolumeFormat,
+    DirView, EntryKind, Grey, Input, Level, Notice, Row, Screen, UnlockMenu, VolumeChoice,
+    VolumeFormat,
 };
 
 /// A key, already decoded from the firmware's `EFI_INPUT_KEY` (or
@@ -272,8 +272,6 @@ pub enum Item {
     },
     Volume(u8),
     TypePath,
-    Root(u8),
-    NoRoot,
     /// The disk screen's rows.
     DiskDefault,
     DiskBrowse,
@@ -288,9 +286,8 @@ impl Item {
         match *self {
             Item::Unlock { enabled: false, .. } => None,
             Item::Unlock { row, .. } => Some(Input::Select(row)),
-            Item::Volume(i) | Item::Root(i) => Some(Input::Choose(i)),
+            Item::Volume(i) => Some(Input::Choose(i)),
             Item::TypePath => Some(Input::TypePath),
-            Item::NoRoot => Some(Input::NoRoot),
             Item::DiskDefault => Some(Input::UseDefault),
             Item::DiskBrowse => Some(Input::BrowseDisk),
         }
@@ -308,7 +305,7 @@ pub struct Items {
 impl Items {
     const fn new() -> Self {
         Items {
-            items: [Item::NoRoot; MAX_ITEMS],
+            items: [Item::TypePath; MAX_ITEMS],
             count: 0,
         }
     }
@@ -380,12 +377,6 @@ pub fn items(screen: &Screen) -> Items {
             out.push(Item::DiskDefault);
             out.push(Item::DiskBrowse);
             out.push(Item::TypePath);
-        }
-        Screen::SelectRoot { roots, .. } => {
-            for i in 0..roots.count.min(crate::platform::MAX_CHOICES as u8) {
-                out.push(Item::Root(i));
-            }
-            out.push(Item::NoRoot);
         }
         _ => {}
     }
@@ -523,9 +514,10 @@ pub struct Browser {
     page: usize,
 }
 
-/// The browser's rows: every entry, then "Type a path".
+/// The browser's rows: every entry, then "Type a path", then (for the root
+/// hint) "No root".
 pub fn browse_rows(dir: &DirView<'_>) -> usize {
-    dir.listing.len() + 1
+    dir.listing.len() + if dir.level == Level::Root { 2 } else { 1 }
 }
 
 /// Whether `path` is a filesystem root (no parent).
@@ -573,7 +565,8 @@ impl Browser {
             Key::End => self.go(rows - 1, rows),
             Key::Enter => match entry {
                 Some(_) => Reaction::Done(Input::Entry(self.selected as u16)),
-                None => Reaction::Done(Input::TypePath),
+                None if self.selected == dir.listing.len() => Reaction::Done(Input::TypePath),
+                None => Reaction::Done(Input::NoRoot),
             },
             Key::Right => match entry {
                 Some(e) if e.kind == EntryKind::Dir => {
@@ -628,7 +621,8 @@ pub fn render_browse(dir: &DirView<'_>, selected: usize, w: &mut dyn Write) -> f
                 };
                 writeln_crlf(w, format_args!(" {mark} {}   {kind}", e.name))?;
             }
-            None => writeln_crlf(w, format_args!(" {mark} Type a path"))?,
+            None if i == dir.listing.len() => writeln_crlf(w, format_args!(" {mark} Type a path"))?,
+            None => writeln_crlf(w, format_args!(" {mark} None -- Linux asks"))?,
         }
     }
     if dir.listing.more() {
@@ -761,11 +755,11 @@ pub fn entry_name<'o>(file: &str, out: &'o mut [u8; 32], fallback: &'o str) -> &
 
 /// How a typed path is classified: `*.efi` (any case) is an `efi_file`,
 /// anything else a disk (INTERFACES.md §13.4).
-pub fn classify_path(path: &str) -> TargetKind {
+pub fn classify_path(path: &str) -> EntryKind {
     let b = path.as_bytes();
     match b.len().checked_sub(4).and_then(|i| b.get(i..)) {
-        Some(ext) if ext.eq_ignore_ascii_case(b".efi") => TargetKind::EfiFile,
-        _ => TargetKind::Disk,
+        Some(ext) if ext.eq_ignore_ascii_case(b".efi") => EntryKind::Efi,
+        _ => EntryKind::Disk,
     }
 }
 
@@ -877,13 +871,14 @@ pub fn render(screen: &Screen, w: &mut dyn Write) -> fmt::Result {
             w.write_str(match level {
                 Level::Volume => "   Choose what to start\r\n",
                 Level::EfiPartition => "   Choose a UEFI application on the disk\r\n",
+                Level::Root => "   Which disk holds Linux?\r\n",
             })?;
             w.write_str(UNATTESTED)
         }
         Screen::EnterPath(level) => {
             w.write_str(UNATTESTED)?;
             w.write_str(match level {
-                Level::Volume => "   Path on the volume: ",
+                Level::Volume | Level::Root => "   Path on the volume: ",
                 Level::EfiPartition => "   Path on the disk's EFI partition: ",
             })
         }
@@ -898,15 +893,6 @@ pub fn render(screen: &Screen, w: &mut dyn Write) -> fmt::Result {
         }
         Screen::NoEfiPartition => {
             w.write_str("   This disk has no EFI partition paguro can read.\r\n")
-        }
-        Screen::SelectRoot { efi, roots } => {
-            write!(w, "   Which disk is the Linux root for {}?\r\n", efi.as_str())?;
-            w.write_str(UNATTESTED)?;
-            w.write_str("\r\n")?;
-            for (i, e) in roots.as_slice().iter().enumerate() {
-                write!(w, " {} \\paguro\\{}\r\n", i + 1, e.name.as_str())?;
-            }
-            write!(w, " {} None -- Linux asks\r\n", roots.count as usize + 1)
         }
         Screen::Notice(n) => {
             let (title, body, actions) = match n {
@@ -1030,13 +1016,6 @@ pub fn map_key(screen: &Screen, key: Key) -> Option<Input> {
             (_, Some('3')) => Some(Input::TypePath),
             _ => None,
         },
-        Screen::SelectRoot { roots, .. } => match (key, c) {
-            (Key::Escape, _) => Some(Input::Escape),
-            _ => match digit(roots.count.saturating_add(1)) {
-                Some(i) if i == roots.count => Some(Input::NoRoot),
-                other => other.map(Input::Choose),
-            },
-        },
         Screen::Incorrect
         | Screen::PathRefused
         | Screen::NoEfiPartition
@@ -1051,7 +1030,7 @@ pub fn map_key(screen: &Screen, key: Key) -> Option<Input> {
 mod tests {
     extern crate std;
     use super::*;
-    use crate::platform::{DirListing, Label, Target, TargetList, VolumeList};
+    use crate::platform::{DirListing, Label, VolumeList};
     use std::string::String;
 
     fn menu() -> UnlockMenu {
@@ -1083,18 +1062,6 @@ mod tests {
             });
         }
         v
-    }
-
-    fn targets(names: &[(&str, TargetKind)]) -> TargetList {
-        let mut t = TargetList::new();
-        for (n, k) in names {
-            t.push(Target {
-                name: Label::new(n).unwrap(),
-                bytes: 214 << 30,
-                kind: *k,
-            });
-        }
-        t
     }
 
     #[test]
@@ -1143,10 +1110,7 @@ mod tests {
             Screen::EnterPath(Level::Volume),
             Screen::EnterPath(Level::EfiPartition),
             Screen::NoEfiPartition,
-            Screen::SelectRoot {
-                efi: Label::new("rescue.efi").unwrap(),
-                roots: targets(&[("a.vhd", TargetKind::Disk)]),
-            },
+            Screen::Browse(Level::Root),
             Screen::Notice(Notice::Hibernated),
             Screen::Notice(Notice::Dirty),
             Screen::Notice(Notice::Pcr12NotZero),
@@ -1251,12 +1215,6 @@ mod tests {
         assert_eq!(map_key(&ds, Key::Char('3')), Some(Input::TypePath));
         assert_eq!(map_key(&ds, Key::Char('4')), None);
         assert_eq!(map_key(&ds, Key::Escape), Some(Input::Escape));
-        let sr = Screen::SelectRoot {
-            efi: Label::EMPTY,
-            roots: targets(&[("a.vhd", TargetKind::Disk), ("b.vhd", TargetKind::Disk)]),
-        };
-        assert_eq!(map_key(&sr, Key::Char('2')), Some(Input::Choose(1)));
-        assert_eq!(map_key(&sr, Key::Char('3')), Some(Input::NoRoot));
         assert_eq!(
             map_key(&Screen::Incorrect, Key::Char('x')),
             Some(Input::Continue)
@@ -1340,16 +1298,6 @@ mod tests {
         assert_eq!(
             p.feed(&ds, Key::Enter, &mut buf),
             Reaction::Done(Input::BrowseDisk)
-        );
-        let sr = Screen::SelectRoot {
-            efi: Label::EMPTY,
-            roots: targets(&[("a.vhd", TargetKind::Disk)]),
-        };
-        let mut p = Prompt::new(&sr, &mut buf);
-        assert_eq!(p.feed(&sr, Key::End, &mut buf), Reaction::Redraw);
-        assert_eq!(
-            p.feed(&sr, Key::Enter, &mut buf),
-            Reaction::Done(Input::NoRoot)
         );
     }
 
@@ -1497,9 +1445,9 @@ mod tests {
         assert_eq!(entry_name("rescue v2.efi", &mut b, "x"), "rescue_v2");
         assert_eq!(entry_name("\\", &mut b, "recovery"), "recovery");
         assert_eq!(entry_name(&"a".repeat(40), &mut b, "x").len(), 32);
-        assert_eq!(classify_path("\\paguro\\R.EFI"), TargetKind::EfiFile);
-        assert_eq!(classify_path("\\paguro\\r.vhd"), TargetKind::Disk);
-        assert_eq!(classify_path("efi"), TargetKind::Disk);
+        assert_eq!(classify_path("\\paguro\\R.EFI"), EntryKind::Efi);
+        assert_eq!(classify_path("\\paguro\\r.vhd"), EntryKind::Disk);
+        assert_eq!(classify_path("efi"), EntryKind::Disk);
     }
 
     fn utf16(s: &str) -> std::vec::Vec<u16> {
@@ -1597,6 +1545,7 @@ mod tests {
             path: "\\paguro",
             listing: &*d,
             selected: 0,
+            level: Level::Volume,
         };
         let mut b = Browser::new(&view);
         assert_eq!(b.feed(&view, Key::Up), Reaction::Ignore);
@@ -1643,10 +1592,35 @@ mod tests {
             path: "\\x",
             listing: &*empty,
             selected: 9,
+            level: Level::Volume,
         };
         let mut b = Browser::new(&ev);
         assert_eq!(b.selected(), 0);
         assert_eq!(b.feed(&ev, Key::Enter), Reaction::Done(Input::TypePath));
+        // The root hint adds "No root" after "Type a path".
+        let root = listing(
+            Level::Root,
+            &[("a.vhd", false), ("b.efi", false), ("dir", true)],
+        );
+        assert_eq!(
+            crate::platform::Listing::len(&*root),
+            2,
+            "no UEFI images when picking a root"
+        );
+        let rv = DirView {
+            path: "\\paguro",
+            listing: &*root,
+            selected: 0,
+            level: Level::Root,
+        };
+        let mut b = Browser::new(&rv);
+        assert_eq!(b.feed(&rv, Key::End), Reaction::Redraw);
+        assert_eq!(b.feed(&rv, Key::Enter), Reaction::Done(Input::NoRoot));
+        assert_eq!(b.feed(&rv, Key::Up), Reaction::Redraw);
+        assert_eq!(b.feed(&rv, Key::Enter), Reaction::Done(Input::TypePath));
+        let mut out = String::new();
+        render_browse(&rv, 3, &mut out).unwrap();
+        assert!(out.contains(" > None -- Linux asks"), "{out}");
         let mut out = String::new();
         render_browse(&view, 3, &mut out).unwrap();
         assert!(

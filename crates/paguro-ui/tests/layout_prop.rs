@@ -9,8 +9,8 @@
 #![allow(clippy::indexing_slicing)]
 
 use paguro_boot::platform::{
-    DirItem, DirView, EntryKind, Grey, Label, Level, Listing, Notice, Row, Screen, Target,
-    TargetKind, TargetList, UnlockMenu, VolumeChoice, VolumeFormat, VolumeList,
+    DirItem, DirView, EntryKind, Grey, Label, Level, Listing, Notice, Row, Screen, UnlockMenu,
+    VolumeChoice, VolumeFormat, VolumeList,
 };
 use paguro_boot::ui::Browser;
 use paguro_boot::ui::{Key, Prompt};
@@ -26,24 +26,6 @@ fn label_text() -> impl Strategy<Value = String> {
         prop::collection::vec(any::<char>(), 0..30).prop_map(|v| v.into_iter().collect()),
         "[ÀÉÎÕÜàéîõüßñç☃€–—•…]{1,30}",
     ]
-}
-
-fn targets() -> impl Strategy<Value = TargetList> {
-    prop::collection::vec((label_text(), any::<u64>(), any::<bool>()), 0..=8).prop_map(|v| {
-        let mut t = TargetList::new();
-        for (n, b, efi) in v {
-            t.push(Target {
-                name: Label::truncated(&n),
-                bytes: b,
-                kind: if efi {
-                    TargetKind::EfiFile
-                } else {
-                    TargetKind::Disk
-                },
-            });
-        }
-        t
-    })
 }
 
 fn screen() -> impl Strategy<Value = Screen> {
@@ -132,10 +114,6 @@ fn screen() -> impl Strategy<Value = Screen> {
         secret,
         label_text().prop_map(|d| Screen::DiskStart {
             disk: Label::truncated(&d)
-        }),
-        (label_text(), targets()).prop_map(|(e, roots)| Screen::SelectRoot {
-            efi: Label::truncated(&e),
-            roots
         }),
     ]
 }
@@ -329,7 +307,7 @@ proptest! {
         h in 480u32..2400,
         dir in owned(),
         path in path_text(),
-        esp in any::<bool>(),
+        level in prop::sample::select(vec![Level::Volume, Level::EfiPartition, Level::Root]),
         keys in prop::collection::vec(
             prop_oneof![
                 Just(Key::Down), Just(Key::Up), Just(Key::PageDown), Just(Key::PageUp),
@@ -340,9 +318,8 @@ proptest! {
         theme in 0usize..8,
     ) {
         let theme = &THEMES[theme % THEMES.len()];
-        let level = if esp { Level::EfiPartition } else { Level::Volume };
         let screen = Screen::Browse(level);
-        let view = DirView { path: &path, listing: &dir, selected: 0 };
+        let view = DirView { path: &path, listing: &dir, selected: 0, level };
         let mut b = Browser::new(&view);
         let mut page = 1;
         for k in keys {
@@ -358,7 +335,7 @@ proptest! {
             page = list.page;
             prop_assert!((1..=paguro_ui::layout::BROWSER_ROWS).contains(&page));
         }
-        prop_assert!(b.selected() <= dir.items.len());
+        prop_assert!(b.selected() < paguro_boot::ui::browse_rows(&view));
     }
 }
 

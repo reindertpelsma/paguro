@@ -86,6 +86,7 @@ fn the_browser_works_on_a_text_console() {
         path,
         listing,
         selected: 0,
+        level: Level::Volume,
     };
     let mut t = Tty {
         out: String::new(),

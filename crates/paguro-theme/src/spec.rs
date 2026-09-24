@@ -113,6 +113,7 @@ pub const STRINGS: &[StringSpec] = &[
     s("type_path", "label"),
     s("type_path_why", "detail"),
     s("type_path_esp_why", "detail"),
+    s("type_path_root_why", "detail"),
     s("hint_open", "hint"),
     s("hint_parent", "hint"),
     s("key_left", "key"),
@@ -193,7 +194,6 @@ pub const SCREENS: &[(&str, &str)] = &[
     ("message", "message"),
     ("volumes", "list"),
     ("browser", "list"),
-    ("roots", "list"),
     ("disk", "list"),
 ];
 

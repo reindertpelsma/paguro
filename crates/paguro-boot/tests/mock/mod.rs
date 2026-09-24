@@ -56,6 +56,8 @@ pub struct Mock {
     /// Each browser prompt: the path shown, the entries' names, and the
     /// row it started on.
     pub browsed: Vec<(String, Vec<String>, usize)>,
+    /// Which browser each of those was.
+    pub browsed_levels: Vec<paguro_boot::platform::Level>,
     pub events: Vec<Event>,
     pub log: Vec<String>,
     pub handoff: Option<Vec<u8>>,
@@ -78,6 +80,7 @@ impl Mock {
             script: VecDeque::new(),
             screens: Vec::new(),
             browsed: Vec::new(),
+            browsed_levels: Vec::new(),
             events: Vec::new(),
             log: Vec::new(),
             handoff: None,
@@ -298,6 +301,7 @@ impl Platform for Mock {
                 .collect(),
             dir.selected,
         ));
+        self.browsed_levels.push(dir.level);
         match self.script.pop_front() {
             Some((i, _)) => i,
             None => Input::Escape,
