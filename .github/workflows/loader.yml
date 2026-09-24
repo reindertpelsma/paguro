@@ -50,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ini_config, seal, fve, gpt, fat_dir, handoff, bootstrap, tpm_response, tpm_client, edid]
+        target: [ini_config, seal, fve, gpt, fat_dir, handoff, bootstrap, tpm_response, tpm_client, edid, vt100]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

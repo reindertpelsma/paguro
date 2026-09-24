@@ -64,6 +64,9 @@ struct State {
     blob_len: Option<usize>,
     tpm_grey: Option<Grey>,
     tpm_attempts: Option<u32>,
+    /// The configuration's `[UI]` preferences are in effect (recovery
+    /// hands back the defaults).
+    ui_from_ini: bool,
 }
 
 impl Drop for State {
@@ -118,6 +121,7 @@ pub fn run<P: Platform, V: Volume<P>>(
             blob_len: None,
             tpm_grey: None,
             tpm_attempts: None,
+            ui_from_ini: false,
         },
     };
     let out = match m.go(bufs) {
@@ -490,6 +494,16 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             cfg.entry_count,
             cfg.default_entry().map_or("", |e| e.name)
         ));
+        if cfg.ui != config::Ui::DEFAULT {
+            // Enums selecting compiled-in data (INTERFACES.md §13.2a).
+            self.log(format_args!(
+                "paguro: ui {} {}",
+                cfg.ui.theme.name(),
+                cfg.ui.mode.name()
+            ));
+            self.p.ui_prefs(cfg.ui);
+            self.st.ui_from_ini = true;
+        }
         Ok(Step::Go(Some(cfg)))
     }
 
@@ -597,6 +611,11 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         self.st.flags |= state::RECOVERY_PATH | state::CONFIG_UNVERIFIED;
         self.st.tpm_grey = Some(Grey::RecoveryMode);
         self.log(format_args!("paguro: recovery ({reason:?})"));
+        if core::mem::take(&mut self.st.ui_from_ini) {
+            // Recovery does not read the configuration, so it starts in
+            // dark / auto (INTERFACES.md §13.2a).
+            self.p.ui_prefs(config::Ui::DEFAULT);
+        }
         if self.st.tpm && !self.st.capped {
             self.cap("recovery")?;
         }

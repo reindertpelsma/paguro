@@ -196,6 +196,13 @@ fn write_fuzz_seeds() {
     uhd.extend_from_slice(&[0x02; 128]);
     put("edid", "2160p-ext", &uhd);
 
+    // vt100: text, CRLF, every sequence family, a quiet line (0xff)
+    put(
+        "vt100",
+        "keys",
+        b"pw\x7f\r\n\x1b[A\x1bOB\x1b[3~\x1b[1;5C\x1b[[A\x1bOQ\x1b2\x1bh\x1b\xff\xc3\xa9",
+    );
+
     // disk: flag | file length | last 512 bytes | payload head
     let disk_seed = |fix: u8, file_len: u64, tail: &[u8; 512], head: &[u8]| {
         let mut v = vec![fix];

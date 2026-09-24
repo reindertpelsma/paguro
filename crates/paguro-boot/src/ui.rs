@@ -41,8 +41,12 @@ pub enum Key {
     Function(u8),
 }
 
-/// The key that cycles the compiled-in theme variants (high contrast…).
+/// The key that cycles the compiled-in theme variants (dark, light and a
+/// high-contrast version of each; INTERFACES.md §13.2a).
 pub const THEME_KEY: Key = Key::Function(2);
+/// The key that toggles the local display between graphics and the text UI
+/// (INTERFACES.md §13.2a).
+pub const MODE_KEY: Key = Key::Function(3);
 
 // ---------------------------------------------------------------------------
 // Text entry (INTERFACES.md §13.3)
@@ -185,6 +189,14 @@ impl Field {
         self.len = new_len;
         self.cursor += n;
         true
+    }
+
+    /// Put the cursor before character `chars` (clamped to the text): a
+    /// click in the field. `true` when it moved.
+    pub fn move_to(&mut self, chars: usize, buf: &[u8]) -> bool {
+        let t = self.text(buf);
+        let at = t.char_indices().nth(chars).map_or(t.len(), |(i, _)| i);
+        core::mem::replace(&mut self.cursor, at) != at
     }
 
     pub fn feed(&mut self, key: Key, buf: &mut [u8]) -> FieldEvent {
@@ -394,6 +406,8 @@ pub enum Reaction {
     Ignore,
     /// Switch to the next compiled-in theme variant and draw again.
     NextTheme,
+    /// Toggle the local display between graphics and text and draw again.
+    ToggleMode,
     Done(Input),
 }
 
@@ -444,9 +458,36 @@ impl Prompt {
         }
     }
 
+    /// A click on list row `i`: select it and act as Enter; a greyed or
+    /// missing row does nothing.
+    pub fn activate(&mut self, screen: &Screen, i: usize) -> Reaction {
+        let items = items(screen);
+        match items.get(i) {
+            Some(it) if it.enabled() => {
+                self.selected = i;
+                match it.input() {
+                    Some(input) => Reaction::Done(input),
+                    None => Reaction::Redraw,
+                }
+            }
+            _ => Reaction::Ignore,
+        }
+    }
+
+    /// A click in the field, before character `chars`.
+    pub fn click_field(&mut self, chars: usize, buf: &[u8]) -> Reaction {
+        match self.field.as_mut().map(|f| f.move_to(chars, buf)) {
+            Some(true) => Reaction::Redraw,
+            _ => Reaction::Ignore,
+        }
+    }
+
     pub fn feed(&mut self, screen: &Screen, key: Key, buf: &mut [u8]) -> Reaction {
         if key == THEME_KEY {
             return Reaction::NextTheme;
+        }
+        if key == MODE_KEY {
+            return Reaction::ToggleMode;
         }
         if let Some(f) = self.field.as_mut() {
             return match f.feed(key, buf) {
@@ -552,11 +593,21 @@ impl Browser {
         }
     }
 
+    /// A click on row `i`: select it and act as Enter.
+    pub fn activate(&mut self, dir: &DirView<'_>, i: usize) -> Reaction {
+        if i >= browse_rows(dir) {
+            return Reaction::Ignore;
+        }
+        self.selected = i;
+        self.feed(dir, Key::Enter)
+    }
+
     pub fn feed(&mut self, dir: &DirView<'_>, key: Key) -> Reaction {
         let rows = browse_rows(dir);
         let entry = dir.listing.item(self.selected);
         match key {
             k if k == THEME_KEY => Reaction::NextTheme,
+            k if k == MODE_KEY => Reaction::ToggleMode,
             Key::Up => self.go(self.selected.saturating_sub(1), rows),
             Key::Down => self.go(self.selected + 1, rows),
             Key::PageUp => self.go(self.selected.saturating_sub(self.page), rows),
@@ -1528,6 +1579,69 @@ mod tests {
         assert!(!d.push(&utf16("one-more"), true, 0));
         assert!(d.more());
         assert_eq!(d.len(), crate::platform::MAX_DIR_ENTRIES);
+    }
+
+    #[test]
+    fn clicks_select_and_act() {
+        // Unlock rows: a click is select + Enter; greyed and missing rows
+        // do nothing.
+        let mut m = menu();
+        m.tpm = Err(Grey::Locked);
+        m.password_or_pin = false;
+        let screen = Screen::Unlock(m);
+        let mut p = Prompt::new(&screen, &mut []);
+        assert_eq!(p.activate(&screen, 0), Reaction::Ignore, "greyed row");
+        assert_eq!(
+            p.activate(&screen, 1),
+            Reaction::Done(Input::Select(Row::RecoveryKey))
+        );
+        assert_eq!(p.selected(), 1);
+        assert_eq!(p.activate(&screen, 9), Reaction::Ignore);
+        assert_eq!(p.feed(&screen, MODE_KEY, &mut []), Reaction::ToggleMode);
+        assert_eq!(p.feed(&screen, THEME_KEY, &mut []), Reaction::NextTheme);
+        // No list: nothing to click.
+        let mut p = Prompt::new(&Screen::CannotUnlock, &mut []);
+        assert_eq!(p.activate(&Screen::CannotUnlock, 0), Reaction::Ignore);
+        assert_eq!(p.click_field(0, &[]), Reaction::Ignore);
+
+        // A click in the field moves its cursor, by characters.
+        let screen = Screen::EnterPath(Level::Volume);
+        let mut buf = [0u8; 32];
+        let mut p = Prompt::new(&screen, &mut buf);
+        for c in "\\é\\x".chars() {
+            p.feed(&screen, Key::Char(c), &mut buf);
+        }
+        assert_eq!(p.click_field(1, &buf), Reaction::Redraw);
+        assert_eq!(p.field().unwrap().cursor(), 1);
+        assert_eq!(p.click_field(2, &buf), Reaction::Redraw);
+        assert_eq!(p.field().unwrap().cursor(), 3, "after the two-byte é");
+        assert_eq!(p.click_field(2, &buf), Reaction::Ignore, "no move");
+        assert_eq!(
+            p.click_field(99, &buf),
+            Reaction::Redraw,
+            "clamped to the end"
+        );
+        assert_eq!(p.field().unwrap().cursor(), 5);
+        p.feed(&screen, Key::Char('y'), &mut buf);
+        assert_eq!(p.field().unwrap().text(&buf), "\\é\\xy");
+    }
+
+    #[test]
+    fn browser_clicks() {
+        let d = listing(Level::Root, &[("a", true), ("b.vhd", false)]);
+        let view = DirView {
+            path: "\\paguro",
+            listing: &*d,
+            selected: 0,
+            level: Level::Root,
+        };
+        let mut b = Browser::new(&view);
+        assert_eq!(b.activate(&view, 1), Reaction::Done(Input::Entry(1)));
+        assert_eq!(b.activate(&view, 2), Reaction::Done(Input::TypePath));
+        assert_eq!(b.activate(&view, 3), Reaction::Done(Input::NoRoot));
+        assert_eq!(b.activate(&view, 4), Reaction::Ignore);
+        assert_eq!(b.selected(), 3);
+        assert_eq!(b.feed(&view, MODE_KEY), Reaction::ToggleMode);
     }
 
     #[test]

@@ -67,6 +67,8 @@ pub struct Mock {
     /// When non-empty, TPM responses come from here instead of the fake.
     pub raw_tpm: VecDeque<Vec<u8>>,
     pub extend_fails: bool,
+    /// Every `Platform::ui_prefs` call.
+    pub ui: Vec<paguro_core::config::Ui>,
 }
 
 impl Mock {
@@ -89,6 +91,7 @@ impl Mock {
             start_fails: false,
             raw_tpm: VecDeque::new(),
             extend_fails: false,
+            ui: Vec::new(),
         }
     }
 
@@ -310,6 +313,10 @@ impl Platform for Mock {
 
     fn log(&mut self, args: fmt::Arguments<'_>) {
         self.log.push(args.to_string());
+    }
+
+    fn ui_prefs(&mut self, ui: paguro_core::config::Ui) {
+        self.ui.push(ui);
     }
 
     fn publish_handoff(&mut self, blob: &[u8]) -> Result<(), PlatformError> {

@@ -22,6 +22,7 @@ pub mod platform;
 pub mod tpm;
 pub mod ui;
 pub mod volume;
+pub mod vt100;
 
 use paguro_core::handoff::{EncodeError, Rung};
 use paguro_core::{bootstrap, ini, seal};

@@ -119,7 +119,7 @@ proptest! {
                     p = Prompt::new(&screen, &mut buf);
                 }
                 Reaction::Done(other) => prop_assert!(false, "unexpected {:?}", other),
-                Reaction::Redraw | Reaction::Ignore | Reaction::NextTheme => {}
+                Reaction::Redraw | Reaction::Ignore | Reaction::NextTheme | Reaction::ToggleMode => {}
             }
             let f = p.field().unwrap();
             prop_assert!(buf[f.len()..].iter().all(|&b| b == 0));

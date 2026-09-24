@@ -95,7 +95,7 @@ pub fn prompt_browse<D: Display>(
             match r {
                 Reaction::Redraw => break,
                 Reaction::Ignore if had_toast => break,
-                Reaction::Ignore => {}
+                Reaction::Ignore | Reaction::ToggleMode => {}
                 Reaction::NextTheme => {
                     s.theme = (s.theme + 1) % THEMES.len().max(1);
                     break;
@@ -133,7 +133,7 @@ pub fn prompt<D: Display>(d: &mut D, s: &mut Session, screen: &Screen, secret: &
             match r {
                 Reaction::Redraw => break,
                 Reaction::Ignore if had_toast => break,
-                Reaction::Ignore => {}
+                Reaction::Ignore | Reaction::ToggleMode => {}
                 Reaction::NextTheme => {
                     s.theme = (s.theme + 1) % THEMES.len().max(1);
                     break;
@@ -187,7 +187,7 @@ pub fn prompt_text<C: Console>(c: &mut C, screen: &Screen, secret: &mut [u8]) ->
                     let _ = ui::render_field_line(f, secret, &mut W(c));
                 }
             }
-            Reaction::Ignore | Reaction::NextTheme => {}
+            Reaction::Ignore | Reaction::NextTheme | Reaction::ToggleMode => {}
             Reaction::Done(i) => {
                 c.write_str("\r\n");
                 return i;
@@ -206,7 +206,7 @@ pub fn prompt_browse_text<C: Console>(c: &mut C, screen: &Screen, dir: &DirView<
             Reaction::Redraw => {
                 let _ = ui::render_browse(dir, b.selected(), &mut W(c));
             }
-            Reaction::Ignore | Reaction::NextTheme => {}
+            Reaction::Ignore | Reaction::NextTheme | Reaction::ToggleMode => {}
             Reaction::Done(i) => return i,
         }
     }

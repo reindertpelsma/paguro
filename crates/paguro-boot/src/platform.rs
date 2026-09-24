@@ -614,6 +614,14 @@ pub trait Platform {
         Input::Escape
     }
 
+    /// The configuration's `[UI]` preferences (theme variant, graphics or
+    /// text; INTERFACES.md §13.2a), once stage 2 has parsed them; the
+    /// defaults (dark / auto) again when recovery takes over, which never
+    /// reads the configuration. Defaults to ignoring them.
+    fn ui_prefs(&mut self, ui: paguro_core::config::Ui) {
+        let _ = ui;
+    }
+
     /// Diagnostics (the serial log in QEMU). Never receives key material.
     fn log(&mut self, args: fmt::Arguments<'_>);
 

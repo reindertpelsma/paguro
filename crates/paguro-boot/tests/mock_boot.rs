@@ -313,6 +313,55 @@ fn pcr12_not_zero_is_refused() {
 }
 
 #[test]
+fn ui_section_is_applied_after_stage2_and_dropped_by_recovery() {
+    use paguro_core::config::{Ui, UiMode, UiTheme};
+    let with_ui = |w: &mut World| {
+        let mut ini = w.ini.clone();
+        ini.extend_from_slice(b"\n[UI]\ntheme = light-contrast\nmode = text\n");
+        w.set_ini(ini, true);
+    };
+    let light = Ui {
+        theme: UiTheme::LightContrast,
+        mode: UiMode::Text,
+    };
+    // Applied once the file has verified and parsed.
+    let mut w = World::new();
+    with_ui(&mut w);
+    w.with_tpm_seal(PIN);
+    pin(&mut w, PIN);
+    assert_eq!(w.run(), Outcome::Started(Rung::Tpm));
+    assert_eq!(w.m.ui, vec![light]);
+    assert!(w.m.logged("paguro: ui light-contrast text"));
+
+    // Absent: nothing to apply, the platform keeps dark / auto.
+    let mut w = World::new();
+    w.with_tpm_seal(PIN);
+    pin(&mut w, PIN);
+    assert_eq!(w.run(), Outcome::Started(Rung::Tpm));
+    assert!(w.m.ui.is_empty());
+
+    // Voluntary recovery after the file applied: back to the defaults.
+    let mut w = World::new();
+    with_ui(&mut w);
+    w.with_tpm_seal(PIN).with_passphrase_seal("pw");
+    w.m.input(Input::Recover)
+        .input(Input::Select(Row::RecoveryPassphrase))
+        .secret("pw");
+    assert_eq!(w.run(), Outcome::Started(Rung::Passphrase));
+    assert_eq!(w.m.ui, vec![light, Ui::DEFAULT]);
+
+    // A file that fails verification is never parsed, so never applied.
+    let mut w = World::new();
+    with_ui(&mut w);
+    let mut tampered = w.ini.clone();
+    tampered.extend_from_slice(b"\n");
+    w.set_ini(tampered, false);
+    w.m.input(Input::StartWindows);
+    let _ = w.run();
+    assert!(w.m.ui.is_empty(), "recovery never reads [UI]");
+}
+
+#[test]
 fn voluntary_recovery_caps_after_the_load_taint() {
     let mut w = World::new();
     w.with_tpm_seal(PIN).with_passphrase_seal("pw");

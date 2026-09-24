@@ -127,3 +127,10 @@ path = "fuzz_targets/edid.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "vt100"
+path = "fuzz_targets/vt100.rs"
+test = false
+doc = false
+bench = false
