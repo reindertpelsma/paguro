@@ -942,6 +942,39 @@ anyway, so the browser adds UI, not new parsing, and it runs only after the
 volume is unlocked and PCR 12 capped (recovery caps on entry). The screens say
 the boot is unattested.
 
+### 13.5 Languages and keyboard layouts
+
+**Languages:** `en` (source), `nl`, `de`, `fr`, `es`. Strings live in one
+table format shared by the loader and the Windows app
+(`strings/<lang>.toml`, keys namespaced `loader.*` / `win.*`), so a language is
+added once for both. Translations other than `en`/`nl` are machine-made and
+marked as such in the file header until a native speaker reviews them. The
+language is chosen at install from Windows' display language, falling back
+to `en`.
+
+**Keyboard layout matters more than language.** Firmware keyboard drivers map
+keys with a US layout, whatever is printed on the keys; BitLocker's own
+pre-boot PIN has the same limitation. A German user typing a passphrase at
+boot gets `z`/`y` swapped, a French one `a`/`q`, `z`/`w` and `m` moved — and
+the passphrase was set in Windows with the real layout, so unlocking fails.
+
+- `[UI] keyboard = us | uk | de | fr | es | be | ch-de | nl-intl | …` selects a
+  compiled-in remap table: the firmware reports what the US layout would
+  produce for a physical key (plus shift and AltGr state through
+  `SimpleTextInputEx`), and the table turns it into what the chosen layout
+  produces for that key. It is an enum selecting compiled-in data.
+- The installer takes the layout from Windows' active input language, and the
+  passphrase screen names it ("Keyboard: German"). Insert (reveal) lets the
+  user see what is being typed.
+- **Dead keys are not supported** at boot. When the passphrase is set in
+  Windows, the app refuses characters that need a dead key or a layout
+  outside the table, and says why.
+- Digits stay on the physical number row in every supported layout, so the
+  recovery key (48 digits) is unaffected; on AZERTY they are produced without
+  Shift at boot, which the table handles.
+- Recovery does not read the `.ini`, so it starts in `us` with the layout
+  selectable on screen (F4 cycles).
+
 ## 12. Testing contract
 
 Each interface ships with:
