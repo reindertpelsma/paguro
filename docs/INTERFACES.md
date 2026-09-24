@@ -695,17 +695,44 @@ distribution's own shim (§3.2).
   (`SetFirmwareEnvironmentVariable`) and shows the one-time password; the next
   boot shows MokManager once. After that no install, distribution or kernel
   update ever asks again. With Secure Boot off, nothing is enrolled.
-- **Where the private key lives:** created inside the WSL2 install container and
-  written into the image, where DKMS finds it. On the first native boot Linux
-  **seals it to PCR 11** (DESIGN §6, "Keeping the MOK private key out of
-  Windows' reach") and deletes the plaintext; the install container is
-  destroyed. Before that first boot the key has only ever existed on a machine
-  where Windows is, at that moment, the trusted installer.
-- **Consequence: only Linux signs after install.** Windows never holds the key
-  again, so a compromised Windows cannot sign a bootkit that MOK would trust.
-  paguro updates are signed by Linux; the Windows repair hook (DESIGN §7) restores
-  the **already signed** `paguro.efi` from a copy kept on the ESP and never
-  re-signs.
+- **Where the private key lives.** It is needed on both sides: by the Windows
+  tool for every later `paguro install` (a new distribution needs its DKMS
+  module and UKI signed), and by each Linux image for its kernel updates.
+
+  | Copy | Location | Default | Opt-in |
+  |---|---|---|---|
+  | Windows | `C:\ProgramData\paguro\mok\` — admin-only ACL, inside the BitLocker volume | plain file | **wrapped by the boot passphrase**, or **TPM-sealed** |
+  | each Linux image | `/etc/paguro/mok/`, root-only, inside the image | plain file | wrapped by the boot passphrase, or sealed to PCR 11 |
+  | Linux at runtime | the kernel keyring (root's `@u`) after unlock | — | — |
+
+  **Never on the ESP.** A key wrapped by the boot passphrase is an offline
+  guessing oracle for that passphrase — the private key can always be checked
+  against the public certificate, tag or no tag — so it must only be readable
+  by whoever could already read the encrypted volume. On C: or inside the
+  image, reading it needs admin or the VMK; on the ESP any unprivileged Linux
+  process could run the dictionary attack the root gate exists to prevent
+  (DESIGN §6).
+
+  **The passphrase wrap uses its own KDF, not the loader's.** The loader is
+  bound to `bitlocker_stretch` for BitLocker compatibility; this key is not, so
+  it uses Argon2id with its own salt and label (`paguro/mok-wrap`), which
+  makes the oracle expensive rather than merely present.
+
+  **What each option protects, stated plainly:**
+  - *passphrase wrap:* the key at rest, and against a compromised Windows
+    **unless the passphrase is typed into it** — which `paguro install` of a new
+    distribution asks for;
+  - *TPM seal for the Windows app:* only against the disk being read
+    elsewhere. Any admin process in a running Windows can unseal it, so it is a
+    convenience equal to "Windows holds the key";
+  - *PCR 11 seal in Linux:* against Windows reading the image offline (DESIGN
+    §6); the Linux side's default once opted in.
+
+  **Linux signs through the keyring.** After unlock the key material sits in
+  root's keyring; the DKMS and `ukify` signing hooks write it to a `0600` file
+  on a `tmpfs` only for the duration of `sign-file`/`sbsign`, then remove it.
+- The repair hook (DESIGN §7) restores the **already signed** `paguro.efi`
+  from a copy kept on the ESP; it needs no key.
 
 ### 11.3 Guest agent (VM mode growth) — OPEN
 
