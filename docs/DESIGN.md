@@ -135,21 +135,40 @@ That is the risk that survives, and it is not a technical one.
 
 ### Closest prior art
 
-Each part has a precedent; no project found combines even two of them.
+Each part has precedent, much of it small community work on GitHub; nothing
+found combines the parts.
+
+**Linux from an image file**
 
 | Project | Shares | Lacks |
 |---|---|---|
-| **Ventoy** | maps a fragmented file's extents to a block device with a `dm-linear` table (`vtoydm`) — paguro's view A mechanism | boots one OS from removable media; nothing else writes the disk meanwhile, so nothing needs protecting |
-| **Wubi / WubiUEFI** | Linux in a file inside NTFS, no repartitioning, UEFI via shim | loop-over-NTFS I/O path, no BitLocker, no enforcement; dormant |
-| guides for booting the physical Windows partition in QEMU/KVM | the same native Windows as a VM | ad hoc; activation and BitLocker left unsolved; Linux is not also on that disk |
-| **Parallels / VMware Fusion "Boot Camp VM"** | one Windows install, both native and virtualised — the closest commercial analogue | macOS host; reactivation friction; gone with Apple Silicon |
-| **WinBoat + Helios**, WinApps, Cassowary, dockur | RemoteApp windows, paravirtual GPU without VFIO | a *freshly provisioned* Windows, not the user's own |
-| `dislocker`, `cryptsetup bitlk` | BitLocker unlock outside Windows | userspace only; no pre-boot (EFI-stage) implementation found |
+| **Ventoy `vtoyboot`** (386★, 2025) | boots an *installed* Linux natively from a **fixed-size VHD**, including from a local disk — the closest thing to paguro's boot and storage half, and the same fixed-VHD choice | no BitLocker; no Windows running meanwhile, so no enforcement; must be re-run after kernel updates |
+| **Ventoy** core | `vtoydm` maps a fragmented file's extents with a `dm-linear` table — paguro's view A mechanism | removable-media multiboot |
+| **WubiUEFI** (1.2k★) | Linux in a file inside NTFS, no repartitioning, UEFI via shim | loop-over-NTFS I/O path, no BitLocker, no enforcement; last release June 2024 (22.04.4) |
+| `nikp123/ntfs-rootfs`; the "Windows and Linux in one partition" gist | Linux root directly on NTFS via `ntfs3`, no partitioning | a shared filesystem, not an image: filename conflicts, `chkdsk` deleting Linux files, explicitly not recommended |
+
+**The same Windows, natively and as a VM**
+
+| Project | Shares | Lacks |
+|---|---|---|
+| **`qt1/mapped-windows-vdisk`** (2019) | builds the VM's disk with `dmsetup` from a copied GPT and ESP plus a link to the real Windows partition — paguro's view B sandwich, found independently | partition-based dual boot, unencrypted, manual; no protection of anything but the other partitions |
+| `lejenome` dual-boot-to-VM; `0xf4b1/qemu-kvm-windows`; `npip99/dual-boot-to-vm` | one Windows installation booted natively and in KVM, via a linear-RAID or partition-passthrough disk | Windows on its own partition; activation and BitLocker unaddressed |
+| **Parallels / VMware Fusion "Boot Camp VM"** | the closest commercial analogue | macOS host; reactivation friction; gone with Apple Silicon |
+
+**The rest**
+
+| Project | Shares | Lacks |
+|---|---|---|
+| **WinBoat + Helios**, WinApps, Cassowary, dockur | RemoteApp windows; paravirtual GPU without VFIO | a *freshly provisioned* Windows, not the user's own |
+| `dislocker`, `cryptsetup bitlk` | BitLocker unlock outside Windows | userspace only; **no pre-boot (EFI-stage) implementation found** |
+| booting a WSL2 `ext4.vhdx` on bare metal | — | **nothing found**; the known paths mount it or re-virtualise it |
 
 What appears new is the combination: an EFI-stage BitLocker unlock, a kernel
-module that polices the image's extents against a concurrent OS rather than just
-mapping them, and one already-encrypted, already-activated Windows installation
-reachable natively and as a VM without ever changing its boot path.
+module that polices the image's extents against a *concurrently running* OS
+rather than only mapping them, and one already-encrypted, already-activated
+Windows installation reachable natively and as a VM without changing its boot
+path. The pieces paguro shares with `vtoyboot` and `mapped-windows-vdisk` are
+evidence the mechanisms are sound, not only that the idea is taken.
 
 ### The solvable counterweight
 
