@@ -31,6 +31,7 @@ jobs:
       - run: cargo clippy -p paguro-core -p paguro-boot -p paguro-qemu --all-targets -- -D warnings
       - run: cargo clippy -p paguro-efi -p paguro-probe --target x86_64-unknown-uefi -- -D warnings
       - run: cargo clippy -p paguro-efi -p paguro-probe --target aarch64-unknown-uefi -- -D warnings
+      - run: cargo clippy -p paguro-tablet-shim --target x86_64-unknown-uefi -- -D warnings
       - run: cargo test -p paguro-core -p paguro-boot
       - name: the real-volume NTFS tests really ran
         run: cargo test -p paguro-core --test ntfs_dir -- --nocapture 2>&1 | tee ntfs.log && ! grep -q "skipped" ntfs.log
@@ -50,6 +51,23 @@ jobs:
         with:
           name: paguro.efi
           path: target/x86_64-unknown-uefi/release/paguro.efi
+
+  languages:
+    name: PAGURO_LANG=${{ matrix.lang }} (loader build, every screen renders)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        lang: [en, nl, de, fr, es]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-uefi
+      - run: PAGURO_LANG=${{ matrix.lang }} cargo build --release -p paguro-efi --target x86_64-unknown-uefi
+      # Goldens (every language's hashes included) run in the en build; other
+      # starting languages must render every screen.
+      - run: PAGURO_LANG=${{ matrix.lang }} cargo test -p paguro-ui --test golden --test layout_prop
 
   fuzz:
     name: fuzz ${{ matrix.target }} (60 s)
