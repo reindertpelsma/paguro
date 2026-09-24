@@ -348,7 +348,7 @@ this machine any more", and whoever makes it match again clears it:
 | TPM rung fails its policy (PCRs moved) | loader | set |
 | Windows sees the flag, stages `setupTPM`, reboots into Linux | Windows tool | cleared when staging |
 | a boot on another rung (passphrase, recovery) whose initrd re-seals against this boot's PCR values (handoff `PCRS`) and writes the new `tpm_seal.bin` | initrd | cleared after the file is written |
-| a later boot whose TPM rung succeeds (a stale flag) | initrd | cleared |
+| a boot whose TPM rung succeeds **and its key opens the volume** (the FVEK unwrap confirms it; a successful unseal alone does not) | loader | cleared, read first so a normal boot writes nothing |
 
 A successful boot alone does not clear it: only a seal that matches again
 does. If the `setupTPM` boot itself fails, the loader sets it again.

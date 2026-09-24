@@ -616,6 +616,42 @@ fn policy_failure_sets_tpm_broken_and_offers_the_rest() {
 }
 
 #[test]
+fn a_confirmed_tpm_unlock_clears_a_stale_tpm_broken_flag() {
+    let mut w = World::new();
+    w.with_tpm_seal(PIN);
+    w.m.put_var(
+        "PaguroTpmBroken",
+        paguro_core::guid::PAGURO_VENDOR,
+        paguro_boot::platform::attrs::NV_BS_RT,
+        &[1],
+    );
+    pin(&mut w, PIN);
+    assert_eq!(w.run(), Outcome::Started(Rung::Tpm));
+    assert!(w.m.var("PaguroTpmBroken").is_none());
+}
+
+#[test]
+fn a_wrong_key_from_the_tpm_does_not_clear_the_flag() {
+    // The unseal succeeds but the derived VMK fails the FVEK unwrap: nothing
+    // is confirmed, so the flag stays.
+    let mut w = World::new();
+    w.with_tpm_seal(PIN);
+    w.v.vmk = [0x55; 32];
+    w.v.recovery = Some((RECOVERY_KEY, [0x55; 32]));
+    w.m.put_var(
+        "PaguroTpmBroken",
+        paguro_core::guid::PAGURO_VENDOR,
+        paguro_boot::platform::attrs::NV_BS_RT,
+        &[1],
+    );
+    pin(&mut w, PIN);
+    w.m.input(Input::Select(Row::RecoveryKey))
+        .secret(RECOVERY_PW);
+    assert_eq!(w.run(), Outcome::Started(Rung::RecoveryKey));
+    assert!(w.m.var("PaguroTpmBroken").is_some());
+}
+
+#[test]
 fn pin_bypass_needs_no_prompt() {
     let mut w = World::new();
     w.with_tpm_seal(PIN).with_bypass_seal(2_000_000);

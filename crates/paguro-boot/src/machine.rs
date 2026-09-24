@@ -713,6 +713,24 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         }
     }
 
+    /// The standing seal matched and its key opened the volume (the FVEK
+    /// unwrap is the confirmation, not the unseal), so a `PaguroTpmBroken`
+    /// left by an earlier boot is stale (INTERFACES.md §5). Read first so a
+    /// normal boot writes nothing to NVRAM.
+    fn clear_tpm_broken(&mut self) {
+        let mut flag = [0u8; 1];
+        if let Ok(Some(_)) = self
+            .p
+            .get_var(names::VAR_TPM_BROKEN, &PAGURO_VENDOR, &mut flag)
+        {
+            if let Err(e) = self.p.delete_var(names::VAR_TPM_BROKEN, &PAGURO_VENDOR) {
+                self.log(format_args!(
+                    "paguro: clearing PaguroTpmBroken failed: {e:?}"
+                ));
+            }
+        }
+    }
+
     fn tpm_usable(&self, cfg: Option<&Config<'_>>, parsed: &[Option<Seal<'_>>; 4]) -> bool {
         self.st.tpm
             && self.st.mode == Mode::Normal
@@ -1032,6 +1050,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
                 let blob = self.blob(blob_buf)?;
                 let vmk = derive_vmk(&env, seal.salt, blob, &ph, seal.wrapped_vmk);
                 if self.accept(vmk)? {
+                    self.clear_tpm_broken();
                     Some(Rung::Tpm)
                 } else {
                     None
