@@ -554,14 +554,13 @@ paguro install <distro>              (Windows, admin)
   4. the distribution's own live system, as a privileged container in WSL2:
        download the ISO, verify SHA256SUMS and its signature
        mount the ISO at /cdrom, its squashfs as the rootfs (overlay on top)
-       systemd-nspawn -b: the live system's own systemd, dbus, udisks
+       systemd-nspawn -b with only mnt, pid, uts and ipc namespaces and no
+         seccomp or capability filters: the live system's own systemd,
+         dbus, udisks and snapd run as on a live boot
          /dev/sdX (the VHD) the only real disk it is given
          WSLg sockets bound in, so the installer's GUI shows on Windows
-       run the distribution's installer, unchanged except the adapter's
-         overrides (below); it partitions the VHD like any disk
-     then in the target chroot: firmware and drivers from the manifest
-     (§11.5), paguro-initramfs, the bootloader into the nested ESP
-     (`grub-install --removable --no-nvram`: WSL2 has no efivarfs)
+       run the distribution's installer; the adapter makes it write a
+         paguro-ready system itself (below), so there is no step after it
   5. wsl --unmount
   6. write paguro.ini, PaguroConfigHash, the bootstrap Boot#### entry
 ```
@@ -574,14 +573,31 @@ paguro install <distro>              (Windows, admin)
   own: its installer, its package selection and defaults, the bits it ships,
   offline if the ISO is local. The live system already contains every tool the
   installer needs; we only give it a container instead of a machine.
-- **The adapter is a small set of overrides per distribution**, not a port:
-  the bootloader step (`--no-nvram --removable`, no `efibootmgr`), hiding
-  WSL2's own disks, and a post-install hook that runs the chroot step above.
-  Expected difficulty, easiest first: Calamares-based ISOs (Debian live and
-  many others; configurable module list), Fedora's Anaconda (`liveinst`, needs
-  systemd and dbus, which `nspawn -b` provides), Ubuntu (its installer is a
-  snap, and snapd inside a container is the hard part; its `curtin` backend
-  is the fallback).
+- **The installer writes the right system itself; no post-install chroot.**
+  Every installer copies a filesystem and then generates the initramfs, so the
+  adapter puts paguro's pieces where that copy and that generation pick them
+  up:
+  - **the copy source is an overlay**, not the bare squashfs: our layer holds
+    `paguro-initramfs` installed as a real package (registered with dpkg/rpm,
+    so the target can upgrade it) and the firmware/driver packages chosen from
+    the manifest (§11.5). Installers copy from the squashfs *file*, not from
+    the running root (Calamares `unpackfs`, Ubuntu's layered squashfs via
+    `curtin`, Anaconda from the live base device), so the adapter points the
+    installer's source at the overlay mount rather than relying on the
+    container's root;
+  - **the installer's own initramfs step** (`update-initramfs`, `dracut`) then
+    includes our hook, because the package is already in the target;
+  - **the bootloader through the distribution's own settings, which stay
+    correct afterwards:** Debian/Ubuntu `grub2/update_nvram=false` and
+    `grub2/force_efi_extra_removable=true` (debconf); the equivalent per
+    distribution. The image's GRUB must never write `Boot####` entries: the
+    firmware cannot see the nested ESP, and `paguro.efi` is what starts it.
+    No wrapper binaries in the target.
+- **The adapter is data plus hooks per distribution**: where its installer
+  reads its source, its bootloader settings, and a hook before its initramfs
+  step if the package list alone does not reach it (Calamares module order,
+  Ubuntu autoinstall `packages`, Anaconda kickstart `%packages` from our
+  repository).
 - **To verify first** (§11): that the WSL2 kernel mounts ISO 9660 and squashfs
   (fallback: `squashfuse`, `bsdtar`), that partition nodes created by the
   installer appear inside the container, and that the GUI works over WSLg.
