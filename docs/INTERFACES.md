@@ -147,7 +147,6 @@ content:
 |---|---|
 | a GPT | the one partition of type ESP (`C12A7328-…`); zero or several → refuse |
 | a FAT32 boot sector | the whole payload (a "superfloppy" FAT32 disk) |
-| ISO 9660 (`CD001` at byte 32 769) | its El Torito EFI boot image, or the ESP of a hybrid ISO's GPT; the `BlockIo` reports 2048-byte blocks so the firmware's El Torito support binds it; always read-only |
 | anything else | refuse |
 
 **`root` is a hint the loader forwards, not a disk it opens.** The loader
@@ -173,10 +172,6 @@ order, so it reads past the first extent):
 | bare ext4 | superblock magic `0xEF53` at byte 1 080, and the backup superblock in block group 1 agreeing on UUID and block count |
 | ISO 9660 | primary volume descriptor, and the volume space size equal to the payload length |
 
-ISO images (installers, rescue, live media) boot as far as their own
-initramfs. A stock live initramfs cannot find its squashfs inside a VHD inside
-NTFS, and cannot at all behind BitLocker; paguro's own rescue/installer ISO uses
-paguro's initramfs and can.
 
 The loader publishes **the whole disk** (`efi_disk`'s payload) as a
 **read-only** `EFI_BLOCK_IO_PROTOCOL` with a device path, whose reads resolve
@@ -533,12 +528,46 @@ component (DESIGN §4.4).
 
 | Command | Effect |
 |---|---|
-| `paguro install <distro>` | create the image, write `.ini`, set `PaguroConfigHash`, create the bootstrap entry |
+| `paguro install <distro>` | build the image through WSL2 (§11.4), write `.ini`, set `PaguroConfigHash`, create the bootstrap entry |
 | `paguro restart-linux` | pre-flight, write the PIN-bypass seal, `BootNext`, restart |
 | `paguro stage-setup` | stage `setupTPM` (`S` + `setuptpm_seal.bin`) |
 | `paguro repair` | re-install ESP files, re-stage if needed (DESIGN §7) |
 | `paguro uninstall` | DESIGN §6b |
 | `paguro config ...` | the only editor of `paguro.ini` |
+
+### 11.4 Installing a distribution: through WSL2, never an ISO — DRAFT
+
+**No distribution installer ever runs against the real disk, and no ISO is
+booted to install.** A stock installer would see the physical disk with Windows
+on it and partition it, and a stock live initramfs cannot find its media inside
+a VHD inside NTFS, or behind BitLocker, without our driver injected into it.
+Both problems disappear if the image is built from Windows:
+
+```text
+paguro install debian            (Windows, admin)
+  1. create the file              fixed VHD, diskpart `create vdisk type=fixed`
+                                  (works on Home; no Hyper-V module)
+  2. wsl --mount --vhd --bare     the VHD appears as a disk inside WSL2
+  3. inside WSL2, as root         GPT (ESP + ext4) or bare ext4; debootstrap /
+                                  dnf --installroot / pacstrap into it;
+                                  kernel, firmware, paguro-initramfs, UKI
+                                  (ukify) into the nested ESP
+  4. wsl --unmount
+  5. write paguro.ini, PaguroConfigHash, the bootstrap Boot#### entry
+```
+
+- The builder is a small script run in a throwaway WSL2 distribution (Debian
+  for `debootstrap`; others via their own bootstrap tools), so the image is
+  built by the distribution's own package manager, not by us.
+- `paguro-initramfs` is installed from inside the chroot like any package, so
+  the driver is in the image from its first boot — no injection problem.
+- The same path makes an existing WSL distribution bootable: its rootfs is the
+  source of step 3 instead of a bootstrap tool.
+- Requires WSL2 (Windows 10 2004+ / 11, any edition). Without it, the installer
+  downloads a prebuilt image for the supported list (DESIGN §8b).
+
+ISO 9660 stays readable by Linux (`isofs` on a claimed file) but is not a loader
+format.
 
 ### 11.3 Guest agent (VM mode growth) — OPEN
 
