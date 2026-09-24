@@ -1,0 +1,15 @@
+# paguro configuration. Not hand-editable: use `paguro config`.
+[Paguro]
+version = 1
+default = debian
+
+[Boot.debian]
+volume = 5c5c5c5c-5c5c-5c5c-5c5c-5c5c5c5c5c5c
+root = \paguro\debian.vhd
+
+[Passphrase]
+enabled = 0
+
+[UI]
+theme = light-contrast
+mode = text

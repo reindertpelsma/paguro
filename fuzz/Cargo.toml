@@ -118,3 +118,12 @@ path = "fuzz_targets/tpm_client.rs"
 test = false
 doc = false
 bench = false
+
+# ---- Loader UI input (INTERFACES §13.2a) -----------------------------------
+
+[[bin]]
+name = "edid"
+path = "fuzz_targets/edid.rs"
+test = false
+doc = false
+bench = false

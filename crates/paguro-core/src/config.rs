@@ -103,6 +103,86 @@ impl<'a> Entry<'a> {
     }
 }
 
+/// `[UI] theme`: the compiled-in theme variant the loader starts in
+/// (INTERFACES.md §13.2a). An enum selecting compiled-in data, never display
+/// data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UiTheme {
+    #[default]
+    Dark,
+    Light,
+    DarkContrast,
+    LightContrast,
+}
+
+impl UiTheme {
+    /// In F2 order: the index of each variant in the compiled-in theme table.
+    pub const ALL: [UiTheme; 4] = [
+        UiTheme::Dark,
+        UiTheme::Light,
+        UiTheme::DarkContrast,
+        UiTheme::LightContrast,
+    ];
+
+    /// The value in `paguro.ini`, and the compiled-in variant's name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            UiTheme::Dark => "dark",
+            UiTheme::Light => "light",
+            UiTheme::DarkContrast => "dark-contrast",
+            UiTheme::LightContrast => "light-contrast",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<UiTheme> {
+        UiTheme::ALL.into_iter().find(|t| t.name() == s)
+    }
+}
+
+/// `[UI] mode`: graphics, text, or both (INTERFACES.md §13.2a).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UiMode {
+    /// Graphics on every GOP device and the text UI on each serial console;
+    /// the text UI on ConOut when there is no GOP.
+    #[default]
+    Auto,
+    /// GOP only (the text UI on ConOut when there is no GOP).
+    Graphics,
+    /// The text UI only, on ConOut.
+    Text,
+}
+
+impl UiMode {
+    pub const ALL: [UiMode; 3] = [UiMode::Auto, UiMode::Graphics, UiMode::Text];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            UiMode::Auto => "auto",
+            UiMode::Graphics => "graphics",
+            UiMode::Text => "text",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<UiMode> {
+        UiMode::ALL.into_iter().find(|m| m.name() == s)
+    }
+}
+
+/// The `[UI]` section. Absent: dark / auto — which is also what recovery,
+/// which never reads the file, starts with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ui {
+    pub theme: UiTheme,
+    pub mode: UiMode,
+}
+
+impl Ui {
+    pub const DEFAULT: Ui = Ui {
+        theme: UiTheme::Dark,
+        mode: UiMode::Auto,
+    };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config<'a> {
     /// Index into `entries` of the `default` entry.
@@ -112,6 +192,7 @@ pub struct Config<'a> {
     pub tpm: bool,
     pub setup_tpm: bool,
     pub passphrase: bool,
+    pub ui: Ui,
 }
 
 impl<'a> Config<'a> {
@@ -167,6 +248,10 @@ pub enum ConfigError {
         line: usize,
     },
     BadBool {
+        line: usize,
+    },
+    /// A `[UI]` value that is not one of the documented names.
+    BadChoice {
         line: usize,
     },
     BadGuid {
@@ -259,6 +344,7 @@ enum Section<'a> {
     Tpm,
     SetupTpm,
     Passphrase,
+    Ui,
     Ignored(&'a str),
 }
 
@@ -271,6 +357,8 @@ const K_EFI_DISK: u8 = 4;
 const K_EFI: u8 = 8;
 const K_EFI_FILE: u8 = 16;
 const K_ENABLED: u8 = 1;
+const K_THEME: u8 = 1;
+const K_MODE: u8 = 2;
 
 fn mark(seen: &mut u8, bit: u8, line: usize) -> Result<(), ConfigError> {
     if *seen & bit != 0 {
@@ -294,6 +382,7 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
         tpm: true,
         setup_tpm: true,
         passphrase: false,
+        ui: Ui::DEFAULT,
     };
     let mut paguro_section = false;
     let mut paguro_seen = 0u8;
@@ -305,6 +394,7 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
     let mut tpm_seen = 0u8;
     let mut setup_seen = 0u8;
     let mut pass_seen = 0u8;
+    let mut ui_seen = 0u8;
     let mut default_name: Option<&str> = None;
     let mut cur_name: &str = "";
     let mut sect = Section::None;
@@ -323,6 +413,7 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
                 "TPM" => Section::Tpm,
                 "SetupTPM" => Section::SetupTpm,
                 "Passphrase" => Section::Passphrase,
+                "UI" => Section::Ui,
                 s => match s.strip_prefix(ENTRY_PREFIX) {
                     Some(name) => {
                         if !check_name(name) {
@@ -413,6 +504,17 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
                     _ => return Err(ConfigError::UnknownKey { line }),
                 }
             }
+            Section::Ui => match e.key {
+                "theme" => {
+                    mark(&mut ui_seen, K_THEME, line)?;
+                    cfg.ui.theme = UiTheme::from_name(v).ok_or(ConfigError::BadChoice { line })?;
+                }
+                "mode" => {
+                    mark(&mut ui_seen, K_MODE, line)?;
+                    cfg.ui.mode = UiMode::from_name(v).ok_or(ConfigError::BadChoice { line })?;
+                }
+                _ => return Err(ConfigError::UnknownKey { line }),
+            },
             Section::Tpm | Section::SetupTpm | Section::Passphrase => {
                 if e.key != "enabled" {
                     return Err(ConfigError::UnknownKey { line });
@@ -483,7 +585,8 @@ impl From<crate::bytes::Full> for WriteError {
 /// writes on a provisioning boot and seal against its hash. `root` is written
 /// when present; `efi_disk` only when it differs from `root`; `efi` (with a
 /// disk) is always written, so an
-/// authored file does not depend on the reader's architecture default.
+/// authored file does not depend on the reader's architecture default;
+/// `[UI]` only when it differs from dark / auto.
 pub fn write(cfg: &Config<'_>, out: &mut [u8]) -> Result<usize, WriteError> {
     if cfg.entry_count == 0 || cfg.entry_count > MAX_ENTRIES {
         return Err(WriteError::Invalid);
@@ -535,6 +638,15 @@ pub fn write(cfg: &Config<'_>, out: &mut [u8]) -> Result<usize, WriteError> {
         w.put(name.as_bytes())?;
         w.put(b"]\nenabled = ")?;
         w.put(b(v).as_bytes())?;
+        w.put(b"\n")?;
+    }
+    // Only when it says something: files written before `[UI]` existed
+    // keep their exact bytes (and hash).
+    if cfg.ui != Ui::DEFAULT {
+        w.put(b"\n[UI]\ntheme = ")?;
+        w.put(cfg.ui.theme.name().as_bytes())?;
+        w.put(b"\nmode = ")?;
+        w.put(cfg.ui.mode.name().as_bytes())?;
         w.put(b"\n")?;
     }
     if w.len() > ini::MAX_LEN {
@@ -900,6 +1012,100 @@ anything = goes
             parse(&big).unwrap_err(),
             ConfigError::Ini(IniError::TooLarge)
         );
+    }
+
+    #[test]
+    fn ui_section() {
+        let base = "[Paguro]\nversion=1\ndefault=r\n[Boot.r]\nvolume=6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8\nefi_file=\\a.efi\n";
+        let ui = |extra: &str| parse(std::format!("{base}{extra}").as_bytes()).map(|c| c.ui);
+        assert_eq!(ui(""), Ok(Ui::DEFAULT), "absent: dark / auto");
+        assert_eq!(ui("[UI]\n"), Ok(Ui::DEFAULT));
+        for t in UiTheme::ALL {
+            for m in UiMode::ALL {
+                let src = std::format!("[UI]\ntheme = {}\nmode = {}\n", t.name(), m.name());
+                assert_eq!(ui(&src), Ok(Ui { theme: t, mode: m }), "{src}");
+            }
+        }
+        assert_eq!(
+            ui("[UI]\nmode=text\n"),
+            Ok(Ui {
+                theme: UiTheme::Dark,
+                mode: UiMode::Text
+            }),
+            "each key defaults on its own"
+        );
+        assert_eq!(
+            ui("[UI]\ntheme=light\n[TPM]\nenabled=1\n[UI]\nmode=graphics\n"),
+            Ok(Ui {
+                theme: UiTheme::Light,
+                mode: UiMode::Graphics
+            }),
+            "repeated headers merge"
+        );
+        // Values are exact names: no case folding, no aliases, no display data.
+        for bad in [
+            "theme=Dark",
+            "theme=high-contrast",
+            "theme=",
+            "theme=dark ",
+            "theme=light-contrast2",
+            "mode=GRAPHICS",
+            "mode=serial",
+            "mode=",
+            "theme=/EFI/x.png",
+        ] {
+            let v = ui(&std::format!("[UI]\n{bad}\n"));
+            // `dark ` is trimmed by the grammar and so is valid.
+            if bad == "theme=dark " {
+                assert_eq!(v, Ok(Ui::DEFAULT));
+                continue;
+            }
+            assert_eq!(v, Err(ConfigError::BadChoice { line: 8 }), "{bad}");
+        }
+        assert_eq!(
+            ui("[UI]\ntheme=dark\ntheme=light\n"),
+            Err(ConfigError::DuplicateKey { line: 9 })
+        );
+        assert_eq!(
+            ui("[UI]\nmode=auto\n[UI]\nmode=text\n"),
+            Err(ConfigError::DuplicateKey { line: 10 })
+        );
+        assert_eq!(
+            ui("[UI]\nlanguage=en\n"),
+            Err(ConfigError::UnknownKey { line: 8 })
+        );
+        assert_eq!(
+            ui("[ui]\nanything=goes\n"),
+            Ok(Ui::DEFAULT),
+            "section names are case-sensitive; [ui] is an unknown section"
+        );
+        for t in UiTheme::ALL {
+            assert_eq!(UiTheme::from_name(t.name()), Some(t));
+        }
+        for m in UiMode::ALL {
+            assert_eq!(UiMode::from_name(m.name()), Some(m));
+        }
+    }
+
+    #[test]
+    fn ui_section_roundtrips_and_is_omitted_when_default() {
+        let mut c = parse(GOOD.as_bytes()).unwrap();
+        let mut buf = [0u8; 4096];
+        let n = write(&c, &mut buf).unwrap();
+        let text = std::string::String::from_utf8(buf[..n].to_vec()).unwrap();
+        assert!(
+            !text.contains("[UI]"),
+            "default: no section, same bytes as before"
+        );
+        for t in UiTheme::ALL {
+            for m in UiMode::ALL {
+                c.ui = Ui { theme: t, mode: m };
+                let n = write(&c, &mut buf).unwrap();
+                let text = std::string::String::from_utf8(buf[..n].to_vec()).unwrap();
+                assert_eq!(text.contains("[UI]"), c.ui != Ui::DEFAULT, "{text}");
+                assert_eq!(parse(&buf[..n]).unwrap(), c);
+            }
+        }
     }
 
     #[test]

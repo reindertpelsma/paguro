@@ -1500,6 +1500,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             tpm: true,
             setup_tpm: true,
             passphrase: false,
+            ui: config::Ui::DEFAULT,
         };
         let n = match config::write(&cfg, gen_ini) {
             Ok(n) => n,

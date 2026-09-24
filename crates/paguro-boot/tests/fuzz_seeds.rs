@@ -184,6 +184,18 @@ fn write_fuzz_seeds() {
     config::parse(&two).unwrap();
     put("ini_config", "two-entries", &two);
 
+    // ini_config: the [UI] section (INTERFACES.md §13.2a)
+    let mut ui = mock::ini_text(&mock::VOLUME, false);
+    ui.extend_from_slice(b"\n[UI]\ntheme = light-contrast\nmode = text\n");
+    config::parse(&ui).unwrap();
+    put("ini_config", "ui", &ui);
+
+    // edid: a 1080p panel, and a 4K one with an extension block
+    put("edid", "1080p", &paguro_core::edid::build::block(1920, 1080, false));
+    let mut uhd = paguro_core::edid::build::block(3840, 2160, false).to_vec();
+    uhd.extend_from_slice(&[0x02; 128]);
+    put("edid", "2160p-ext", &uhd);
+
     // disk: flag | file length | last 512 bytes | payload head
     let disk_seed = |fix: u8, file_len: u64, tail: &[u8; 512], head: &[u8]| {
         let mut v = vec![fix];

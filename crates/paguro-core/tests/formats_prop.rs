@@ -4,7 +4,7 @@
 #![allow(clippy::indexing_slicing)]
 
 use paguro_core::bootstrap;
-use paguro_core::config::{self, Config, Efi, Entry, MAX_ENTRIES};
+use paguro_core::config::{self, Config, Efi, Entry, MAX_ENTRIES, Ui, UiMode, UiTheme};
 use paguro_core::disk;
 use paguro_core::gpt;
 use paguro_core::guid::Guid;
@@ -53,6 +53,8 @@ proptest! {
         ),
         flags in any::<[bool; 3]>(),
         def in any::<prop::sample::Index>(),
+        theme in 0usize..4,
+        mode in 0usize..3,
     ) {
         let mut seen: Vec<&String> = Vec::new();
         let mut entries = [Entry::EMPTY; MAX_ENTRIES];
@@ -82,6 +84,7 @@ proptest! {
             tpm: flags[0],
             setup_tpm: flags[1],
             passphrase: flags[2],
+            ui: Ui { theme: UiTheme::ALL[theme], mode: UiMode::ALL[mode] },
         };
         let mut buf = vec![0u8; 16 * 1024];
         let len = config::write(&cfg, &mut buf).unwrap();
@@ -99,8 +102,10 @@ proptest! {
             Just("[Paguro]".to_string()),
             Just("[Boot.a]".to_string()),
             Just("[TPM]".to_string()),
+            Just("[UI]".to_string()),
             "[A-Za-z.]{0,12}".prop_map(|s| format!("[{s}]")),
-            "(version|default|volume|root|efi_disk|efi|efi_file|enabled)=[ -~]{0,40}",
+            "(version|default|volume|root|efi_disk|efi|efi_file|enabled|theme|mode)=[ -~]{0,40}",
+            "(theme|mode)=(dark|light|dark-contrast|light-contrast|auto|graphics|text)",
         ],
         0..40,
     )) {
