@@ -85,6 +85,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fat_dir"
+path = "fuzz_targets/fat_dir.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "handoff"
 path = "fuzz_targets/handoff.rs"
 test = false

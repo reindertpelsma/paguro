@@ -14,6 +14,7 @@
 //! | [`runlist`] | §4.3 — the one NTFS parse at module load         |
 //! | [`vhd`]     | §2 — fixed-VHD image files                       |
 //! | [`disk`]    | §2 — disk format detection, finding the FAT32    |
+//! | [`fat`]     | §4.2 — read-only FAT32 directories (recovery browser, tier 2) |
 //! | [`ini`]     | §6 — the frozen `paguro.ini` grammar             |
 //! | [`seal`]    | §6 — the `*_seal.bin` file layouts               |
 //! | [`fve`]     | §6 — bounded walk over BitLocker FVE metadata    |
@@ -25,6 +26,7 @@ pub mod bootstrap;
 pub mod bytes;
 pub mod config;
 pub mod disk;
+pub mod fat;
 pub mod fve;
 pub mod gpt;
 pub mod guid;
