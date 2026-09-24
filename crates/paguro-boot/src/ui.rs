@@ -15,7 +15,8 @@
 use core::fmt::{self, Write};
 
 use crate::platform::{
-    Grey, Input, Notice, Row, Screen, TargetKind, UnlockMenu, VolumeChoice, VolumeFormat,
+    DirView, EntryKind, Grey, Input, Level, Notice, Row, Screen, TargetKind, UnlockMenu,
+    VolumeChoice, VolumeFormat,
 };
 
 /// A key, already decoded from the firmware's `EFI_INPUT_KEY` (or
@@ -253,7 +254,7 @@ pub const fn field_kind(screen: &Screen) -> Option<FieldKind> {
             ..
         } => Some(FieldKind::RecoveryKey),
         Screen::EnterSecret { .. } => Some(FieldKind::Secret),
-        Screen::EnterPath => Some(FieldKind::Path),
+        Screen::EnterPath(_) => Some(FieldKind::Path),
         _ => None,
     }
 }
@@ -270,10 +271,12 @@ pub enum Item {
         enabled: bool,
     },
     Volume(u8),
-    Target(u8),
     TypePath,
     Root(u8),
     NoRoot,
+    /// The disk screen's rows.
+    DiskDefault,
+    DiskBrowse,
 }
 
 impl Item {
@@ -285,9 +288,11 @@ impl Item {
         match *self {
             Item::Unlock { enabled: false, .. } => None,
             Item::Unlock { row, .. } => Some(Input::Select(row)),
-            Item::Volume(i) | Item::Target(i) | Item::Root(i) => Some(Input::Choose(i)),
+            Item::Volume(i) | Item::Root(i) => Some(Input::Choose(i)),
             Item::TypePath => Some(Input::TypePath),
             Item::NoRoot => Some(Input::NoRoot),
+            Item::DiskDefault => Some(Input::UseDefault),
+            Item::DiskBrowse => Some(Input::BrowseDisk),
         }
     }
 }
@@ -371,10 +376,9 @@ pub fn items(screen: &Screen) -> Items {
                 out.push(Item::Volume(i));
             }
         }
-        Screen::SelectTarget(t) => {
-            for i in 0..t.count.min(crate::platform::MAX_CHOICES as u8) {
-                out.push(Item::Target(i));
-            }
+        Screen::DiskStart { .. } => {
+            out.push(Item::DiskDefault);
+            out.push(Item::DiskBrowse);
             out.push(Item::TypePath);
         }
         Screen::SelectRoot { roots, .. } => {
@@ -506,6 +510,154 @@ impl Prompt {
             None => Reaction::Ignore,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The recovery browser
+
+/// The browser's interaction state: the highlighted row (the listing's
+/// entries, then "Type a path") and the page size the renderer reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Browser {
+    selected: usize,
+    page: usize,
+}
+
+/// The browser's rows: every entry, then "Type a path".
+pub fn browse_rows(dir: &DirView<'_>) -> usize {
+    dir.listing.len() + 1
+}
+
+/// Whether `path` is a filesystem root (no parent).
+pub fn is_root(path: &str) -> bool {
+    path.trim_end_matches('\\').is_empty()
+}
+
+impl Browser {
+    pub fn new(dir: &DirView<'_>) -> Browser {
+        Browser {
+            selected: dir.selected.min(browse_rows(dir) - 1),
+            page: 8,
+        }
+    }
+
+    pub const fn selected(&self) -> usize {
+        self.selected
+    }
+
+    /// Rows per page (PageUp/PageDown), as many as the screen shows.
+    pub fn set_page(&mut self, rows: usize) {
+        self.page = rows.max(1);
+    }
+
+    fn go(&mut self, to: usize, rows: usize) -> Reaction {
+        let to = to.min(rows - 1);
+        if to == self.selected {
+            Reaction::Ignore
+        } else {
+            self.selected = to;
+            Reaction::Redraw
+        }
+    }
+
+    pub fn feed(&mut self, dir: &DirView<'_>, key: Key) -> Reaction {
+        let rows = browse_rows(dir);
+        let entry = dir.listing.item(self.selected);
+        match key {
+            k if k == THEME_KEY => Reaction::NextTheme,
+            Key::Up => self.go(self.selected.saturating_sub(1), rows),
+            Key::Down => self.go(self.selected + 1, rows),
+            Key::PageUp => self.go(self.selected.saturating_sub(self.page), rows),
+            Key::PageDown => self.go(self.selected + self.page, rows),
+            Key::Home => self.go(0, rows),
+            Key::End => self.go(rows - 1, rows),
+            Key::Enter => match entry {
+                Some(_) => Reaction::Done(Input::Entry(self.selected as u16)),
+                None => Reaction::Done(Input::TypePath),
+            },
+            Key::Right => match entry {
+                Some(e) if e.kind == EntryKind::Dir => {
+                    Reaction::Done(Input::Entry(self.selected as u16))
+                }
+                _ => Reaction::Ignore,
+            },
+            Key::Left | Key::Backspace if !is_root(dir.path) => Reaction::Done(Input::Parent),
+            Key::Escape => Reaction::Done(Input::Escape),
+            Key::Char(c) if !c.is_control() => {
+                // Type to jump: the next entry starting with `c`.
+                let n = dir.listing.len();
+                let want = |i: usize| {
+                    dir.listing.item(i).is_some_and(|e| {
+                        e.name
+                            .chars()
+                            .next()
+                            .is_some_and(|f| f.to_lowercase().eq(c.to_lowercase()))
+                    })
+                };
+                match (1..=n)
+                    .map(|k| (self.selected + k) % n.max(1))
+                    .find(|&i| want(i))
+                {
+                    Some(i) => self.go(i, rows),
+                    None => Reaction::Ignore,
+                }
+            }
+            _ => Reaction::Ignore,
+        }
+    }
+}
+
+/// The text fallback's browser: the path, then up to ten rows around the
+/// highlighted one.
+pub fn render_browse(dir: &DirView<'_>, selected: usize, w: &mut dyn Write) -> fmt::Result {
+    let rows = browse_rows(dir);
+    write!(
+        w,
+        "\r\n   {}\r\n",
+        if dir.path.is_empty() { "\\" } else { dir.path }
+    )?;
+    let first = selected.saturating_sub(4).min(rows.saturating_sub(10));
+    for i in first..rows.min(first + 10) {
+        let mark = if i == selected { '>' } else { ' ' };
+        match dir.listing.item(i) {
+            Some(e) => {
+                let kind = match e.kind {
+                    EntryKind::Dir => "folder".into(),
+                    EntryKind::Disk => SizeKind("disk", e.bytes),
+                    EntryKind::Efi => SizeKind("UEFI application", e.bytes),
+                };
+                writeln_crlf(w, format_args!(" {mark} {}   {kind}", e.name))?;
+            }
+            None => writeln_crlf(w, format_args!(" {mark} Type a path"))?,
+        }
+    }
+    if dir.listing.more() {
+        w.write_str("   (only the first entries are shown)\r\n")?;
+    }
+    w.write_str("   Enter open   <- parent   Esc back\r\n")
+}
+
+struct SizeKind(&'static str, u64);
+
+impl From<&'static str> for SizeKind {
+    fn from(s: &'static str) -> Self {
+        SizeKind(s, u64::MAX)
+    }
+}
+
+impl fmt::Display for SizeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.1 == u64::MAX {
+            f.write_str(self.0)
+        } else {
+            write!(f, "{}, {}", self.0, Size::of(self.1))
+        }
+    }
+}
+
+fn writeln_crlf(w: &mut dyn Write, a: fmt::Arguments<'_>) -> fmt::Result {
+    w.write_fmt(a)?;
+    w.write_str("\r\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -721,28 +873,31 @@ pub fn render(screen: &Screen, w: &mut dyn Write) -> fmt::Result {
             }
             Ok(())
         }
-        Screen::SelectTarget(t) => {
-            w.write_str("   What should start?\r\n")?;
-            w.write_str(UNATTESTED)?;
-            w.write_str("\r\n")?;
-            for (i, e) in t.as_slice().iter().enumerate() {
-                let kind = match e.kind {
-                    TargetKind::Disk => "disk",
-                    TargetKind::EfiFile => "UEFI application",
-                };
-                write!(
-                    w,
-                    " {} \\paguro\\{}   {}   {kind}\r\n",
-                    i + 1,
-                    e.name.as_str(),
-                    Size::of(e.bytes)
-                )?;
-            }
-            write!(w, " {} Type a path\r\n", t.count as usize + 1)
+        Screen::Browse(level) => {
+            w.write_str(match level {
+                Level::Volume => "   Choose what to start\r\n",
+                Level::EfiPartition => "   Choose a UEFI application on the disk\r\n",
+            })?;
+            w.write_str(UNATTESTED)
         }
-        Screen::EnterPath => {
+        Screen::EnterPath(level) => {
             w.write_str(UNATTESTED)?;
-            w.write_str("   Path on the volume: ")
+            w.write_str(match level {
+                Level::Volume => "   Path on the volume: ",
+                Level::EfiPartition => "   Path on the disk's EFI partition: ",
+            })
+        }
+        Screen::DiskStart { disk } => {
+            write!(w, "   Start {}\r\n", disk.as_str())?;
+            w.write_str(UNATTESTED)?;
+            write!(
+                w,
+                "\r\n 1 Its default UEFI application   {}\r\n 2 Choose one on its EFI partition\r\n 3 Type a path\r\n",
+                paguro_core::config::DEFAULT_EFI
+            )
+        }
+        Screen::NoEfiPartition => {
+            w.write_str("   This disk has no EFI partition paguro can read.\r\n")
         }
         Screen::SelectRoot { efi, roots } => {
             write!(w, "   Which disk is the Linux root for {}?\r\n", efi.as_str())?;
@@ -809,7 +964,10 @@ pub fn render_field_line(f: &Field, buf: &[u8], w: &mut dyn Write) -> fmt::Resul
 /// Whether a screen waits for a key. "That did not unlock" is shown and the
 /// unlock list follows at once, so a retry costs no extra keystroke.
 pub const fn needs_key(screen: &Screen) -> bool {
-    !matches!(screen, Screen::Incorrect | Screen::PathRefused)
+    !matches!(
+        screen,
+        Screen::Incorrect | Screen::PathRefused | Screen::NoEfiPartition
+    )
 }
 
 /// Keys that act directly (without the list cursor). `None`: ignore the key.
@@ -865,13 +1023,12 @@ pub fn map_key(screen: &Screen, key: Key) -> Option<Input> {
             (_, Some('w')) => Some(Input::StartWindows),
             _ => digit(v.count).map(Input::Choose),
         },
-        Screen::SelectTarget(t) => match (key, c) {
+        Screen::DiskStart { .. } => match (key, c) {
             (Key::Escape, _) => Some(Input::Escape),
-            (_, Some('w')) => Some(Input::StartWindows),
-            _ => match digit(t.count.saturating_add(1)) {
-                Some(i) if i == t.count => Some(Input::TypePath),
-                other => other.map(Input::Choose),
-            },
+            (_, Some('1')) => Some(Input::UseDefault),
+            (_, Some('2')) => Some(Input::BrowseDisk),
+            (_, Some('3')) => Some(Input::TypePath),
+            _ => None,
         },
         Screen::SelectRoot { roots, .. } => match (key, c) {
             (Key::Escape, _) => Some(Input::Escape),
@@ -882,10 +1039,11 @@ pub fn map_key(screen: &Screen, key: Key) -> Option<Input> {
         },
         Screen::Incorrect
         | Screen::PathRefused
+        | Screen::NoEfiPartition
         | Screen::TpmLocked
         | Screen::Notice(Notice::SealOverPlaintext)
         | Screen::Notice(Notice::NotImplemented) => Some(Input::Continue),
-        Screen::EnterSecret { .. } | Screen::EnterPath => None,
+        Screen::EnterSecret { .. } | Screen::EnterPath(_) | Screen::Browse(_) => None,
     }
 }
 
@@ -893,7 +1051,7 @@ pub fn map_key(screen: &Screen, key: Key) -> Option<Input> {
 mod tests {
     extern crate std;
     use super::*;
-    use crate::platform::{Label, Target, TargetList, VolumeList};
+    use crate::platform::{DirListing, Label, Target, TargetList, VolumeList};
     use std::string::String;
 
     fn menu() -> UnlockMenu {
@@ -977,8 +1135,14 @@ mod tests {
             Screen::TpmLocked,
             Screen::NoInstallation,
             Screen::SelectVolume(volumes(2)),
-            Screen::SelectTarget(targets(&[("debian.vhd", TargetKind::Disk)])),
-            Screen::EnterPath,
+            Screen::DiskStart {
+                disk: Label::new("debian.vhd").unwrap(),
+            },
+            Screen::Browse(Level::Volume),
+            Screen::Browse(Level::EfiPartition),
+            Screen::EnterPath(Level::Volume),
+            Screen::EnterPath(Level::EfiPartition),
+            Screen::NoEfiPartition,
             Screen::SelectRoot {
                 efi: Label::new("rescue.efi").unwrap(),
                 roots: targets(&[("a.vhd", TargetKind::Disk)]),
@@ -1008,9 +1172,10 @@ mod tests {
         let vl = text(&Screen::SelectVolume(volumes(2)));
         assert!(vl.contains("Disk 1, partition 3   931 GB   BitLocker   Basic data partition"));
         assert!(vl.contains("unattested"));
-        let tl = text(&screens[14]);
+        let ds = text(&screens[14]);
         assert!(
-            tl.contains("\\paguro\\debian.vhd   214 GB   disk") && tl.contains("2 Type a path")
+            ds.contains("Start debian.vhd") && ds.contains("\\EFI\\BOOT\\"),
+            "{ds}"
         );
     }
 
@@ -1080,10 +1245,12 @@ mod tests {
         assert_eq!(map_key(&sv, Key::Char('3')), None);
         assert_eq!(map_key(&sv, Key::Escape), Some(Input::Escape));
         assert_eq!(map_key(&sv, Key::Enter), None);
-        let st = Screen::SelectTarget(targets(&[("a.vhd", TargetKind::Disk)]));
-        assert_eq!(map_key(&st, Key::Char('1')), Some(Input::Choose(0)));
-        assert_eq!(map_key(&st, Key::Char('2')), Some(Input::TypePath));
-        assert_eq!(map_key(&st, Key::Char('3')), None);
+        let ds = Screen::DiskStart { disk: Label::EMPTY };
+        assert_eq!(map_key(&ds, Key::Char('1')), Some(Input::UseDefault));
+        assert_eq!(map_key(&ds, Key::Char('2')), Some(Input::BrowseDisk));
+        assert_eq!(map_key(&ds, Key::Char('3')), Some(Input::TypePath));
+        assert_eq!(map_key(&ds, Key::Char('4')), None);
+        assert_eq!(map_key(&ds, Key::Escape), Some(Input::Escape));
         let sr = Screen::SelectRoot {
             efi: Label::EMPTY,
             roots: targets(&[("a.vhd", TargetKind::Disk), ("b.vhd", TargetKind::Disk)]),
@@ -1157,14 +1324,22 @@ mod tests {
     }
 
     #[test]
-    fn target_and_root_lists_end_with_their_escape_hatch() {
-        let st = Screen::SelectTarget(TargetList::new());
-        assert_eq!(items(&st).as_slice(), &[Item::TypePath]);
-        let mut buf = [0u8; 0];
-        let mut p = Prompt::new(&st, &mut buf);
+    fn disk_and_root_lists() {
+        let ds = Screen::DiskStart { disk: Label::EMPTY };
         assert_eq!(
-            p.feed(&st, Key::Enter, &mut buf),
-            Reaction::Done(Input::TypePath)
+            items(&ds).as_slice(),
+            &[Item::DiskDefault, Item::DiskBrowse, Item::TypePath]
+        );
+        let mut buf = [0u8; 0];
+        let mut p = Prompt::new(&ds, &mut buf);
+        assert_eq!(
+            p.feed(&ds, Key::Enter, &mut buf),
+            Reaction::Done(Input::UseDefault)
+        );
+        p.feed(&ds, Key::Down, &mut buf);
+        assert_eq!(
+            p.feed(&ds, Key::Enter, &mut buf),
+            Reaction::Done(Input::BrowseDisk)
         );
         let sr = Screen::SelectRoot {
             efi: Label::EMPTY,
@@ -1282,7 +1457,7 @@ mod tests {
 
     #[test]
     fn prompt_turns_fields_into_inputs() {
-        let s = Screen::EnterPath;
+        let s = Screen::EnterPath(Level::Volume);
         let mut buf = [0u8; 32];
         let mut p = Prompt::new(&s, &mut buf);
         for c in "\\paguro\\x.efi".chars() {
@@ -1325,5 +1500,159 @@ mod tests {
         assert_eq!(classify_path("\\paguro\\R.EFI"), TargetKind::EfiFile);
         assert_eq!(classify_path("\\paguro\\r.vhd"), TargetKind::Disk);
         assert_eq!(classify_path("efi"), TargetKind::Disk);
+    }
+
+    fn utf16(s: &str) -> std::vec::Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    fn listing(level: Level, names: &[(&str, bool)]) -> std::boxed::Box<DirListing> {
+        let mut d = std::boxed::Box::new(DirListing::new());
+        d.clear(level);
+        for (n, dir) in names {
+            assert!(d.push(&utf16(n), *dir, 1 << 20));
+        }
+        d.sort();
+        d
+    }
+
+    #[test]
+    fn listings_filter_sort_and_bound() {
+        use crate::platform::Listing;
+        let d = listing(
+            Level::Volume,
+            &[
+                ("zeta.vhd", false),
+                ("Alpha.EFI", false),
+                ("notes.txt", false),
+                ("beta", true),
+                ("$MFT", false),
+                (".", true),
+                ("..", true),
+                ("Arch.img", false),
+                ("disk.RAW", false),
+                ("a.vhdx", false),
+                ("Zdir", true),
+            ],
+        );
+        let names: std::vec::Vec<_> = (0..d.len()).map(|i| d.item(i).unwrap().name).collect();
+        assert_eq!(
+            names,
+            [
+                "beta",
+                "Zdir",
+                "a.vhdx",
+                "Alpha.EFI",
+                "Arch.img",
+                "disk.RAW",
+                "zeta.vhd"
+            ],
+            "folders first, then case-insensitive"
+        );
+        assert_eq!(d.item(3).unwrap().kind, EntryKind::Efi);
+        assert_eq!(d.item(4).unwrap().kind, EntryKind::Disk);
+        assert_eq!(d.find("disk.RAW"), Some(5));
+        // The EFI partition shows folders and UEFI images only.
+        let f = listing(
+            Level::EfiPartition,
+            &[("x.vhd", false), ("BOOTX64.EFI", false), ("EFI", true)],
+        );
+        assert_eq!(f.len(), 2);
+        // Bad names are skipped, not truncated.
+        let mut d = std::boxed::Box::new(DirListing::new());
+        d.clear(Level::Volume);
+        assert!(
+            d.push(&[0xd800, b'a' as u16], false, 0),
+            "unpaired surrogate"
+        );
+        assert!(d.push(&utf16("a\\b.efi"), false, 0));
+        assert!(d.push(&utf16("tab\t.efi"), false, 0));
+        assert!(
+            d.push(&std::vec![b'a' as u16; 256], true, 0),
+            "over 255 units"
+        );
+        assert_eq!(d.len(), 0);
+        // Full: the rest is "more".
+        for i in 0..crate::platform::MAX_DIR_ENTRIES {
+            assert!(d.push(&utf16(&std::format!("d{i}")), true, 0));
+        }
+        assert!(!d.more());
+        assert!(!d.push(&utf16("one-more"), true, 0));
+        assert!(d.more());
+        assert_eq!(d.len(), crate::platform::MAX_DIR_ENTRIES);
+    }
+
+    #[test]
+    fn browser_keys() {
+        let d = listing(
+            Level::Volume,
+            &[
+                ("boot", true),
+                ("efi", true),
+                ("arch.vhd", false),
+                ("rescue.efi", false),
+            ],
+        );
+        let view = DirView {
+            path: "\\paguro",
+            listing: &*d,
+            selected: 0,
+        };
+        let mut b = Browser::new(&view);
+        assert_eq!(b.feed(&view, Key::Up), Reaction::Ignore);
+        assert_eq!(b.feed(&view, Key::Down), Reaction::Redraw);
+        assert_eq!(
+            b.feed(&view, Key::Right),
+            Reaction::Done(Input::Entry(1)),
+            "open a folder"
+        );
+        assert_eq!(
+            b.feed(&view, Key::Char('R')),
+            Reaction::Redraw,
+            "type to jump"
+        );
+        assert_eq!(b.selected(), 3);
+        assert_eq!(
+            b.feed(&view, Key::Right),
+            Reaction::Ignore,
+            "a file does not open with ->"
+        );
+        assert_eq!(b.feed(&view, Key::Enter), Reaction::Done(Input::Entry(3)));
+        assert_eq!(b.feed(&view, Key::End), Reaction::Redraw);
+        assert_eq!(b.feed(&view, Key::Enter), Reaction::Done(Input::TypePath));
+        b.set_page(2);
+        assert_eq!(b.feed(&view, Key::PageUp), Reaction::Redraw);
+        assert_eq!(b.selected(), 2);
+        assert_eq!(b.feed(&view, Key::Home), Reaction::Redraw);
+        assert_eq!(b.feed(&view, Key::PageDown), Reaction::Redraw);
+        assert_eq!(b.selected(), 2);
+        assert_eq!(b.feed(&view, Key::Left), Reaction::Done(Input::Parent));
+        assert_eq!(b.feed(&view, Key::Backspace), Reaction::Done(Input::Parent));
+        assert_eq!(b.feed(&view, Key::Escape), Reaction::Done(Input::Escape));
+        assert_eq!(b.feed(&view, Key::Char('q')), Reaction::Ignore);
+        assert_eq!(b.feed(&view, THEME_KEY), Reaction::NextTheme);
+        let root = DirView { path: "\\", ..view };
+        assert_eq!(
+            b.feed(&root, Key::Left),
+            Reaction::Ignore,
+            "no parent at the root"
+        );
+        // The start row is clamped; an empty folder has only "Type a path".
+        let empty = listing(Level::Volume, &[]);
+        let ev = DirView {
+            path: "\\x",
+            listing: &*empty,
+            selected: 9,
+        };
+        let mut b = Browser::new(&ev);
+        assert_eq!(b.selected(), 0);
+        assert_eq!(b.feed(&ev, Key::Enter), Reaction::Done(Input::TypePath));
+        let mut out = String::new();
+        render_browse(&view, 3, &mut out).unwrap();
+        assert!(
+            out.contains(" > rescue.efi   UEFI application, 1.0 MB"),
+            "{out}"
+        );
+        assert!(out.contains("   boot   folder"));
     }
 }

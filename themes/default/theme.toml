@@ -16,16 +16,17 @@ scales = [0.7, 0.85, 1.0, 1.4, 2.0]
 regular = "fonts/Inter-Regular.ttf"
 semibold = "fonts/Inter-SemiBold.ttf"
 
-# Text styles. `line` is the line height; `charset = "latin1"` rasterises all
-# of Latin-1 (required for `label` and `field`, which show typed text and
-# file names), otherwise only the characters the strings drawn in the style
-# use, plus digits and a few separators.
+# Text styles. `line` is the line height. `charset` is what is rasterised
+# beyond the characters of the strings drawn in the style (plus digits and
+# a few separators): "ascii" (required for `detail`, which shows the default
+# UEFI path) or "latin1" (required for `label` and `field`, which show file
+# names and typed text).
 [text]
 brand = { font = "semibold", size = 24, line = 30 }
 title = { font = "semibold", size = 34, line = 44 }
 body = { font = "regular", size = 19, line = 29 }
 label = { font = "regular", size = 20, line = 28, charset = "latin1" }
-detail = { font = "regular", size = 16, line = 24 }
+detail = { font = "regular", size = 16, line = 24, charset = "ascii" }
 # Same as `label`: identical styles share their glyphs in the binary.
 field = { font = "regular", size = 20, line = 28, charset = "latin1" }
 hint = { font = "regular", size = 15, line = 22 }
@@ -66,7 +67,7 @@ scale_bias = 0
 
 # Layout defaults for every screen. [primitive.<name>] (list, field,
 # message) and then [screen.<name>] (unlock, secret, recovery_key, path,
-# message, volumes, targets, roots) override any subset of these keys.
+# message, volumes, browser, roots, disk) override any subset of these keys.
 [layout]
 margin = [44, 56]
 show_logo = true

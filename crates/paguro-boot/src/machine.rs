@@ -14,8 +14,9 @@ use zeroize::Zeroize;
 
 use crate::names;
 use crate::platform::{
-    Grey, Hex, Input, Label, Notice, Platform, PlatformError, Row, Screen, Target, TargetKind,
-    TargetList, UnlockMenu, VolumeChoice, VolumeFormat, VolumeList, attrs,
+    DirListing, DirView, EntryKind, Grey, Hex, Input, Label, Level, Listing, Notice, Platform,
+    PlatformError, Row, Screen, Target, TargetKind, TargetList, UnlockMenu, VolumeChoice,
+    VolumeFormat, VolumeList, attrs,
 };
 use crate::tpm::{self, Tpm};
 use crate::ui;
@@ -180,6 +181,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             handoff,
             secret,
             path,
+            dir,
             fvek_blob,
             created,
             located,
@@ -275,16 +277,18 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             // Recovery never reads the configuration: what to boot is chosen
             // on screen (INTERFACES.md §13.4, steps 2 and 3).
             let mut chosen = Chosen::new();
-            go!(self.choose_target(path, var, &mut chosen));
+            go!(self.choose_target(path, dir, var, &mut chosen));
             let e = chosen.entry(part.guid);
-            self.log(format_args!(
-                "paguro: recovery target {} (root {})",
-                match e.efi {
-                    Efi::Disk { disk, .. } => disk,
-                    Efi::File(f) => f,
-                },
-                e.root.unwrap_or("none")
-            ));
+            match e.efi {
+                Efi::Disk { disk, path } => self.log(format_args!(
+                    "paguro: recovery target {disk} efi {path} (root {})",
+                    e.root.unwrap_or("none")
+                )),
+                Efi::File(f) => self.log(format_args!(
+                    "paguro: recovery target {f} (root {})",
+                    e.root.unwrap_or("none")
+                )),
+            }
             self.v.locate(self.p, Some(&e), located)?;
         } else {
             let entry = cfg.as_ref().and(entry);
@@ -725,86 +729,168 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         Ok(Step::Go((c.part, c.kind)))
     }
 
-    /// Recovery, steps 2 and 3 (INTERFACES.md §13.4): what to boot from the
-    /// unlocked volume's `\paguro\` (or a typed path), and for an `efi_file`
-    /// the root hint — the only disk candidate, a choice among several, or
-    /// none. A single entry is taken silently (DESIGN.md §4.1: each step is
-    /// skipped when exactly one candidate qualifies) until the user backs out
-    /// of a later step.
+    /// A path typed on `level`, checked; `None` after Esc or a refused path
+    /// (which says so). The buffer is wiped either way.
+    fn typed_path(&mut self, level: Level, path: &mut [u8], out: &mut PathText) -> Option<()> {
+        let got = match self.p.prompt(&Screen::EnterPath(level), path) {
+            Input::Secret(n) => path.get(..n).and_then(|b| core::str::from_utf8(b).ok()),
+            _ => None,
+        };
+        let ok = match got {
+            Some(t) if config::check_path(t).is_ok() => out.set(t),
+            Some(_) => false,
+            None => {
+                path.zeroize();
+                return None;
+            }
+        };
+        path.zeroize();
+        if !ok {
+            self.log(format_args!("paguro: typed path refused"));
+            self.p.prompt(&Screen::PathRefused, &mut []);
+            return None;
+        }
+        Some(())
+    }
+
+    /// Recovery, steps 2 and 3 (INTERFACES.md §13.4): browse the unlocked
+    /// volume from `\paguro\` (or type a path) for a disk or a UEFI image.
+    /// A disk is its own root, and starts its default UEFI image or one
+    /// chosen on its EFI partition (browsed or typed); a UEFI image gets a
+    /// root hint — the only disk in `\paguro\`, a choice among several, or
+    /// none. When `\paguro\` holds exactly one file and nothing else it is
+    /// taken silently (a disk with its default image; DESIGN.md §4.1: each
+    /// step is skipped when exactly one candidate qualifies) until the user
+    /// backs out of a later step.
     fn choose_target(
         &mut self,
-        path: &mut [u8],
+        typed: &mut [u8],
+        dir: &mut DirListing,
         var: &mut [u8],
         out: &mut Chosen,
     ) -> Result<Step<()>, BootError> {
-        let mut list = TargetList::new();
-        self.v.boot_targets(self.p, &mut list)?;
+        dir.clear(Level::Volume);
+        self.v.list_dir(self.p, PAGURO_DIR, dir)?;
+        dir.sort();
+        let mut roots = TargetList::new();
+        for i in 0..dir.len() {
+            let Some(e) = dir.item(i).filter(|e| e.kind == EntryKind::Disk) else {
+                continue;
+            };
+            if let Some(name) = Label::new(e.name) {
+                roots.push(Target {
+                    name,
+                    bytes: e.bytes,
+                    kind: TargetKind::Disk,
+                });
+            }
+        }
         self.log(format_args!(
-            "paguro: {} boot target(s) in \\paguro\\",
-            list.count
+            "paguro: {} entries in \\paguro\\, {} disk(s)",
+            dir.len(),
+            roots.count
         ));
-        let mut auto = true;
+        let mut auto = dir.len() == 1 && dir.item(0).is_some_and(|e| e.kind != EntryKind::Dir);
+        let mut cwd = PathText::new();
+        cwd.set(PAGURO_DIR);
+        let mut came_from = PathText::new();
         loop {
-            // Step 2: what to boot.
-            let kind = match (auto, list.count) {
-                (true, 1) => {
-                    let t = list.get(0).copied().ok_or(BootError::NoVolume)?;
-                    out.set_target(&t);
-                    t.kind
+            // Step 2: a disk or a UEFI image on the volume.
+            let kind = if auto {
+                let Some(e) = dir.item(0) else {
+                    return Err(BootError::NoVolume);
+                };
+                if !out.efi.join(PAGURO_DIR, e.name) {
+                    return Err(BootError::NoVolume);
                 }
-                _ => match self.p.prompt(&Screen::SelectTarget(list), &mut []) {
-                    Input::Choose(i) => {
-                        let Some(t) = list.get(usize::from(i)).copied() else {
+                if e.kind == EntryKind::Disk {
+                    // Nothing asked: the default image, as on a normal boot.
+                    out.fat.clear();
+                    out.kind = TargetKind::Disk;
+                    out.root_is_efi();
+                    return Ok(Step::Go(()));
+                }
+                auto = false;
+                TargetKind::EfiFile
+            } else {
+                dir.clear(Level::Volume);
+                self.v.list_dir(self.p, cwd.as_str(), dir)?;
+                dir.sort();
+                let selected = came_from
+                    .get()
+                    .and_then(|n| dir.find(n.rsplit('\\').next().unwrap_or(n)))
+                    .unwrap_or(0);
+                came_from.clear();
+                let view = DirView {
+                    path: cwd.as_str(),
+                    listing: dir,
+                    selected,
+                };
+                match self.p.prompt_browse(&Screen::Browse(Level::Volume), &view) {
+                    Input::Entry(i) => {
+                        let Some(e) = dir.item(usize::from(i)) else {
                             continue;
                         };
-                        out.set_target(&t);
-                        t.kind
+                        match e.kind {
+                            EntryKind::Dir => {
+                                if !cwd.push(e.name) {
+                                    self.p.prompt(&Screen::PathRefused, &mut []);
+                                }
+                                continue;
+                            }
+                            EntryKind::Disk | EntryKind::Efi => {
+                                if !out.efi.join(cwd.as_str(), e.name) {
+                                    self.p.prompt(&Screen::PathRefused, &mut []);
+                                    continue;
+                                }
+                                if e.kind == EntryKind::Disk {
+                                    TargetKind::Disk
+                                } else {
+                                    TargetKind::EfiFile
+                                }
+                            }
+                        }
+                    }
+                    Input::Parent => {
+                        came_from = cwd;
+                        if !cwd.pop() {
+                            came_from.clear();
+                        }
+                        continue;
                     }
                     Input::TypePath => {
-                        let typed = match self.p.prompt(&Screen::EnterPath, path) {
-                            Input::Secret(n) => {
-                                path.get(..n).and_then(|b| core::str::from_utf8(b).ok())
-                            }
-                            _ => None,
-                        };
-                        let Some(typed) = typed else {
-                            path.zeroize();
-                            auto = false;
-                            continue;
-                        };
-                        let ok = config::check_path(typed).is_ok() && out.set_path(typed);
-                        let kind = ui::classify_path(typed);
-                        path.zeroize();
-                        if !ok {
-                            self.log(format_args!("paguro: typed path refused"));
-                            self.p.prompt(&Screen::PathRefused, &mut []);
-                            auto = false;
+                        if self
+                            .typed_path(Level::Volume, typed, &mut out.efi)
+                            .is_none()
+                        {
                             continue;
                         }
-                        kind
+                        ui::classify_path(out.efi.as_str())
                     }
                     Input::StartWindows => return Ok(Step::Done(self.start_windows(var))),
                     _ => return Err(BootError::UserAbort),
-                },
+                }
             };
-            // Step 3: a disk is its own root; an efi_file gets a hint.
+            out.kind = kind;
+            out.fat.clear();
+            out.root.clear();
+            // Backing out of step 3 returns to the browser, on this entry.
+            came_from = out.efi;
+            // Step 3.
             if kind == TargetKind::Disk {
-                out.root_is_efi();
-                return Ok(Step::Go(()));
-            }
-            let mut roots = TargetList::new();
-            for t in list
-                .as_slice()
-                .iter()
-                .filter(|t| t.kind == TargetKind::Disk)
-            {
-                roots.push(*t);
+                match self.disk_start(typed, dir, out)? {
+                    true => {
+                        out.root_is_efi();
+                        return Ok(Step::Go(()));
+                    }
+                    false => continue,
+                }
             }
             match roots.count {
                 0 => return Ok(Step::Go(())),
                 1 => {
                     if let Some(r) = roots.get(0) {
-                        out.set_root(r);
+                        out.root.join(PAGURO_DIR, r.name.as_str());
                     }
                     return Ok(Step::Go(()));
                 }
@@ -816,15 +902,122 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
                     match self.p.prompt(&screen, &mut []) {
                         Input::Choose(i) => {
                             if let Some(r) = roots.get(usize::from(i)) {
-                                out.set_root(r);
+                                out.root.join(PAGURO_DIR, r.name.as_str());
                                 return Ok(Step::Go(()));
                             }
                         }
                         Input::NoRoot => return Ok(Step::Go(())),
                         _ => {}
                     }
-                    auto = false;
                 }
+            }
+        }
+    }
+
+    /// A disk was chosen: its default UEFI image, one browsed on its EFI
+    /// partition, or a typed one. `false`: the user went back.
+    fn disk_start(
+        &mut self,
+        typed: &mut [u8],
+        dir: &mut DirListing,
+        out: &mut Chosen,
+    ) -> Result<bool, BootError> {
+        loop {
+            let screen = Screen::DiskStart {
+                disk: Label::truncated(out.efi_name()),
+            };
+            match self.p.prompt(&screen, &mut []) {
+                Input::UseDefault => {
+                    out.fat.clear();
+                    return Ok(true);
+                }
+                Input::TypePath => {
+                    if self
+                        .typed_path(Level::EfiPartition, typed, &mut out.fat)
+                        .is_some()
+                    {
+                        return Ok(true);
+                    }
+                }
+                Input::BrowseDisk => {
+                    if self.browse_efi_partition(typed, dir, out)? {
+                        return Ok(true);
+                    }
+                }
+                _ => return Ok(false),
+            }
+        }
+    }
+
+    /// The browser on the chosen disk's EFI partition: folders and UEFI
+    /// images. `false`: back to the disk screen.
+    fn browse_efi_partition(
+        &mut self,
+        typed: &mut [u8],
+        dir: &mut DirListing,
+        out: &mut Chosen,
+    ) -> Result<bool, BootError> {
+        let mut cwd = PathText::new();
+        cwd.set("\\");
+        let mut came_from = PathText::new();
+        loop {
+            dir.clear(Level::EfiPartition);
+            if !self
+                .v
+                .list_efi_dir(self.p, out.efi.as_str(), cwd.as_str(), dir)?
+            {
+                self.log(format_args!(
+                    "paguro: no EFI partition on {}",
+                    out.efi.as_str()
+                ));
+                self.p.prompt(&Screen::NoEfiPartition, &mut []);
+                return Ok(false);
+            }
+            dir.sort();
+            let selected = came_from
+                .get()
+                .and_then(|n| dir.find(n.rsplit('\\').next().unwrap_or(n)))
+                .unwrap_or(0);
+            came_from.clear();
+            let view = DirView {
+                path: cwd.as_str(),
+                listing: dir,
+                selected,
+            };
+            match self
+                .p
+                .prompt_browse(&Screen::Browse(Level::EfiPartition), &view)
+            {
+                Input::Entry(i) => {
+                    let Some(e) = dir.item(usize::from(i)) else {
+                        continue;
+                    };
+                    if e.kind == EntryKind::Dir {
+                        if !cwd.push(e.name) {
+                            self.p.prompt(&Screen::PathRefused, &mut []);
+                        }
+                        continue;
+                    }
+                    if out.fat.join(cwd.as_str(), e.name) {
+                        return Ok(true);
+                    }
+                    self.p.prompt(&Screen::PathRefused, &mut []);
+                }
+                Input::Parent => {
+                    came_from = cwd;
+                    if !cwd.pop() {
+                        came_from.clear();
+                    }
+                }
+                Input::TypePath => {
+                    if self
+                        .typed_path(Level::EfiPartition, typed, &mut out.fat)
+                        .is_some()
+                    {
+                        return Ok(true);
+                    }
+                }
+                _ => return Ok(false),
             }
         }
     }
@@ -1457,98 +1650,134 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
     }
 }
 
-/// Longest path recovery builds or accepts (`Buffers::path`).
-pub const PATH_MAX: usize = 256;
-const PAGURO_DIR: &str = "\\paguro\\";
+/// Longest path recovery builds or accepts (`Buffers::path`), as
+/// `paguro.ini` allows (INTERFACES.md §3.2).
+pub const PATH_MAX: usize = config::MAX_PATH_BYTES;
+const PAGURO_DIR: &str = "\\paguro";
 
-/// What recovery chose on screen: the UEFI image (a disk or an `efi_file`)
-/// and the root hint, as paths on the unlocked volume.
+/// An absolute backslash path in fixed memory, always valid by
+/// [`config::check_path`] (or empty, or the root `\`).
+#[derive(Clone, Copy)]
+struct PathText {
+    b: [u8; PATH_MAX],
+    n: usize,
+}
+
+impl PathText {
+    const fn new() -> Self {
+        PathText {
+            b: [0; PATH_MAX],
+            n: 0,
+        }
+    }
+    fn clear(&mut self) {
+        self.n = 0;
+    }
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(self.b.get(..self.n).unwrap_or(&[])).unwrap_or("")
+    }
+    fn get(&self) -> Option<&str> {
+        (self.n != 0).then(|| self.as_str())
+    }
+    /// Replace with `s`; `false` (unchanged) when it does not fit.
+    fn set(&mut self, s: &str) -> bool {
+        match self.b.get_mut(..s.len()) {
+            Some(d) => {
+                d.copy_from_slice(s.as_bytes());
+                self.n = s.len();
+                true
+            }
+            None => false,
+        }
+    }
+    /// `dir\name`, checked; `false` (unchanged) when the result is not a
+    /// usable path (too long, too deep, a forbidden character).
+    fn join(&mut self, dir: &str, name: &str) -> bool {
+        let mut t = PathText::new();
+        let dir = dir.trim_end_matches('\\');
+        let parts = [dir, "\\", name];
+        let mut n = 0usize;
+        for p in parts {
+            let Some(d) = t.b.get_mut(n..n + p.len()) else {
+                return false;
+            };
+            d.copy_from_slice(p.as_bytes());
+            n += p.len();
+        }
+        t.n = n;
+        if config::check_path(t.as_str()).is_err() {
+            return false;
+        }
+        *self = t;
+        true
+    }
+    /// Append a component.
+    fn push(&mut self, name: &str) -> bool {
+        let cur = *self;
+        self.join(cur.as_str(), name)
+    }
+    /// Drop the last component; `false` at the root.
+    fn pop(&mut self) -> bool {
+        let s = self.as_str();
+        match s.rfind('\\') {
+            Some(0) if s.len() > 1 => {
+                self.n = 1;
+                true
+            }
+            Some(i) if i > 0 => {
+                self.n = i;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// What recovery chose on screen, as paths: the disk or `efi_file` on the
+/// volume, the UEFI image on the disk's EFI partition (empty: the default),
+/// and the root hint (empty: none).
 struct Chosen {
-    efi: [u8; PATH_MAX],
-    efi_len: usize,
+    efi: PathText,
     kind: TargetKind,
-    root: [u8; PATH_MAX],
-    /// 0: no root hint.
-    root_len: usize,
+    fat: PathText,
+    root: PathText,
     name: [u8; 32],
 }
 
 impl Chosen {
     const fn new() -> Self {
         Chosen {
-            efi: [0; PATH_MAX],
-            efi_len: 0,
+            efi: PathText::new(),
             kind: TargetKind::Disk,
-            root: [0; PATH_MAX],
-            root_len: 0,
+            fat: PathText::new(),
+            root: PathText::new(),
             name: [0; 32],
         }
     }
 
-    fn put(dst: &mut [u8; PATH_MAX], parts: &[&str]) -> Option<usize> {
-        let mut n = 0usize;
-        for p in parts {
-            dst.get_mut(n..n + p.len())?.copy_from_slice(p.as_bytes());
-            n += p.len();
-        }
-        Some(n)
-    }
-
-    fn set_target(&mut self, t: &Target) {
-        self.efi_len = Self::put(&mut self.efi, &[PAGURO_DIR, t.name.as_str()]).unwrap_or(0);
-        self.kind = t.kind;
-        self.root_len = 0;
-    }
-
-    /// A typed path; `false` when it does not fit.
-    fn set_path(&mut self, p: &str) -> bool {
-        self.kind = ui::classify_path(p);
-        self.root_len = 0;
-        match Self::put(&mut self.efi, &[p]) {
-            Some(n) => {
-                self.efi_len = n;
-                true
-            }
-            None => false,
-        }
-    }
-
-    fn set_root(&mut self, t: &Target) {
-        self.root_len = Self::put(&mut self.root, &[PAGURO_DIR, t.name.as_str()]).unwrap_or(0);
-    }
-
     fn root_is_efi(&mut self) {
         self.root = self.efi;
-        self.root_len = self.efi_len;
-    }
-
-    fn efi_path(&self) -> &str {
-        core::str::from_utf8(self.efi.get(..self.efi_len).unwrap_or(&[])).unwrap_or("")
     }
 
     fn efi_name(&self) -> &str {
-        let p = self.efi_path();
+        let p = self.efi.as_str();
         p.rsplit('\\').next().unwrap_or(p)
     }
 
     fn entry(&mut self, volume: Guid) -> Entry<'_> {
         let mut name = [0u8; 32];
-        let n = ui::entry_name(self.efi_path(), &mut name, "recovery").len();
+        let n = ui::entry_name(self.efi.as_str(), &mut name, "recovery").len();
         self.name = name;
-        let efi = core::str::from_utf8(self.efi.get(..self.efi_len).unwrap_or(&[])).unwrap_or("");
-        let root = (self.root_len != 0).then(|| {
-            core::str::from_utf8(self.root.get(..self.root_len).unwrap_or(&[])).unwrap_or("")
-        });
         Entry {
             name: core::str::from_utf8(self.name.get(..n).unwrap_or(&[])).unwrap_or("recovery"),
             volume,
-            root,
+            root: self.root.get(),
             efi: match self.kind {
                 TargetKind::Disk => Efi::Disk {
-                    disk: efi,
-                    path: config::DEFAULT_EFI,
+                    disk: self.efi.as_str(),
+                    path: self.fat.get().unwrap_or(config::DEFAULT_EFI),
                 },
-                TargetKind::EfiFile => Efi::File(efi),
+                TargetKind::EfiFile => Efi::File(self.efi.as_str()),
             },
         }
     }

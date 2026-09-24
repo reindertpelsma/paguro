@@ -167,3 +167,34 @@ pub fn count_lines(font: &Font, s: &str, max: i32) -> usize {
     }
     n
 }
+
+/// How much of the *end* of `s` fits in `max` pixels after a leading
+/// ellipsis: the byte offset where the shown tail starts (0: all of it
+/// fits, no ellipsis). For paths, whose end matters most.
+pub fn fit_tail(font: &Font, s: &str, max: i32, ellipsis: char) -> usize {
+    if width(font, s) <= max {
+        return 0;
+    }
+    let room = max.saturating_sub(char_width(font, ellipsis));
+    let snap = |mut i: usize| {
+        while i < s.len() && !s.is_char_boundary(i) {
+            i += 1;
+        }
+        i
+    };
+    // The shown width only grows as the start moves left: bisect.
+    let (mut lo, mut hi) = (0usize, s.len());
+    while lo < hi {
+        let mut mid = snap(lo + (hi - lo) / 2);
+        if mid >= hi {
+            // `lo` is a character boundary: test it.
+            mid = lo;
+        }
+        if width(font, s.get(mid..).unwrap_or("")) <= room {
+            hi = mid;
+        } else {
+            lo = snap(mid + 1);
+        }
+    }
+    hi
+}

@@ -11,7 +11,9 @@
 
 use core::fmt::Write;
 
-use paguro_boot::platform::{Grey, Notice, Row, Screen, TargetKind, UnlockMenu, VolumeFormat};
+use paguro_boot::platform::{
+    DirView, EntryKind, Grey, Level, Notice, Row, Screen, UnlockMenu, VolumeFormat,
+};
 use paguro_boot::ui::{self, Field, FieldKind, Item, RECOVERY_DIGITS, RECOVERY_GROUP, Size, Unit};
 
 use crate::canvas::Rect;
@@ -31,22 +33,26 @@ pub const fn supported(w: u32, h: u32) -> bool {
 }
 
 /// A short message carried over from a screen that needs no key
-/// ([`Screen::Incorrect`], [`Screen::PathRefused`]) to the next one.
+/// ([`Screen::Incorrect`], [`Screen::PathRefused`],
+/// [`Screen::NoEfiPartition`]) to the next one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Toast {
     Incorrect,
     PathRefused,
+    NoEfiPartition,
 }
 
 /// The interaction state the picture depends on.
 #[derive(Clone, Copy, Debug)]
 pub struct View<'a> {
-    /// The highlighted list row.
+    /// The highlighted list row (the browser's row too).
     pub selected: usize,
     /// The text field and the buffer it edits.
     pub field: Option<Field>,
     pub buf: &'a [u8],
     pub toast: Option<Toast>,
+    /// The browsed directory ([`Screen::Browse`]).
+    pub dir: Option<DirView<'a>>,
 }
 
 impl View<'static> {
@@ -55,8 +61,12 @@ impl View<'static> {
         field: None,
         buf: &[],
         toast: None,
+        dir: None,
     };
 }
+
+/// Rows the browser shows at most, however tall the screen.
+pub const BROWSER_ROWS: usize = 10;
 
 pub fn kind(screen: &Screen) -> ScreenKind {
     match screen {
@@ -66,10 +76,11 @@ pub fn kind(screen: &Screen) -> ScreenKind {
             ..
         } => ScreenKind::RecoveryKey,
         Screen::EnterSecret { .. } => ScreenKind::Secret,
-        Screen::EnterPath => ScreenKind::Path,
+        Screen::EnterPath(_) => ScreenKind::Path,
         Screen::SelectVolume(_) => ScreenKind::Volumes,
-        Screen::SelectTarget(_) => ScreenKind::Targets,
+        Screen::Browse(_) => ScreenKind::Browser,
         Screen::SelectRoot { .. } => ScreenKind::Roots,
+        Screen::DiskStart { .. } => ScreenKind::Disk,
         _ => ScreenKind::Message,
     }
 }
@@ -92,6 +103,10 @@ enum BlockKind {
     Title,
     Para,
     Label,
+    /// One line in the label style (latin1): a disk's name.
+    Name,
+    /// The browser's path, cut at the front, and its position.
+    Crumb,
     List,
     Field,
     Actions,
@@ -377,6 +392,7 @@ fn describe<'a>(
         let s = match t {
             Toast::Incorrect => Str::Incorrect,
             Toast::PathRefused => Str::PathRefused,
+            Toast::NoEfiPartition => Str::NoEsp,
         };
         sp.block(text_block(
             BlockKind::Toast,
@@ -452,9 +468,13 @@ fn describe<'a>(
             );
             sp.hint(Str::KeyEsc, Str::HintBack);
         }
-        Screen::EnterPath => {
+        Screen::EnterPath(level) => {
             sp.unattested = true;
-            title(&mut sp, list, Str::PathTitle);
+            let (t, help) = match level {
+                Level::Volume => (Str::PathTitle, Str::PathHelp),
+                Level::EfiPartition => (Str::PathTitleEsp, Str::PathHelpEsp),
+            };
+            title(&mut sp, list, t);
             sp.block(text_block(
                 BlockKind::Label,
                 compose(list, theme, Str::PathLabel, &[], 0),
@@ -462,7 +482,7 @@ fn describe<'a>(
                 1,
             ));
             sp.block(field_block);
-            paras(&mut sp, list, theme, Str::PathHelp, &[], pal.muted);
+            paras(&mut sp, list, theme, help, &[], pal.muted);
             sp.hint(Str::KeyEnter, Str::HintContinue);
             sp.hint(Str::KeyEsc, Str::HintBack);
         }
@@ -473,18 +493,60 @@ fn describe<'a>(
             nav(&mut sp);
             sp.hint(Str::KeyW, Str::HintWindows);
         }
-        Screen::SelectTarget(t) => {
+        Screen::Browse(level) => {
             sp.unattested = true;
-            title(&mut sp, list, Str::TargetsTitle);
-            let body = if t.count == 0 {
-                Str::TargetsEmpty
-            } else {
-                Str::TargetsBody
-            };
-            paras(&mut sp, list, theme, body, &[], pal.muted);
+            title(
+                &mut sp,
+                list,
+                match level {
+                    Level::Volume => Str::BrowseTitle,
+                    Level::EfiPartition => Str::BrowseTitleEsp,
+                },
+            );
+            let path = view.dir.map_or("", |d| d.path);
+            sp.block(text_block(
+                BlockKind::Crumb,
+                TextSrc::Str(path),
+                pal.muted,
+                1,
+            ));
+            let empty = view.dir.is_none_or(|d| d.listing.is_empty());
+            if empty {
+                paras(&mut sp, list, theme, Str::BrowseEmpty, &[], pal.muted);
+            }
+            let mut lb = list_block;
+            lb.max = BROWSER_ROWS;
+            sp.block(lb);
+            if let Some(d) = view.dir.filter(|d| d.listing.more()) {
+                let n = d.listing.len() as u64;
+                paras(
+                    &mut sp,
+                    list,
+                    theme,
+                    Str::BrowseMore,
+                    &[Arg::Num(n)],
+                    pal.muted,
+                );
+            }
+            sp.hint(Str::KeyArrows, Str::HintSelect);
+            sp.hint(Str::KeyEnter, Str::HintOpen);
+            if view.dir.is_some_and(|d| !ui::is_root(d.path)) {
+                sp.hint(Str::KeyLeft, Str::HintParent);
+            }
+            sp.hint(Str::KeyEsc, Str::HintBack);
+        }
+        Screen::DiskStart { disk } => {
+            sp.unattested = true;
+            title(&mut sp, list, Str::DiskTitle);
+            sp.block(text_block(
+                BlockKind::Name,
+                TextSrc::Str(disk.as_str()),
+                pal.muted,
+                1,
+            ));
             sp.block(list_block);
             nav(&mut sp);
-            sp.hint(Str::KeyW, Str::HintWindows);
+            sp.hint(Str::KeyEsc, Str::HintBack);
         }
         Screen::SelectRoot { efi, .. } => {
             sp.unattested = true;
@@ -576,6 +638,11 @@ fn describe<'a>(
                 },
                 Screen::PathRefused => (
                     Str::PathRefused,
+                    None,
+                    [Some((Str::KeyEnter, Str::ActContinue)), None],
+                ),
+                Screen::NoEfiPartition => (
+                    Str::NoEsp,
                     None,
                     [Some((Str::KeyEnter, Str::ActContinue)), None],
                 ),
@@ -678,26 +745,21 @@ fn row_texts<'a>(
             );
             (label, joined(list, size, fmt))
         }
-        (Item::Target(i), Screen::SelectTarget(t)) => {
-            let Some(e) = t.get(usize::from(i)) else {
-                return (none, none);
-            };
-            let size = size_text(list, theme, e.bytes);
-            let k = compose(
-                list,
-                theme,
-                match e.kind {
-                    TargetKind::Disk => Str::TargetDisk,
-                    TargetKind::EfiFile => Str::TargetEfi,
-                },
-                &[],
-                0,
-            );
-            (TextSrc::Str(e.name.as_str()), joined(list, size, k))
-        }
+        (Item::TypePath, Screen::DiskStart { .. }) => (
+            compose(list, theme, Str::TypePath, &[], 0),
+            compose(list, theme, Str::TypePathEspWhy, &[], 0),
+        ),
         (Item::TypePath, _) => (
             compose(list, theme, Str::TypePath, &[], 0),
             compose(list, theme, Str::TypePathWhy, &[], 0),
+        ),
+        (Item::DiskDefault, _) => (
+            compose(list, theme, Str::DiskDefault, &[], 0),
+            TextSrc::Str(paguro_core::config::DEFAULT_EFI),
+        ),
+        (Item::DiskBrowse, _) => (
+            compose(list, theme, Str::DiskBrowse, &[], 0),
+            compose(list, theme, Str::DiskBrowseWhy, &[], 0),
         ),
         (Item::Root(i), Screen::SelectRoot { roots, .. }) => {
             let Some(e) = roots.get(usize::from(i)) else {
@@ -735,6 +797,45 @@ fn size_text<'a>(list: &mut DrawList<'a>, theme: &Theme, bytes: u64) -> TextSrc<
     };
     write_lits(&mut c, theme.tpl(u).0);
     c.finish()
+}
+
+/// Label and detail of browser row `i` (the entries, then "Type a path").
+fn dir_row_texts<'a>(
+    dir: &DirView<'a>,
+    level: Level,
+    i: usize,
+    theme: &Theme,
+    list: &mut DrawList<'a>,
+) -> (TextSrc<'a>, TextSrc<'a>) {
+    let Some(e) = dir.listing.item(i) else {
+        let why = match level {
+            Level::Volume => Str::TypePathWhy,
+            Level::EfiPartition => Str::TypePathEspWhy,
+        };
+        return (
+            compose(list, theme, Str::TypePath, &[], 0),
+            compose(list, theme, why, &[], 0),
+        );
+    };
+    let detail = match e.kind {
+        EntryKind::Dir => compose(list, theme, Str::EntryFolder, &[], 0),
+        EntryKind::Disk | EntryKind::Efi => {
+            let size = size_text(list, theme, e.bytes);
+            let k = compose(
+                list,
+                theme,
+                if e.kind == EntryKind::Disk {
+                    Str::TargetDisk
+                } else {
+                    Str::TargetEfi
+                },
+                &[],
+                0,
+            );
+            joined(list, k, size)
+        }
+    };
+    (TextSrc::Str(e.name), detail)
 }
 
 fn password_detail<'a>(
@@ -850,6 +951,7 @@ fn block_height(
             line_h(d.body) * n.clamp(b.min, b.max) as i32
         }
         BlockKind::Label => line_h(d.detail),
+        BlockKind::Name | BlockKind::Crumb => line_h(d.label),
         BlockKind::List => {
             let n = n_items.clamp(b.min, b.max) as i32;
             n * d.row_h + (n - 1).max(0) * d.row_gap
@@ -877,7 +979,8 @@ fn bar_inset(ctx: &Ctx<'_>) -> i32 {
 fn gap_between(ctx: &Ctx<'_>, a: BlockKind, b: BlockKind) -> i32 {
     let s = &ctx.lay.spacing;
     ctx.px(match (a, b) {
-        (BlockKind::Title, BlockKind::Para) => s.title,
+        (BlockKind::Title, BlockKind::Para | BlockKind::Crumb | BlockKind::Name) => s.title,
+        (BlockKind::Crumb, BlockKind::Para | BlockKind::List) => s.paragraph,
         (BlockKind::Para, BlockKind::Para) => s.paragraph,
         (BlockKind::Label, BlockKind::Field) => s.paragraph / 2,
         (BlockKind::Field, BlockKind::Para) => s.paragraph + s.paragraph / 2,
@@ -1122,7 +1225,8 @@ pub fn layout<'a>(
     let cw = ctx.px(lay.content.max_width).min(safe.w);
     let band = Rect::new(safe.x, top, safe.w, (bottom - top).max(0));
 
-    let items = ui::items(screen);
+    let rows = Rows::of(screen, view);
+    let n_rows = rows.len();
     let n_actions = spec.actions.iter().flatten().count();
     let fkind = view
         .field
@@ -1136,7 +1240,7 @@ pub fn layout<'a>(
             if let Some(p) = prev {
                 total += gap_between(&ctx, p, b.kind);
             }
-            total += block_height(&ctx, &d, list, b, cw, items.len(), n_actions, fkind);
+            total += block_height(&ctx, &d, list, b, cw, n_rows, n_actions, fkind);
             prev = Some(b.kind);
         }
         total
@@ -1165,7 +1269,7 @@ pub fn layout<'a>(
         }
         for b in blocks.iter_mut().flatten() {
             if b.kind == BlockKind::List {
-                let cur = items.len().min(b.max);
+                let cur = n_rows.min(b.max);
                 if cur > 1 {
                     b.max = cur - 1;
                     shrunk = true;
@@ -1211,7 +1315,7 @@ pub fn layout<'a>(
         if let Some(p) = prev {
             y += gap_between(&ctx, p, b.kind);
         }
-        let bh = block_height(&ctx, &d, list, b, cw, items.len(), n_actions, fkind);
+        let bh = block_height(&ctx, &d, list, b, cw, n_rows, n_actions, fkind);
         if y + bh > band.bottom() {
             break;
         }
@@ -1223,7 +1327,20 @@ pub fn layout<'a>(
             BlockKind::Label => {
                 line(list, &ctx, d.detail, b.src, b.color, r, lay.content.align);
             }
-            BlockKind::List => draw_list(list, &ctx, &d, screen, view, &items, b.max, r),
+            BlockKind::List => draw_list(list, &ctx, &d, &rows, view.selected, b.max, r),
+            BlockKind::Name => {
+                line(list, &ctx, d.label, b.src, b.color, r, lay.content.align);
+            }
+            BlockKind::Crumb => {
+                // The list decides the page: lay it out as it will be drawn.
+                let visible = blocks
+                    .iter()
+                    .flatten()
+                    .find(|x| x.kind == BlockKind::List)
+                    .map_or(1, |x| n_rows.min(x.max).max(1));
+                list.page = visible;
+                draw_crumb(list, &ctx, &d, b, &rows, view.selected, r);
+            }
             BlockKind::Field => {
                 if let Some(f) = view.field {
                     draw_field(list, &ctx, &d, &f, view.buf, r, cw);
@@ -1340,20 +1457,62 @@ fn draw_para<'a>(
     }
 }
 
+/// Where a list's rows come from: a screen's items, or a directory.
+#[derive(Clone, Copy)]
+enum Rows<'a> {
+    Items(&'a Screen, ui::Items),
+    Dir(DirView<'a>, Level),
+}
+
+impl<'a> Rows<'a> {
+    fn of(screen: &'a Screen, view: &View<'a>) -> Rows<'a> {
+        match (screen, view.dir) {
+            (Screen::Browse(level), Some(d)) => Rows::Dir(d, *level),
+            _ => Rows::Items(screen, ui::items(screen)),
+        }
+    }
+    fn len(&self) -> usize {
+        match self {
+            Rows::Items(_, it) => it.len(),
+            Rows::Dir(d, _) => ui::browse_rows(d),
+        }
+    }
+    fn enabled(&self, i: usize) -> bool {
+        match self {
+            Rows::Items(_, it) => it.get(i).is_some_and(|x| x.enabled()),
+            Rows::Dir(..) => true,
+        }
+    }
+    fn texts(
+        &self,
+        i: usize,
+        theme: &Theme,
+        list: &mut DrawList<'a>,
+    ) -> (TextSrc<'a>, TextSrc<'a>) {
+        match *self {
+            Rows::Items(screen, it) => match it.get(i) {
+                Some(item) => row_texts(screen, item, theme, list),
+                None => (TextSrc::Str(""), TextSrc::Str("")),
+            },
+            Rows::Dir(d, level) => dir_row_texts(&d, level, i, theme, list),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_list<'a>(
     list: &mut DrawList<'a>,
     ctx: &Ctx<'_>,
     d: &Dims,
-    screen: &'a Screen,
-    view: &View<'a>,
-    items: &ui::Items,
+    rows: &Rows<'a>,
+    selected: usize,
     visible: usize,
     r: Rect,
 ) {
-    let n = items.len();
+    let n = rows.len();
     let visible = visible.min(n).max(1);
-    let sel = view.selected.min(n.saturating_sub(1));
+    list.page = visible;
+    let sel = selected.min(n.saturating_sub(1));
     let first = sel
         .saturating_sub(visible - 1)
         .min(n.saturating_sub(visible));
@@ -1361,11 +1520,9 @@ fn draw_list<'a>(
     let pad = ctx.px(lay.row.padding);
     let marker = ctx.px(lay.row.marker);
     for (k, idx) in (first..(first + visible).min(n)).enumerate() {
-        let Some(item) = items.get(idx) else {
-            break;
-        };
         let rr = Rect::new(r.x, r.y + k as i32 * (d.row_h + d.row_gap), r.w, d.row_h);
-        let selected = idx == sel && item.enabled();
+        let enabled = rows.enabled(idx);
+        let selected = idx == sel && enabled;
         let radius = ctx.px(lay.row.radius);
         list.push(Cmd::Fill {
             r: rr,
@@ -1399,8 +1556,7 @@ fn draw_list<'a>(
             }
         }
         let inner_w = rr.right() - pad - inner_x;
-        let (label, detail) = row_texts(screen, item, ctx.theme, list);
-        let enabled = item.enabled();
+        let (label, detail) = rows.texts(idx, ctx.theme, list);
         let (lc, dc) = if enabled {
             (ctx.pal.text, ctx.pal.muted)
         } else {
@@ -1443,6 +1599,64 @@ fn draw_list<'a>(
             );
         }
     }
+}
+
+/// The browser's path (cut at the front, so the folder shown is the
+/// current one) and, when the list scrolls, the position in it.
+fn draw_crumb<'a>(
+    list: &mut DrawList<'a>,
+    ctx: &Ctx<'_>,
+    d: &Dims,
+    b: &Block<'a>,
+    rows: &Rows<'a>,
+    selected: usize,
+    r: Rect,
+) {
+    let n = rows.len();
+    let mut pw = r.w;
+    if n > list.page.max(1) && list.page > 0 {
+        let mut c = list.compose();
+        let _ = write!(c, "{} / {}", selected.min(n - 1) + 1, n);
+        let pos = c.finish();
+        let w = list.as_str(&pos).map_or(0, |s| text::width(d.detail, s));
+        if w + ctx.px(ctx.lay.row.padding) < r.w / 2 {
+            let dh = line_h(d.detail);
+            line(
+                list,
+                ctx,
+                d.detail,
+                pos,
+                ctx.pal.faint,
+                Rect::new(r.right() - w, r.y + (r.h - dh) / 2, w, dh),
+                Align::Right,
+            );
+            pw = r.w - w - ctx.px(ctx.lay.row.padding);
+        }
+    }
+    let path: &'a str = match b.src {
+        TextSrc::Str(p) => p,
+        _ => "",
+    };
+    let ell = ctx.theme.options.ellipsis;
+    let start = text::fit_tail(d.label, path, pw, ell);
+    let src = if start == 0 {
+        b.src
+    } else {
+        let mut c = list.compose();
+        let _ = c.write_char(ell);
+        let _ = c.write_str(path.get(start..).unwrap_or(""));
+        c.finish()
+    };
+    let lh = line_h(d.label);
+    line(
+        list,
+        ctx,
+        d.label,
+        src,
+        b.color,
+        Rect::new(r.x, r.y + (r.h - lh) / 2, pw, lh),
+        Align::Left,
+    );
 }
 
 fn draw_actions<'a>(

@@ -145,8 +145,9 @@ impl Params {
 /// full buffer means the file is too large (INTERFACES.md §3.1).
 pub const INI_BUF: usize = ini::MAX_LEN + 1;
 
-/// Every buffer the stage machine uses (~190 KiB): too large for a UEFI
-/// stack, so the caller allocates it.
+/// Every buffer the stage machine uses (~390 KiB, half of it the recovery
+/// browser's directory listing): too large for a UEFI stack, so the caller
+/// allocates it.
 pub struct Buffers {
     pub ini: [u8; INI_BUF],
     /// The configuration authored on a provisioning boot.
@@ -158,6 +159,8 @@ pub struct Buffers {
     pub secret: [u8; 256],
     /// A path typed in recovery (INTERFACES.md §13.4).
     pub path: [u8; machine::PATH_MAX],
+    /// The directory recovery's browser shows.
+    pub dir: platform::DirListing,
     pub fvek_blob: [u8; 1024],
     pub created: tpm::CreatedObject,
     pub located: volume::Located,
@@ -174,6 +177,7 @@ impl Buffers {
             handoff: [0; paguro_core::handoff::MAX_LEN],
             secret: [0; 256],
             path: [0; machine::PATH_MAX],
+            dir: platform::DirListing::new(),
             fvek_blob: [0; 1024],
             created: tpm::CreatedObject::new(),
             located: volume::Located::new(),

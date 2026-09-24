@@ -4,8 +4,8 @@
 //! says (Esc: all zero; Enter: exactly the text).
 #![allow(clippy::indexing_slicing)]
 
-use paguro_boot::platform::{Input, Row, Screen};
-use paguro_boot::ui::{Field, FieldKind, Key, Prompt, RECOVERY_DIGITS, Reaction};
+use paguro_boot::platform::{DirListing, DirView, Input, Level, Listing, Row, Screen};
+use paguro_boot::ui::{Browser, Field, FieldKind, Key, Prompt, RECOVERY_DIGITS, Reaction};
 use proptest::prelude::*;
 
 fn key() -> impl Strategy<Value = Key> {
@@ -123,6 +123,60 @@ proptest! {
             }
             let f = p.field().unwrap();
             prop_assert!(buf[f.len()..].iter().all(|&b| b == 0));
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// Any directory as read from disk (arbitrary UTF-16, sizes, kinds) and
+    /// any keys: the listing stays bounded, sorted and valid; the browser
+    /// only ever returns an entry that exists.
+    #[test]
+    fn listings_and_the_browser(
+        names in prop::collection::vec(
+            (prop::collection::vec(any::<u16>(), 0..40), any::<bool>(), any::<u64>(), prop::sample::select(vec!["", ".efi", ".VHD", ".vhdx", ".img", ".raw", ".txt"])),
+            0..200,
+        ),
+        esp in any::<bool>(),
+        keys in prop::collection::vec(prop_oneof![
+            Just(Key::Up), Just(Key::Down), Just(Key::PageUp), Just(Key::PageDown),
+            Just(Key::Home), Just(Key::End), Just(Key::Enter), Just(Key::Right),
+            Just(Key::Left), Just(Key::Backspace), any::<char>().prop_map(Key::Char),
+        ], 0..50),
+        page in 1usize..20,
+    ) {
+        let level = if esp { Level::EfiPartition } else { Level::Volume };
+        let mut d = Box::new(DirListing::new());
+        d.clear(level);
+        for (mut n, dir, bytes, ext) in names {
+            n.extend(ext.encode_utf16());
+            d.push(&n, dir, bytes);
+        }
+        d.sort();
+        for i in 0..d.len() {
+            let e = d.item(i).unwrap();
+            prop_assert!(!e.name.is_empty() && !e.name.contains('\\') && !e.name.chars().any(char::is_control));
+            if i > 0 {
+                let p = d.item(i - 1).unwrap();
+                let key = |e: &paguro_boot::platform::DirItem<'_>| (e.kind != paguro_boot::platform::EntryKind::Dir, e.name.to_lowercase());
+                prop_assert!(key(&p) <= key(&e), "sorted: {:?} before {:?}", p.name, e.name);
+            }
+            if level == Level::EfiPartition {
+                prop_assert!(e.kind != paguro_boot::platform::EntryKind::Disk);
+            }
+        }
+        let view = DirView { path: "\\x", listing: &*d, selected: 0 };
+        let mut b = Browser::new(&view);
+        b.set_page(page);
+        for k in keys {
+            match b.feed(&view, k) {
+                Reaction::Done(Input::Entry(i)) => prop_assert!(usize::from(i) < d.len()),
+                Reaction::Done(Input::TypePath) => prop_assert_eq!(b.selected(), d.len()),
+                _ => {}
+            }
+            prop_assert!(b.selected() <= d.len());
         }
     }
 }

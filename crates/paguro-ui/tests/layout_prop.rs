@@ -9,9 +9,10 @@
 #![allow(clippy::indexing_slicing)]
 
 use paguro_boot::platform::{
-    Grey, Label, Notice, Row, Screen, Target, TargetKind, TargetList, UnlockMenu, VolumeChoice,
-    VolumeFormat, VolumeList,
+    DirItem, DirView, EntryKind, Grey, Label, Level, Listing, Notice, Row, Screen, Target,
+    TargetKind, TargetList, UnlockMenu, VolumeChoice, VolumeFormat, VolumeList,
 };
+use paguro_boot::ui::Browser;
 use paguro_boot::ui::{Key, Prompt};
 use paguro_ui::builtin::THEMES;
 use paguro_ui::draw::Cmd;
@@ -105,7 +106,9 @@ fn screen() -> impl Strategy<Value = Screen> {
         Screen::NoInstallation,
         Screen::Incorrect,
         Screen::PathRefused,
-        Screen::EnterPath,
+        Screen::EnterPath(Level::Volume),
+        Screen::EnterPath(Level::EfiPartition),
+        Screen::NoEfiPartition,
         Screen::Notice(Notice::Hibernated),
         Screen::Notice(Notice::Dirty),
         Screen::Notice(Notice::Pcr12NotZero),
@@ -127,7 +130,9 @@ fn screen() -> impl Strategy<Value = Screen> {
         volumes,
         fixed,
         secret,
-        targets().prop_map(Screen::SelectTarget),
+        label_text().prop_map(|d| Screen::DiskStart {
+            disk: Label::truncated(&d)
+        }),
         (label_text(), targets()).prop_map(|(e, roots)| Screen::SelectRoot {
             efi: Label::truncated(&e),
             roots
@@ -219,6 +224,7 @@ proptest! {
             field: p.field().copied(),
             buf: &buf,
             toast: toast.map(|b| if b { Toast::Incorrect } else { Toast::PathRefused }),
+            dir: None,
         };
         let mut list = DrawList::new();
         layout(&screen, &view, theme, w, h, &mut list);
@@ -240,7 +246,7 @@ proptest! {
         for k in &keys {
             p.feed(&screen, *k, &mut buf);
         }
-        let view = View { selected: p.selected(), field: p.field().copied(), buf: &buf, toast: None };
+        let view = View { selected: p.selected(), field: p.field().copied(), buf: &buf, toast: None, dir: None };
         let mut list = DrawList::new();
         layout(&screen, &view, theme, w, h, &mut list);
         let stride = w + stride_extra;
@@ -259,6 +265,100 @@ proptest! {
                 prop_assert!(row.iter().all(|&b| b == 0), "wrote into the stride padding");
             }
         }
+    }
+}
+
+/// A listing with owned names, for random directories.
+#[derive(Debug)]
+struct Owned {
+    items: Vec<(String, EntryKind, u64)>,
+    more: bool,
+}
+
+impl Listing for Owned {
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+    fn item(&self, i: usize) -> Option<DirItem<'_>> {
+        self.items.get(i).map(|(n, k, b)| DirItem {
+            name: n,
+            kind: *k,
+            bytes: *b,
+        })
+    }
+    fn more(&self) -> bool {
+        self.more
+    }
+}
+
+fn owned() -> impl Strategy<Value = Owned> {
+    (
+        prop::collection::vec(
+            (
+                label_text().prop_filter("a name", |n| !n.is_empty()),
+                prop::sample::select(vec![EntryKind::Dir, EntryKind::Disk, EntryKind::Efi]),
+                any::<u64>(),
+            ),
+            0..300,
+        ),
+        any::<bool>(),
+    )
+        .prop_map(|(items, more)| Owned { items, more })
+}
+
+fn path_text() -> impl Strategy<Value = String> {
+    prop::collection::vec(label_text(), 0..40).prop_map(|parts| {
+        let mut p = String::new();
+        for c in parts {
+            p.push('\\');
+            p.push_str(&c);
+        }
+        if p.is_empty() {
+            p.push('\\');
+        }
+        p
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    #[test]
+    fn the_browser_stays_in_bounds(
+        w in 640u32..4200,
+        h in 480u32..2400,
+        dir in owned(),
+        path in path_text(),
+        esp in any::<bool>(),
+        keys in prop::collection::vec(
+            prop_oneof![
+                Just(Key::Down), Just(Key::Up), Just(Key::PageDown), Just(Key::PageUp),
+                Just(Key::Home), Just(Key::End), any::<char>().prop_map(Key::Char),
+            ],
+            0..60,
+        ),
+        theme in 0usize..8,
+    ) {
+        let theme = &THEMES[theme % THEMES.len()];
+        let level = if esp { Level::EfiPartition } else { Level::Volume };
+        let screen = Screen::Browse(level);
+        let view = DirView { path: &path, listing: &dir, selected: 0 };
+        let mut b = Browser::new(&view);
+        let mut page = 1;
+        for k in keys {
+            b.set_page(page);
+            let r = b.feed(&view, k);
+            if let paguro_boot::ui::Reaction::Done(paguro_boot::platform::Input::Entry(i)) = r {
+                prop_assert!(usize::from(i) < dir.items.len());
+            }
+            let v = View { selected: b.selected(), field: None, buf: &[], toast: None, dir: Some(view) };
+            let mut list = DrawList::new();
+            layout(&screen, &v, theme, w, h, &mut list);
+            check(&list, w, h)?;
+            page = list.page;
+            prop_assert!((1..=paguro_ui::layout::BROWSER_ROWS).contains(&page));
+        }
+        prop_assert!(b.selected() <= dir.items.len());
     }
 }
 

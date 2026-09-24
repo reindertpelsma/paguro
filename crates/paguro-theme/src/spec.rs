@@ -99,15 +99,32 @@ pub const STRINGS: &[StringSpec] = &[
     },
     s("format_bitlocker", "detail"),
     s("format_ntfs", "detail"),
-    s("targets_title", "title"),
-    s("targets_body", "body"),
-    s("targets_empty", "body"),
+    s("browse_title", "title"),
+    s("browse_title_esp", "title"),
+    s("browse_empty", "body"),
+    StringSpec {
+        key: "browse_more",
+        style: "body",
+        args: &["n"],
+    },
+    s("entry_folder", "detail"),
     s("target_disk", "detail"),
     s("target_efi", "detail"),
     s("type_path", "label"),
     s("type_path_why", "detail"),
+    s("type_path_esp_why", "detail"),
+    s("hint_open", "hint"),
+    s("hint_parent", "hint"),
+    s("key_left", "key"),
+    s("disk_title", "title"),
+    s("disk_default", "label"),
+    s("disk_browse", "label"),
+    s("disk_browse_why", "detail"),
+    s("no_esp", "banner"),
     s("path_title", "title"),
     s("path_help", "body"),
+    s("path_title_esp", "title"),
+    s("path_help_esp", "body"),
     s("path_label", "detail"),
     s("roots_title", "title"),
     s("roots_body", "body"),
@@ -141,19 +158,29 @@ pub const COLORS: &[&str] = &[
     "toast_text",
 ];
 
-/// Text styles, in `Style` order. The second field: the style shows text
-/// not known at build time (typed text, file and partition names), so it
-/// must carry all of Latin-1.
-pub const STYLES: &[(&str, bool)] = &[
-    ("brand", false),
-    ("title", false),
-    ("body", false),
-    ("label", true),
-    ("detail", false),
-    ("field", true),
-    ("hint", false),
-    ("key", false),
-    ("banner", false),
+/// What a style must be able to show beyond its strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Needs {
+    /// Only the strings drawn in it (plus digits and separators).
+    Strings,
+    /// Printable ASCII: paths the loader itself composes (the default UEFI
+    /// image's path).
+    Ascii,
+    /// All of Latin-1: typed text, file and partition names.
+    Latin1,
+}
+
+/// Text styles, in `Style` order, and what each must be able to show.
+pub const STYLES: &[(&str, Needs)] = &[
+    ("brand", Needs::Strings),
+    ("title", Needs::Strings),
+    ("body", Needs::Strings),
+    ("label", Needs::Latin1),
+    ("detail", Needs::Ascii),
+    ("field", Needs::Latin1),
+    ("hint", Needs::Strings),
+    ("key", Needs::Strings),
+    ("banner", Needs::Strings),
 ];
 
 /// Screen kinds with their own layout, in `ScreenKind` order, and the
@@ -165,8 +192,9 @@ pub const SCREENS: &[(&str, &str)] = &[
     ("path", "field"),
     ("message", "message"),
     ("volumes", "list"),
-    ("targets", "list"),
+    ("browser", "list"),
     ("roots", "list"),
+    ("disk", "list"),
 ];
 
 pub const PRIMITIVES: &[&str] = &["list", "field", "message"];

@@ -65,13 +65,14 @@ and messages).
 label = { font = "regular", size = 20, line = 28, charset = "latin1" }
 ```
 
-`size` and `line` (line height) are reference pixels. `charset = "latin1"`
-rasterises all of Latin-1; otherwise only the characters of the strings drawn
-in that style, digits and a few separators. `label` and `field` must be
-`latin1` (they show file names and typed text). Two styles with identical
-settings share their glyphs in the binary. Characters missing from a font are
-drawn as `?`; a character a *string* needs but the font lacks is a build
-error.
+`size` and `line` (line height) are reference pixels. Every style carries
+the characters of the strings drawn in it, digits and a few separators;
+`charset` adds printable ASCII (`"ascii"`) or all of Latin-1 (`"latin1"`).
+`label` and `field` must be `latin1` (they show file names and typed text),
+`detail` at least `ascii` (it shows the default UEFI path). Two styles with
+identical settings share their glyphs in the binary. Characters missing from
+a font are drawn as `?`; a character a *string* needs but the font lacks is a
+build error.
 
 ### `[colors]`
 
@@ -103,8 +104,8 @@ logo = { file = "images/logo.png", size = [40, 40] }
 
 `[layout]` holds the defaults for every screen. `[primitive.<name>]`
 (`list`, `field`, `message`) and then `[screen.<name>]` (`unlock`, `secret`,
-`recovery_key`, `path`, `message`, `volumes`, `targets`, `roots`) override any
-subset of its keys, table by table:
+`recovery_key`, `path`, `message`, `volumes`, `browser`, `roots`, `disk`)
+override any subset of its keys, table by table:
 
 ```toml
 [primitive.message]
@@ -137,9 +138,11 @@ owns the band between them. Offsets move an element from its anchor; nothing
 is ever placed outside the frame.
 
 What the renderer guarantees whatever the theme says: text is cut with the
-ellipsis rather than spilled, paragraphs and lists give up lines when the
-screen is short (lists scroll to the selection), text never overlaps other
-text or images, and nothing is drawn outside the frame. The layout-invariant
+ellipsis rather than spilled (the browser's path is cut at the front, so the
+current folder stays visible), paragraphs and lists give up lines when the
+screen is short (lists scroll to the selection; the browser shows at most ten
+rows and its position), text never overlaps other text or images, and nothing
+is drawn outside the frame. The layout-invariant
 tests (`crates/paguro-ui/tests/layout_prop.rs`) check this for random sizes
 and labels.
 

@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use mock::*;
-use paguro_boot::platform::{DiskInfo, Input, Platform, PlatformError, Screen, TargetKind};
+use paguro_boot::platform::{DirView, DiskInfo, Input, Level, Platform, PlatformError, Screen};
 use paguro_boot::ui::Key;
 use paguro_boot::{Buffers, Outcome};
 use paguro_core::guid::Guid;
@@ -130,6 +130,11 @@ impl Platform for Gop {
         self.m.screens.push(*screen);
         self.d.current = Some(*screen);
         driver::prompt(&mut self.d, &mut self.s, screen, secret)
+    }
+    fn prompt_browse(&mut self, screen: &Screen, dir: &DirView<'_>) -> Input {
+        self.m.screens.push(*screen);
+        self.d.current = Some(*screen);
+        driver::prompt_browse(&mut self.d, &mut self.s, screen, dir)
     }
     fn log(&mut self, args: fmt::Arguments<'_>) {
         self.m.log(args)
@@ -307,23 +312,38 @@ fn escape_everywhere_still_ends() {
     assert_eq!(out, Outcome::Halted(paguro_boot::BootError::UserAbort));
 }
 
-#[test]
-fn recovery_flow_by_keyboard() {
-    // No configuration; a clear key; \paguro\ holds a UKI and two disks.
+fn recovery_world() -> World {
     let mut w = World::new();
     w.m.files.remove("paguro.ini");
     w.v.clear_key = Some(VMK);
-    w.v.targets = Some(vec![
-        ("rescue.efi".into(), 112 << 20, TargetKind::EfiFile),
-        ("debian.vhd".into(), 214 << 30, TargetKind::Disk),
-        ("arch.vhdx".into(), 64 << 30, TargetKind::Disk),
-    ]);
-    // Target list: Enter on the UKI; root list: End (None), Up, Enter → arch.
-    let script = [Key::Enter, Key::End, Key::Up, Key::Enter];
+    w
+}
+
+#[test]
+fn browse_to_a_uki_then_choose_its_root_by_keyboard() {
+    let mut w = recovery_world();
+    w.v.dir("\\paguro", &["tools/", "debian.vhd", "arch.vhdx"])
+        .dir("\\paguro\\tools", &["old/", "rescue.efi"]);
+    // \paguro: Enter on "tools"; in tools: type "r" to jump to rescue.efi,
+    // Enter; root list (arch, debian, None): Down, Enter → debian.
+    let script = [
+        Key::Enter,
+        Key::Char('r'),
+        Key::Enter,
+        Key::Down,
+        Key::Enter,
+    ];
     let (out, g) = boot(&mut w, &script);
-    assert_eq!(out, Outcome::Started(Rung::ClearKey));
+    assert_eq!(out, Outcome::Started(Rung::ClearKey), "{:?}", g.m.log);
     let saw = w.v.saw_entry.clone().unwrap();
-    assert_eq!(saw.root.as_deref(), Some("\\paguro\\arch.vhdx"));
+    assert_eq!(
+        saw.efi,
+        format!(
+            "{:?}",
+            paguro_core::config::Efi::File("\\paguro\\tools\\rescue.efi")
+        )
+    );
+    assert_eq!(saw.root.as_deref(), Some("\\paguro\\debian.vhd"));
     let banner = THEMES[0].palette.banner_background;
     for f in g.d.shown.iter() {
         assert!(
@@ -331,20 +351,70 @@ fn recovery_flow_by_keyboard() {
             "recovery screens say they are unattested"
         );
     }
+    assert!(g.d.mirrored.contains(&Screen::Browse(Level::Volume)));
+}
+
+#[test]
+fn browse_a_disk_efi_partition_by_keyboard() {
+    let mut w = recovery_world();
+    w.v.dir("\\paguro", &["arch.vhdx", "debian.vhd"])
+        .esp_dir("\\paguro\\debian.vhd", "\\", &["EFI/"])
+        .esp_dir("\\paguro\\debian.vhd", "\\EFI", &["BOOT/", "systemd/"])
+        .esp_dir(
+            "\\paguro\\debian.vhd",
+            "\\EFI\\systemd",
+            &["systemd-bootx64.efi"],
+        );
+    // debian.vhd; "Choose another on its EFI partition"; open EFI (->),
+    // systemd (Down, Enter), then the image; Backspace and Right on the way
+    // exercise the parent and open keys.
+    let script = [
+        Key::Down,
+        Key::Enter,
+        Key::Down,
+        Key::Enter,
+        Key::Right,
+        Key::Backspace,
+        Key::Enter,
+        Key::Down,
+        Key::Enter,
+        Key::Enter,
+    ];
+    let (out, g) = boot(&mut w, &script);
+    assert_eq!(out, Outcome::Started(Rung::ClearKey), "{:?}", g.m.log);
+    let saw = w.v.saw_entry.clone().unwrap();
+    assert_eq!(
+        saw.efi,
+        format!(
+            "{:?}",
+            paguro_core::config::Efi::Disk {
+                disk: "\\paguro\\debian.vhd",
+                path: "\\EFI\\systemd\\systemd-bootx64.efi"
+            }
+        )
+    );
+    assert_eq!(saw.root.as_deref(), Some("\\paguro\\debian.vhd"));
+    assert!(g.d.mirrored.contains(&Screen::Browse(Level::EfiPartition)));
+    assert_eq!(
+        g.m.events.last(),
+        Some(&Event::Start(
+            b"chain-device-path:\\EFI\\systemd\\systemd-bootx64.efi".to_vec()
+        ))
+    );
 }
 
 #[test]
 fn recovery_typed_path_by_keyboard() {
-    let mut w = World::new();
-    w.m.files.remove("paguro.ini");
-    w.v.clear_key = Some(VMK);
-    w.v.targets = Some(vec![]);
-    // The only row is "Type a path"; type it with a correction.
+    let mut w = recovery_world();
+    w.v.dir("\\paguro", &[]);
+    // The only row is "Type a path"; type it with a correction, then start
+    // the disk's default image.
     let mut script = vec![Key::Enter];
     script.extend(keys("\\paguro\\debainx"));
     script.extend([Key::Left, Key::Delete, Key::Left, Key::Left, Key::Backspace]);
     script.extend([Key::Right, Key::Char('a'), Key::End]);
     script.extend(keys(".vhd"));
+    script.push(Key::Enter);
     script.push(Key::Enter);
     let (out, g) = boot(&mut w, &script);
     assert_eq!(out, Outcome::Started(Rung::ClearKey), "{:?}", g.m.log);

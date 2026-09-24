@@ -6,7 +6,7 @@
 pub mod tpm;
 
 use paguro_boot::platform::{
-    DiskInfo, Input, Label, Platform, PlatformError, Screen, Target, TargetKind, TargetList, attrs,
+    DirListing, DirView, DiskInfo, Input, Platform, PlatformError, Screen, attrs,
 };
 use paguro_boot::volume::{FileId, Key, Located, Partition, Volume, VolumeKind};
 use paguro_boot::{BootError, Buffers, Outcome, Params};
@@ -53,6 +53,9 @@ pub struct Mock {
     pub disks: Vec<Disk>,
     pub script: VecDeque<(Input, Option<Vec<u8>>)>,
     pub screens: Vec<Screen>,
+    /// Each browser prompt: the path shown, the entries' names, and the
+    /// row it started on.
+    pub browsed: Vec<(String, Vec<String>, usize)>,
     pub events: Vec<Event>,
     pub log: Vec<String>,
     pub handoff: Option<Vec<u8>>,
@@ -74,6 +77,7 @@ impl Mock {
             disks: Vec::new(),
             script: VecDeque::new(),
             screens: Vec::new(),
+            browsed: Vec::new(),
             events: Vec::new(),
             log: Vec::new(),
             handoff: None,
@@ -267,6 +271,7 @@ impl Platform for Mock {
             screen,
             Screen::Incorrect
                 | Screen::PathRefused
+                | Screen::NoEfiPartition
                 | Screen::TpmLocked
                 | Screen::Notice(paguro_boot::platform::Notice::NotImplemented)
         ) {
@@ -280,6 +285,21 @@ impl Platform for Mock {
                 Input::Secret(n)
             }
             Some((i, None)) => i,
+            None => Input::Escape,
+        }
+    }
+
+    fn prompt_browse(&mut self, screen: &Screen, dir: &DirView<'_>) -> Input {
+        self.screens.push(*screen);
+        self.browsed.push((
+            dir.path.to_string(),
+            (0..dir.listing.len())
+                .filter_map(|i| dir.listing.item(i).map(|e| e.name.to_string()))
+                .collect(),
+            dir.selected,
+        ));
+        match self.script.pop_front() {
+            Some((i, _)) => i,
             None => Input::Escape,
         }
     }
@@ -325,6 +345,9 @@ pub struct SawEntry {
     pub efi: String,
 }
 
+/// A directory entry: name, is a directory, bytes.
+pub type FakeEntry = (String, bool, u64);
+
 /// A fake BitLocker volume: knows its VMK, FVEK blob, protectors and the
 /// disks of one installation.
 pub struct FakeVolume {
@@ -349,14 +372,20 @@ pub struct FakeVolume {
     pub efi_image: Vec<u8>,
     /// Behave like the production stage-4 stub after recording the entry.
     pub stub_stage4: bool,
-    /// What `\paguro\` holds (recovery, step 2). `None`: derived from the
-    /// installation above — its root disk, or its efi file.
-    pub targets: Option<Vec<(String, u64, TargetKind)>>,
+    /// The volume's directories for recovery's browser: path → entries
+    /// `(name, is directory, bytes)`. `None`: `\paguro` holds just the
+    /// installation above (its root disk, or its efi file).
+    pub fs: Option<HashMap<String, Vec<FakeEntry>>>,
+    /// EFI partitions inside disk files: disk path → (directory → entries).
+    /// A disk not in the map has none.
+    pub esp: HashMap<String, HashMap<String, Vec<FakeEntry>>>,
     pub opened: Option<(Partition, VolumeKind)>,
     pub unlocked: bool,
     pub tries: usize,
     pub locate_saw_config: Option<bool>,
     pub saw_entry: Option<SawEntry>,
+    /// Directories recovery listed, in order.
+    pub listed: Vec<String>,
 }
 
 pub const FVEK: [u8; 32] = [0xfe; 32];
@@ -378,12 +407,14 @@ impl FakeVolume {
             efi_file: (777, 1),
             efi_image: b"MZ-fake-uki".to_vec(),
             stub_stage4: false,
-            targets: None,
+            fs: None,
+            esp: HashMap::new(),
             opened: None,
             unlocked: false,
             tries: 0,
             locate_saw_config: None,
             saw_entry: None,
+            listed: Vec::new(),
         }
     }
 }
@@ -464,8 +495,15 @@ impl<P: Platform> Volume<P> for FakeVolume {
         out.efi_disk = disk_path.map(|_| id(self.efi_disk));
         out.efi_file = file_path.map(|_| id(self.efi_file));
         out.flags = self.flags;
-        let chain = b"chain-device-path";
-        out.chain[..chain.len()].copy_from_slice(chain);
+        // The chain names the image on the efi disk when it is not the
+        // default (recovery's EFI-partition browser).
+        let chain = match entry.map(|e| e.efi) {
+            Some(Efi::Disk { path, .. }) if path != paguro_core::config::DEFAULT_EFI => {
+                format!("chain-device-path:{path}")
+            }
+            _ => "chain-device-path".to_string(),
+        };
+        out.chain[..chain.len()].copy_from_slice(chain.as_bytes());
         out.chain_len = chain.len();
         if let Some(p) = root_path {
             out.root_path[..p.len()].copy_from_slice(p.as_bytes());
@@ -484,25 +522,78 @@ impl<P: Platform> Volume<P> for FakeVolume {
     fn efi_image(&mut self, _: &mut P) -> Result<&[u8], BootError> {
         Ok(&self.efi_image)
     }
-    fn boot_targets(&mut self, _: &mut P, out: &mut TargetList) -> Result<(), BootError> {
-        let derived = |p: &str, kind| {
-            vec![(
-                p.rsplit('\\').next().unwrap_or(p).to_string(),
-                214u64 << 30,
-                kind,
-            )]
+    fn list_dir(&mut self, _: &mut P, path: &str, out: &mut DirListing) -> Result<(), BootError> {
+        self.listed.push(path.to_string());
+        let entries = match &self.fs {
+            Some(fs) => fs.get(path).cloned().unwrap_or_default(),
+            None if path == "\\paguro" => {
+                let p = self.efi_file_path.unwrap_or(self.root_path);
+                vec![(
+                    p.rsplit('\\').next().unwrap_or(p).to_string(),
+                    false,
+                    214 << 30,
+                )]
+            }
+            None => Vec::new(),
         };
-        let list = match (&self.targets, self.efi_file_path) {
-            (Some(t), _) => t.clone(),
-            (None, Some(f)) => derived(f, TargetKind::EfiFile),
-            (None, None) => derived(self.root_path, TargetKind::Disk),
-        };
-        for (name, bytes, kind) in list {
-            if let Some(name) = Label::new(&name) {
-                out.push(Target { name, bytes, kind });
+        for (name, is_dir, bytes) in entries {
+            let units: Vec<u16> = name.encode_utf16().collect();
+            if !out.push(&units, is_dir, bytes) {
+                break;
             }
         }
         Ok(())
+    }
+    fn list_efi_dir(
+        &mut self,
+        _: &mut P,
+        disk: &str,
+        path: &str,
+        out: &mut DirListing,
+    ) -> Result<bool, BootError> {
+        let Some(esp) = self.esp.get(disk) else {
+            return Ok(false);
+        };
+        for (name, is_dir, bytes) in esp.get(path).cloned().unwrap_or_default() {
+            let units: Vec<u16> = name.encode_utf16().collect();
+            if !out.push(&units, is_dir, bytes) {
+                break;
+            }
+        }
+        Ok(true)
+    }
+}
+
+impl FakeVolume {
+    /// Give the volume directory `path` these entries (`name/` is a folder).
+    pub fn dir(&mut self, path: &str, names: &[&str]) -> &mut Self {
+        let entries = names
+            .iter()
+            .map(|n| match n.strip_suffix('/') {
+                Some(d) => (d.to_string(), true, 0),
+                None => (n.to_string(), false, 1 << 30),
+            })
+            .collect();
+        self.fs
+            .get_or_insert_with(HashMap::new)
+            .insert(path.into(), entries);
+        self
+    }
+    /// Give disk `disk` an EFI partition with directory `path` holding
+    /// `names` (`name/` is a folder).
+    pub fn esp_dir(&mut self, disk: &str, path: &str, names: &[&str]) -> &mut Self {
+        let entries = names
+            .iter()
+            .map(|n| match n.strip_suffix('/') {
+                Some(d) => (d.to_string(), true, 0),
+                None => (n.to_string(), false, 1 << 20),
+            })
+            .collect();
+        self.esp
+            .entry(disk.into())
+            .or_default()
+            .insert(path.into(), entries);
+        self
     }
 }
 

@@ -71,6 +71,8 @@ pub struct DrawList<'a> {
     /// The frame's size.
     pub width: u32,
     pub height: u32,
+    /// Rows the list shows at once (PageUp/PageDown move this far).
+    pub page: usize,
 }
 
 impl<'a> DrawList<'a> {
@@ -83,6 +85,7 @@ impl<'a> DrawList<'a> {
             dropped: 0,
             width: 0,
             height: 0,
+            page: 0,
         }
     }
 
@@ -92,6 +95,7 @@ impl<'a> DrawList<'a> {
         self.dropped = 0;
         self.width = width;
         self.height = height;
+        self.page = 0;
         // The arena may have held typed text composed into a template.
         self.arena.fill(0);
     }

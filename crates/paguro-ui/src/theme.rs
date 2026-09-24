@@ -351,11 +351,12 @@ pub enum ScreenKind {
     Path,
     Message,
     Volumes,
-    Targets,
+    Browser,
     Roots,
+    Disk,
 }
 
-pub const SCREEN_KINDS: usize = 8;
+pub const SCREEN_KINDS: usize = 9;
 
 /// One piece of a string: literal text, a run-time argument (by position),
 /// or a paragraph break.

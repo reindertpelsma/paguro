@@ -14,7 +14,7 @@ use paguro_core::guid::{GPT_BASIC_DATA, Guid};
 use paguro_core::handoff::FveLayout;
 
 use crate::BootError;
-use crate::platform::{Label, Platform, TargetList};
+use crate::platform::{DirListing, Label, Platform};
 
 pub type Key = [u8; 32];
 
@@ -325,11 +325,22 @@ pub trait Volume<P: Platform> {
     /// The `efi_file` stage 4 read (when [`Located::efi_file`] is set), for
     /// `LoadImage(SourceBuffer)`.
     fn efi_image(&mut self, p: &mut P) -> Result<&[u8], BootError>;
-    /// Recovery, step 2 (INTERFACES.md §13.4): the files in `\paguro\` on
-    /// the unlocked volume, classified by convention — `*.efi` is an
-    /// `efi_file`, anything else a disk. Names that do not fit a
-    /// [`Label`](crate::platform::Label) are skipped, never shortened.
-    fn boot_targets(&mut self, p: &mut P, out: &mut TargetList) -> Result<(), BootError>;
+    /// Recovery's browser (INTERFACES.md §13.4): offer every entry of the
+    /// directory `path` on the unlocked NTFS volume to
+    /// [`DirListing::push`] (name as stored, UTF-16; directory or not;
+    /// size), stopping when it returns `false`. `path` is an absolute path
+    /// (`\` for the root). A missing directory is an empty listing.
+    fn list_dir(&mut self, p: &mut P, path: &str, out: &mut DirListing) -> Result<(), BootError>;
+    /// The same for the FAT32 holding the UEFI images of the disk file
+    /// `disk` (found as stage 4 finds it: a GPT's one ESP, or a superfloppy
+    /// FAT32; INTERFACES.md §3.2). `Ok(false)`: the disk has no such FAT32.
+    fn list_efi_dir(
+        &mut self,
+        p: &mut P,
+        disk: &str,
+        path: &str,
+        out: &mut DirListing,
+    ) -> Result<bool, BootError>;
 }
 
 /// Production stand-in until the FVE parser and `paguro-core::ntfs` land:
@@ -370,8 +381,19 @@ impl<P: Platform> Volume<P> for Unimplemented {
     fn efi_image(&mut self, _: &mut P) -> Result<&[u8], BootError> {
         Err(BootError::NotImplemented("stage 4: efi_file read"))
     }
-    fn boot_targets(&mut self, _: &mut P, _: &mut TargetList) -> Result<(), BootError> {
-        Err(BootError::NotImplemented("stage 4: \\paguro\\ listing"))
+    fn list_dir(&mut self, _: &mut P, _: &str, _: &mut DirListing) -> Result<(), BootError> {
+        Err(BootError::NotImplemented("stage 4: NTFS directories"))
+    }
+    fn list_efi_dir(
+        &mut self,
+        _: &mut P,
+        _: &str,
+        _: &str,
+        _: &mut DirListing,
+    ) -> Result<bool, BootError> {
+        Err(BootError::NotImplemented(
+            "stage 4: EFI partition directories",
+        ))
     }
 }
 

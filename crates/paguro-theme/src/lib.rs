@@ -57,11 +57,12 @@ struct Meta {
     scales: Vec<f64>,
 }
 
-#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[serde(rename_all = "lowercase")]
 enum Charset {
     #[default]
     Strings,
+    Ascii,
     Latin1,
 }
 
@@ -355,7 +356,7 @@ fn load_theme(dir: &Path, t: &Table, file: &str) -> Result<Theme, Error> {
 
     let text_t = table(t, "text", file)?;
     let mut text = Vec::new();
-    for (name, needs_latin1) in spec::STYLES {
+    for (name, needs) in spec::STYLES {
         let v = text_t
             .get(*name)
             .ok_or_else(|| format!("{file}: [text] missing style {name:?}"))?;
@@ -374,9 +375,24 @@ fn load_theme(dir: &Path, t: &Table, file: &str) -> Result<Theme, Error> {
                 "{file}: [text] {name}: size must be 6..200 and line between 0.9 and 3 times the size"
             ));
         }
-        if *needs_latin1 && s.charset != Charset::Latin1 {
+        let need = match needs {
+            spec::Needs::Strings => Charset::Strings,
+            spec::Needs::Ascii => Charset::Ascii,
+            spec::Needs::Latin1 => Charset::Latin1,
+        };
+        if s.charset < need {
             return Err(format!(
-                "{file}: [text] {name}: this style shows typed text and names, so it needs charset = \"latin1\""
+                "{file}: [text] {name}: this style shows {}, so it needs charset = \"{}\" (or wider)",
+                if need == Charset::Latin1 {
+                    "typed text and file names"
+                } else {
+                    "paths the loader composes"
+                },
+                if need == Charset::Latin1 {
+                    "latin1"
+                } else {
+                    "ascii"
+                }
             ));
         }
         text.push(s);
@@ -682,30 +698,34 @@ struct Raster {
 /// | `01nnnnnn` | `n + 1` fully covered pixels |
 /// | `10nnnnnn` + ⌈(n+1)/2⌉ bytes | `n + 1` literal 4-bit values, low nibble first |
 pub fn rle_encode(nibbles: &[u8], out: &mut Vec<u8>) {
+    // A run of 0 or 15 shorter than this is cheaper inside a literal.
+    const MIN_RUN: usize = RLE_MIN_RUN;
+    let run_at = |i: usize| -> usize {
+        let Some(&v) = nibbles.get(i) else {
+            return 0;
+        };
+        if v != 0 && v != 15 {
+            return 0;
+        }
+        nibbles[i..]
+            .iter()
+            .take(64)
+            .take_while(|&&x| x == v)
+            .count()
+    };
     let mut i = 0usize;
     while i < nibbles.len() {
-        let v = nibbles[i];
-        let mut run = 1usize;
-        while i + run < nibbles.len() && nibbles[i + run] == v && run < 64 {
-            run += 1;
-        }
-        if (v == 0 || v == 15) && run >= 2 {
-            out.push(if v == 0 { 0 } else { 0x40 } | (run - 1) as u8);
+        let run = run_at(i);
+        if run >= MIN_RUN || (run > 0 && i + run == nibbles.len()) {
+            out.push(if nibbles[i] == 0 { 0 } else { 0x40 } | (run - 1) as u8);
             i += run;
             continue;
         }
-        // A literal until the next run of two or more 0/15 (at most 64).
+        // A literal until the next worthwhile run (at most 64 values).
         let start = i;
-        let mut end = i;
-        while end < nibbles.len() && end - start < 64 {
-            let v = nibbles[end];
-            if (v == 0 || v == 15) && nibbles.get(end + 1) == Some(&v) {
-                break;
-            }
+        let mut end = i + 1;
+        while end < nibbles.len() && end - start < 64 && run_at(end) < MIN_RUN {
             end += 1;
-        }
-        if end == start {
-            end = start + 1;
         }
         let lit = &nibbles[start..end];
         out.push(0x80 | (lit.len() - 1) as u8);
@@ -715,6 +735,8 @@ pub fn rle_encode(nibbles: &[u8], out: &mut Vec<u8>) {
         i = end;
     }
 }
+
+const RLE_MIN_RUN: usize = 4;
 
 fn rasterise(font: &fontdue::Font, px: f32, line: i32, chars: &BTreeSet<char>) -> Raster {
     let lm = font.horizontal_line_metrics(px);
@@ -1192,8 +1214,10 @@ pub fn compile(o: &Options) -> Result<Output, Error> {
                         ));
                     }
                 }
-                if ts.charset == Charset::Latin1 {
-                    chars.extend(latin1.iter().copied());
+                match ts.charset {
+                    Charset::Latin1 => chars.extend(latin1.iter().copied()),
+                    Charset::Ascii => chars.extend((0x20u8..0x7f).map(char::from)),
+                    Charset::Strings => {}
                 }
                 let px = (ts.size * scale) as f32;
                 let line = (ts.line * scale).round().max(1.0) as i32;

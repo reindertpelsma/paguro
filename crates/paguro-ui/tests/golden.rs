@@ -28,7 +28,9 @@ const FULL_HD: &[&str] = &[
     "recovery-key-half",
     "volumes-8",
     "hibernated",
-    "roots",
+    "browse-long-scrolled",
+    "browse-esp",
+    "disk-start",
 ];
 
 fn golden_dir() -> PathBuf {

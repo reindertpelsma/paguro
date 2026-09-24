@@ -73,3 +73,26 @@ fn lists_take_digits_and_arrows() {
     );
     assert!(t.out.contains("Unlock Linux"));
 }
+
+#[test]
+fn the_browser_works_on_a_text_console() {
+    use paguro_boot::platform::{DirView, Level};
+    use paguro_ui::driver::prompt_browse_text;
+    use paguro_ui::fixtures::all;
+    let fx = all();
+    let f = fx.iter().find(|f| f.name == "browse-paguro").unwrap();
+    let (path, listing) = f.dir.unwrap();
+    let dir = DirView {
+        path,
+        listing,
+        selected: 0,
+    };
+    let mut t = Tty {
+        out: String::new(),
+        keys: [Key::Down, Key::Char('d'), Key::Enter].into(),
+    };
+    let screen = Screen::Browse(Level::Volume);
+    assert_eq!(prompt_browse_text(&mut t, &screen, &dir), Input::Entry(3));
+    assert!(t.out.contains("Choose what to start"));
+    assert!(t.out.contains(" > debian.vhd   disk, 214 GB"), "{}", t.out);
+}

@@ -5,8 +5,8 @@
 
 use core::fmt::Write;
 
-use paguro_boot::platform::{Input, Screen};
-use paguro_boot::ui::{self, Key, Prompt, Reaction};
+use paguro_boot::platform::{DirView, Input, Screen};
+use paguro_boot::ui::{self, Browser, Key, Prompt, Reaction};
 
 use crate::builtin::THEMES;
 use crate::canvas::Canvas;
@@ -50,11 +50,13 @@ fn toast_for(screen: &Screen) -> Option<Toast> {
     match screen {
         Screen::Incorrect => Some(Toast::Incorrect),
         Screen::PathRefused => Some(Toast::PathRefused),
+        Screen::NoEfiPartition => Some(Toast::NoEfiPartition),
         _ => None,
     }
 }
 
-fn draw<D: Display>(d: &mut D, s: &Session, screen: &Screen, view: &View<'_>) {
+/// Draw and show; returns the rows the list shows at once.
+fn draw<D: Display>(d: &mut D, s: &Session, screen: &Screen, view: &View<'_>) -> usize {
     let (w, h) = d.size();
     let theme = THEMES.get(s.theme).unwrap_or(&THEMES[0]);
     let mut list = DrawList::new();
@@ -63,17 +65,56 @@ fn draw<D: Display>(d: &mut D, s: &Session, screen: &Screen, view: &View<'_>) {
         paint(&list, &mut c);
     }
     d.present();
+    list.page
+}
+
+/// The recovery browser (the graphical
+/// [`Platform::prompt_browse`](paguro_boot::Platform::prompt_browse)).
+pub fn prompt_browse<D: Display>(
+    d: &mut D,
+    s: &mut Session,
+    screen: &Screen,
+    dir: &DirView<'_>,
+) -> Input {
+    d.mirror(screen);
+    let mut b = Browser::new(dir);
+    let mut toast = s.toast.take();
+    loop {
+        let view = View {
+            selected: b.selected(),
+            field: None,
+            buf: &[],
+            toast,
+            dir: Some(*dir),
+        };
+        let page = draw(d, s, screen, &view);
+        b.set_page(page);
+        loop {
+            let r = b.feed(dir, d.read_key());
+            let had_toast = toast.take().is_some();
+            match r {
+                Reaction::Redraw => break,
+                Reaction::Ignore if had_toast => break,
+                Reaction::Ignore => {}
+                Reaction::NextTheme => {
+                    s.theme = (s.theme + 1) % THEMES.len().max(1);
+                    break;
+                }
+                Reaction::Done(input) => return input,
+            }
+        }
+    }
 }
 
 /// Show `screen` and wait for an action (the graphical
 /// [`Platform::prompt`](paguro_boot::Platform::prompt)).
 pub fn prompt<D: Display>(d: &mut D, s: &mut Session, screen: &Screen, secret: &mut [u8]) -> Input {
+    d.mirror(screen);
     if !ui::needs_key(screen) {
         // Shown on the next screen instead, without costing a keystroke.
         s.toast = toast_for(screen);
         return Input::Continue;
     }
-    d.mirror(screen);
     let mut p = Prompt::new(screen, secret);
     let mut toast = s.toast.take();
     loop {
@@ -82,6 +123,7 @@ pub fn prompt<D: Display>(d: &mut D, s: &mut Session, screen: &Screen, secret: &
             field: p.field().copied(),
             buf: secret,
             toast,
+            dir: None,
         };
         draw(d, s, screen, &view);
         loop {
@@ -104,6 +146,7 @@ pub fn prompt<D: Display>(d: &mut D, s: &mut Session, screen: &Screen, secret: &
                             field: None,
                             buf: &[],
                             toast: None,
+                            dir: None,
                         };
                         draw(d, s, screen, &view);
                     }
@@ -149,6 +192,22 @@ pub fn prompt_text<C: Console>(c: &mut C, screen: &Screen, secret: &mut [u8]) ->
                 c.write_str("\r\n");
                 return i;
             }
+        }
+    }
+}
+
+/// The text-console browser.
+pub fn prompt_browse_text<C: Console>(c: &mut C, screen: &Screen, dir: &DirView<'_>) -> Input {
+    let _ = ui::render(screen, &mut W(c));
+    let mut b = Browser::new(dir);
+    let _ = ui::render_browse(dir, b.selected(), &mut W(c));
+    loop {
+        match b.feed(dir, c.read_key()) {
+            Reaction::Redraw => {
+                let _ = ui::render_browse(dir, b.selected(), &mut W(c));
+            }
+            Reaction::Ignore | Reaction::NextTheme => {}
+            Reaction::Done(i) => return i,
         }
     }
 }

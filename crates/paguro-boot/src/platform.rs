@@ -295,6 +295,250 @@ impl Default for TargetList {
     }
 }
 
+/// Which filesystem the recovery browser walks (INTERFACES.md §13.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    /// The unlocked NTFS volume: folders, disks and UEFI images.
+    Volume,
+    /// The FAT32 EFI partition inside a chosen disk: folders and UEFI
+    /// images.
+    EfiPartition,
+}
+
+/// What a listed entry is, by the extension convention of INTERFACES.md
+/// §13.4 (`.vhd`, `.vhdx`, `.img`, `.raw` are disks; `.efi` UEFI images).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    Dir,
+    Disk,
+    Efi,
+}
+
+/// One listed entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirItem<'a> {
+    pub name: &'a str,
+    pub kind: EntryKind,
+    pub bytes: u64,
+}
+
+/// A directory as the browser shows it: sorted, filtered, bounded.
+pub trait Listing {
+    fn len(&self) -> usize;
+    fn item(&self, i: usize) -> Option<DirItem<'_>>;
+    /// Entries were left out (the directory exceeds the bounds).
+    fn more(&self) -> bool;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Entries kept per directory; the rest are counted as "more".
+pub const MAX_DIR_ENTRIES: usize = 4096;
+/// UTF-8 bytes of names kept per directory.
+pub const DIR_NAME_BYTES: usize = 128 * 1024;
+/// Longest name accepted, in UTF-16 units (NTFS and FAT long names).
+pub const MAX_NAME_UNITS: usize = 255;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Slot {
+    off: u32,
+    len: u16,
+    kind: EntryKind,
+    bytes: u64,
+}
+
+/// A listing in fixed memory (it lives in [`crate::Buffers`]): what
+/// [`Volume::list_dir`](crate::Volume::list_dir) fills, entry by entry,
+/// from names as the filesystem stores them (UTF-16).
+pub struct DirListing {
+    slots: [Slot; MAX_DIR_ENTRIES],
+    count: usize,
+    names: [u8; DIR_NAME_BYTES],
+    used: usize,
+    more: bool,
+    level: Level,
+}
+
+fn ascii_lower_eq(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .all(|(x, y)| x.eq_ignore_ascii_case(&y))
+}
+
+/// The kind a file name has on `level`, or `None` when it is not shown.
+pub fn file_kind(level: Level, name: &str) -> Option<EntryKind> {
+    let ext = name.rsplit_once('.').map(|(_, e)| e)?;
+    let is = |e: &str| ascii_lower_eq(ext, e);
+    if is("efi") {
+        return Some(EntryKind::Efi);
+    }
+    match level {
+        Level::Volume if is("vhd") || is("vhdx") || is("img") || is("raw") => Some(EntryKind::Disk),
+        _ => None,
+    }
+}
+
+impl DirListing {
+    pub const fn new() -> Self {
+        DirListing {
+            slots: [Slot {
+                off: 0,
+                len: 0,
+                kind: EntryKind::Dir,
+                bytes: 0,
+            }; MAX_DIR_ENTRIES],
+            count: 0,
+            names: [0; DIR_NAME_BYTES],
+            used: 0,
+            more: false,
+            level: Level::Volume,
+        }
+    }
+
+    /// Start a listing for `level`.
+    pub fn clear(&mut self, level: Level) {
+        self.count = 0;
+        self.used = 0;
+        self.more = false;
+        self.level = level;
+    }
+
+    pub const fn level(&self) -> Level {
+        self.level
+    }
+
+    /// Offer one entry as read from the directory. `.`, `..`, names starting
+    /// with `$` (NTFS metafiles), names with a control character, `\`, `/`
+    /// or an unpaired surrogate, and files that are neither disks nor UEFI
+    /// images are skipped. Returns `false` once the listing is full (the
+    /// entry and any later ones count as [`Listing::more`]).
+    pub fn push(&mut self, name: &[u16], is_dir: bool, bytes: u64) -> bool {
+        if name.is_empty() || name.len() > MAX_NAME_UNITS {
+            return true;
+        }
+        let at = self.used;
+        let mut n = 0usize;
+        for c in char::decode_utf16(name.iter().copied()) {
+            let Ok(c) = c else {
+                return true;
+            };
+            if c.is_control() || c == '\\' || c == '/' {
+                return true;
+            }
+            let mut e = [0u8; 4];
+            let e = c.encode_utf8(&mut e).as_bytes();
+            let Some(dst) = self.names.get_mut(at + n..at + n + e.len()) else {
+                self.more = true;
+                return false;
+            };
+            dst.copy_from_slice(e);
+            n += e.len();
+        }
+        let text = core::str::from_utf8(self.names.get(at..at + n).unwrap_or(&[])).unwrap_or("");
+        if text == "." || text == ".." || text.starts_with('$') {
+            return true;
+        }
+        let kind = if is_dir {
+            EntryKind::Dir
+        } else {
+            match file_kind(self.level, text) {
+                Some(k) => k,
+                None => return true,
+            }
+        };
+        let Some(slot) = self.slots.get_mut(self.count) else {
+            self.more = true;
+            return false;
+        };
+        *slot = Slot {
+            off: at as u32,
+            len: n as u16,
+            kind,
+            bytes,
+        };
+        self.count += 1;
+        self.used += n;
+        true
+    }
+
+    fn name_of(&self, s: &Slot) -> &str {
+        let (o, l) = (s.off as usize, usize::from(s.len));
+        core::str::from_utf8(self.names.get(o..o + l).unwrap_or(&[])).unwrap_or("")
+    }
+
+    /// Folders first, then case-insensitively by name (ties by exact name).
+    pub fn sort(&mut self) {
+        let names = &self.names;
+        let name = |s: &Slot| {
+            let (o, l) = (s.off as usize, usize::from(s.len));
+            core::str::from_utf8(names.get(o..o + l).unwrap_or(&[])).unwrap_or("")
+        };
+        let n = self.count.min(MAX_DIR_ENTRIES);
+        if let Some(slots) = self.slots.get_mut(..n) {
+            slots.sort_unstable_by(|a, b| {
+                let (da, db) = (a.kind != EntryKind::Dir, b.kind != EntryKind::Dir);
+                da.cmp(&db)
+                    .then_with(|| {
+                        name(a)
+                            .chars()
+                            .flat_map(char::to_lowercase)
+                            .cmp(name(b).chars().flat_map(char::to_lowercase))
+                    })
+                    .then_with(|| name(a).cmp(name(b)))
+            });
+        }
+    }
+
+    /// The index of the entry called `name`, if listed.
+    pub fn find(&self, name: &str) -> Option<usize> {
+        (0..self.count).find(|&i| self.item(i).is_some_and(|e| e.name == name))
+    }
+}
+
+impl Default for DirListing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Listing for DirListing {
+    fn len(&self) -> usize {
+        self.count
+    }
+    fn item(&self, i: usize) -> Option<DirItem<'_>> {
+        let s = self.slots.get(..self.count)?.get(i)?;
+        Some(DirItem {
+            name: self.name_of(s),
+            kind: s.kind,
+            bytes: s.bytes,
+        })
+    }
+    fn more(&self) -> bool {
+        self.more
+    }
+}
+
+/// What the browser shows: the directory's path (for the breadcrumb), its
+/// entries, and the row to start on.
+#[derive(Clone, Copy)]
+pub struct DirView<'a> {
+    pub path: &'a str,
+    pub listing: &'a dyn Listing,
+    pub selected: usize,
+}
+
+impl fmt::Debug for DirView<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirView")
+            .field("path", &self.path)
+            .field("entries", &self.listing.len())
+            .field("selected", &self.selected)
+            .finish()
+    }
+}
+
 /// Every screen the loader can show. The theme is compiled in: no screen
 /// takes display *markup*, only small typed parameters and inline labels
 /// (partition and file names), which renderers treat as plain text.
@@ -322,11 +566,20 @@ pub enum Screen {
     NoInstallation,
     /// "Which volume holds your Linux installation?" (recovery, step 1).
     SelectVolume(VolumeList),
-    /// What to boot from the unlocked volume's `\paguro\` (recovery, step 2):
-    /// the entries found, then "type a path".
-    SelectTarget(TargetList),
-    /// A path typed by hand (recovery, step 2).
-    EnterPath,
+    /// The file browser (recovery, step 2): the entries come with
+    /// [`Platform::prompt_browse`].
+    Browse(Level),
+    /// A path typed by hand, on the volume or on a disk's EFI partition.
+    EnterPath(Level),
+    /// A disk was chosen: start its default UEFI image, browse its EFI
+    /// partition, or type a path there.
+    DiskStart {
+        /// The disk file's name.
+        disk: Label,
+    },
+    /// The chosen disk has no FAT32 EFI partition the loader can read
+    /// (shown like [`Screen::Incorrect`]: no key, the browser follows).
+    NoEfiPartition,
     /// The root hint for an `efi_file` (recovery, step 3): the candidates,
     /// then "no root".
     SelectRoot {
@@ -343,10 +596,18 @@ pub enum Input {
     /// A secret (or typed path) of this many bytes (UTF-8) is in the prompt
     /// buffer.
     Secret(usize),
-    /// An index in a list (volume, boot target, root candidate).
+    /// An index in a list (volume, root candidate).
     Choose(u8),
-    /// "Type a path" on the boot-target list.
+    /// An entry of the browsed directory, by index in its listing.
+    Entry(u16),
+    /// The browser's parent directory.
+    Parent,
+    /// "Type a path" in the browser or on the disk screen.
     TypePath,
+    /// The disk screen: start the default UEFI image.
+    UseDefault,
+    /// The disk screen: browse the disk's EFI partition.
+    BrowseDisk,
     /// "No root" on the root list: the initrd asks.
     NoRoot,
     /// "Start Windows": `BootNext` + reset, never a chainload.
@@ -404,6 +665,17 @@ pub trait Platform {
     /// [`Screen::EnterPath`], the typed path) is written to `secret`, which is
     /// wiped when the prompt is left any other way.
     fn prompt(&mut self, screen: &Screen, secret: &mut [u8]) -> Input;
+
+    /// The recovery file browser (INTERFACES.md §13.4): show `screen` (a
+    /// [`Screen::Browse`]) over `dir` and return [`Input::Entry`],
+    /// [`Input::Parent`], [`Input::TypePath`] or [`Input::Escape`].
+    ///
+    /// Defaults to `Escape` for platforms that never recover (test TPM
+    /// harnesses).
+    fn prompt_browse(&mut self, screen: &Screen, dir: &DirView<'_>) -> Input {
+        let _ = (screen, dir);
+        Input::Escape
+    }
 
     /// Diagnostics (the serial log in QEMU). Never receives key material.
     fn log(&mut self, args: fmt::Arguments<'_>);
