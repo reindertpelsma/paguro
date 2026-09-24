@@ -32,6 +32,14 @@ design question is named).
 - Sector = 512 bytes. NTFS cluster size comes from the boot sector and is never
   assumed.
 
+### 0.1 Architectures
+
+x86_64 and aarch64. All code is architecture-neutral; where a name depends on
+the architecture it follows the UEFI convention (`<arch>` = `x64` | `aa64`:
+`BOOTX64.EFI` / `BOOTAA64.EFI`, `shimx64.efi` / `shimaa64.efi`). Every paguro
+format is little-endian regardless of host. CI runs the Rust and C tests on
+aarch64 under qemu-user and boots the aarch64 loader under AAVMF.
+
 ## 1. Identifiers
 
 | Name | Value |
@@ -47,7 +55,7 @@ design question is named).
 
 ```text
 \EFI\paguro\
-  shimx64.efi, mmx64.efi     distribution shim (optional; see DESIGN §12)
+  shim<arch>.efi, mm<arch>.efi   distribution shim (optional; see DESIGN §12)
   paguro.efi                 the loader
   paguro.ini                 configuration only (§3)
   tpm_seal.bin               §4

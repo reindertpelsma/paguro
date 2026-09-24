@@ -1,6 +1,7 @@
 //! `paguro.efi` — the loader (DESIGN.md §4.1).
 //!
-//! Build: `cargo build -p paguro-efi --target x86_64-unknown-uefi`
+//! Build: `cargo build -p paguro-efi --target x86_64-unknown-uefi` (or
+//! `aarch64-unknown-uefi`; the code is architecture-neutral)
 //!
 //! This binary is a thin [`Platform`](paguro_boot::Platform) over the `uefi`
 //! crate plus this `main`. The execution contract — four stages, two taints,

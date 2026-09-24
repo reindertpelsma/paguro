@@ -1,0 +1,48 @@
+name: arm64
+
+# Everything is architecture-neutral; this keeps it that way. Rust and the C
+# core run under qemu-user on the x86_64 runner, and the aarch64 loader boots
+# under AAVMF. The kernel module's VM test is x86_64-only for now.
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+  CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+
+jobs:
+  test:
+    name: tests on aarch64 (qemu-user)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu, aarch64-unknown-uefi
+          components: clippy
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - run: cargo test --target aarch64-unknown-linux-gnu -p paguro-core -p paguro-crypto -p paguro-boot -p paguro-harness
+      - run: cargo clippy -p paguro-efi --target aarch64-unknown-uefi -- -D warnings
+
+  boot:
+    name: loader under AAVMF
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-uefi
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-arm qemu-efi-aarch64 mtools dosfstools
+      - run: test/qemu/arm64-smoke.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paguro-aa64.efi
+          path: target/aarch64-unknown-uefi/release/paguro.efi

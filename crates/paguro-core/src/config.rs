@@ -29,8 +29,12 @@ pub const MAX_NAME: usize = 32;
 pub const MAX_PATH_BYTES: usize = 1024;
 pub const MAX_COMPONENTS: usize = 32;
 pub const MAX_COMPONENT_UTF16: usize = 255;
-/// The chain target when `chain` is absent.
+/// The chain target when `chain` is absent: the UEFI removable-media path for
+/// the architecture the loader runs on.
+#[cfg(not(target_arch = "aarch64"))]
 pub const DEFAULT_CHAIN: &str = "\\EFI\\BOOT\\BOOTX64.EFI";
+#[cfg(target_arch = "aarch64")]
+pub const DEFAULT_CHAIN: &str = "\\EFI\\BOOT\\BOOTAA64.EFI";
 /// The first line [`write`] emits.
 pub const HEADER_COMMENT: &str = "# paguro configuration. Not hand-editable: use `paguro config`.";
 
