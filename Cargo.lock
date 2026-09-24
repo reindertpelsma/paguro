@@ -427,6 +427,8 @@ version = "0.0.0"
 dependencies = [
  "cc",
  "paguro-core",
+ "paguro-crypto",
+ "sha2",
 ]
 
 [[package]]

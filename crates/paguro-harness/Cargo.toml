@@ -8,6 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 paguro-core.workspace = true
+paguro-crypto.workspace = true
+sha2.workspace = true
 
 [build-dependencies]
 cc = "1"
