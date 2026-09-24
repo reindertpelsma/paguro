@@ -134,3 +134,19 @@ path = "fuzz_targets/vt100.rs"
 test = false
 doc = false
 bench = false
+
+# ---- The loader's NTFS names (stage 4, INTERFACES §3.2, §13.4) --------------
+
+[[bin]]
+name = "ntfs_index"
+path = "fuzz_targets/ntfs_index.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ntfs_lookup"
+path = "fuzz_targets/ntfs_lookup.rs"
+test = false
+doc = false
+bench = false

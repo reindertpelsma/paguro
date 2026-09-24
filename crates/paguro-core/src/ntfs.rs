@@ -20,6 +20,9 @@
 use crate::range::Extent;
 use crate::runlist::{self, Run, RunlistError};
 
+/// Path lookup, directory listing and file reading for the loader.
+pub mod dir;
+
 /// Sector size of every read and every output extent.
 pub const SECTOR: u64 = 512;
 /// Largest MFT record accepted (4 KiB-sector volumes use 4 KiB records).

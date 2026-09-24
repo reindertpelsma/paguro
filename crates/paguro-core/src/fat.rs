@@ -394,6 +394,57 @@ impl Fs {
     }
 }
 
+impl Fs {
+    /// The entry `path` names (a file or a directory): its first cluster,
+    /// size and kind. `\` alone is refused (the root has no entry).
+    pub fn find<S: Sectors>(
+        &self,
+        src: &mut S,
+        path: &str,
+        scratch: &mut [u8; SCRATCH],
+    ) -> Result<Found, FatError> {
+        let rest = path.strip_prefix('\\').ok_or(FatError::BadPath)?;
+        let (dir, name) = match rest.rsplit_once('\\') {
+            Some((d, n)) => (d, n),
+            None => ("", rest),
+        };
+        if name.is_empty() || name == "." || name == ".." {
+            return Err(FatError::BadPath);
+        }
+        let mut parent = [0u8; 1024];
+        let plen = 1 + dir.len();
+        let pb = parent.get_mut(..plen).ok_or(FatError::TooLarge)?;
+        if let Some((first, tail)) = pb.split_first_mut() {
+            *first = b'\\';
+            tail.copy_from_slice(dir.as_bytes());
+        }
+        let parent = core::str::from_utf8(parent.get(..plen).unwrap_or(&[]))
+            .map_err(|_| FatError::BadPath)?;
+        let c = self.find_dir(src, parent, scratch)?;
+        let mut found = None;
+        self.walk(src, c, scratch, |e| {
+            if eq_name(e.name, name) {
+                found = Some(Found {
+                    cluster: e.cluster,
+                    size: e.size,
+                    is_dir: e.is_dir,
+                });
+                return false;
+            }
+            true
+        })?;
+        found.ok_or(FatError::NotFound)
+    }
+}
+
+/// What [`Fs::find`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub cluster: u32,
+    pub size: u32,
+    pub is_dir: bool,
+}
+
 /// Build FAT32 images in memory (tests).
 #[cfg(test)]
 mod build {
@@ -638,6 +689,44 @@ mod tests {
         );
         assert_eq!(names(&mut img, "EFI"), Err(FatError::BadPath));
         assert_eq!(names(&mut img, "\\EFI\\..\\EFI"), Err(FatError::BadPath));
+    }
+
+    #[test]
+    fn find_files_and_directories() {
+        let mut img = esp();
+        let mut scratch = [0u8; SCRATCH];
+        let space = img.data.len() as u64;
+        let fs = Fs::open(&mut img, space, &mut scratch).unwrap();
+        let f = fs
+            .find(&mut img, "\\efi\\BOOT\\bootx64.efi", &mut scratch)
+            .unwrap();
+        assert_eq!((f.size, f.is_dir), (1234, false));
+        assert!(
+            fs.find(&mut img, "\\EFI\\systemd", &mut scratch)
+                .unwrap()
+                .is_dir
+        );
+        assert!(fs.find(&mut img, "\\readme.TXT", &mut scratch).is_ok());
+        assert_eq!(
+            fs.find(&mut img, "\\EFI\\BOOT\\nope.efi", &mut scratch),
+            Err(FatError::NotFound)
+        );
+        assert_eq!(
+            fs.find(&mut img, "\\nope\\x.efi", &mut scratch),
+            Err(FatError::NotFound)
+        );
+        for bad in ["\\", "EFI", "\\EFI\\", "\\EFI\\..", "\\EFI\\."] {
+            assert_eq!(
+                fs.find(&mut img, bad, &mut scratch),
+                Err(FatError::BadPath),
+                "{bad}"
+            );
+        }
+        let long = std::format!("\\{}\\x", "d".repeat(1100));
+        assert_eq!(
+            fs.find(&mut img, &long, &mut scratch),
+            Err(FatError::TooLarge)
+        );
     }
 
     #[test]
