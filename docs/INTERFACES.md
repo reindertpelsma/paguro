@@ -149,9 +149,36 @@ content:
 | a FAT32 boot sector | the whole payload (a "superfloppy" FAT32 disk) |
 | anything else | refuse |
 
-Either way the FAT32 is published as a real `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL`
-and the UEFI image is loaded by device path, so it inherits a `DeviceHandle`
-(DESIGN §4.2 — systemd-stub needs it).
+The loader publishes **the whole disk** (`efi_disk`'s payload) as a
+**read-only** `EFI_BLOCK_IO_PROTOCOL` with a device path, whose reads resolve
+through the extent map and BitLocker, then calls `ConnectController` so the
+firmware's partition and FAT drivers bind it (DESIGN §4.2 tier 1; own FAT
+`SimpleFileSystem` as the fallback, tier 2). The UEFI image is loaded by device
+path, so it inherits a `DeviceHandle`. `WriteBlocks` returns
+`EFI_WRITE_PROTECTED`: the loader never writes to disk, whoever asks.
+
+**What `efi` may point at:**
+
+| Next image | Works because |
+|---|---|
+| a UKI | it needs nothing but itself (also from `efi_file`) |
+| systemd-boot | it enumerates `/EFI/Linux` off its `DeviceHandle` |
+| **the distribution's own shim + GRUB** | GRUB's `efidisk` driver uses every `BlockIo` handle, so the image is an ordinary disk to it: its own ext4/btrfs/LVM/LUKS modules read `/boot` inside the image. **No GRUB module of ours** |
+
+The third row is what makes stock distribution images bootable unchanged at the
+boot-loader level. What a stock image still needs, stated plainly:
+
+- **one package in the image** (`paguro-initramfs`): the `dm-paguro` module
+  (DKMS, MOK-signed like any DKMS module under Secure Boot) and the
+  initramfs-tools/dracut hook that reads the handoff and builds the views. A
+  stock initramfs cannot find a root inside a VHD inside NTFS on its own;
+- **GRUB's writes fail**: `save_env`/`recordfail` meet a write-protected disk
+  and GRUB carries on (to be confirmed per distribution, §11);
+- **nested shim**: paguro, itself loaded by shim, `LoadImage`s the
+  distribution's Microsoft-signed shim, which then verifies GRUB and the kernel
+  with the distribution's own key. Needs the Microsoft third-party UEFI CA in
+  `db` and a shim that tolerates an existing `SHIM_LOCK` protocol (to be
+  confirmed, §11).
 
 **Decisions, argued:**
 
