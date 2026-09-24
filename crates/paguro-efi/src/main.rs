@@ -21,7 +21,9 @@
 
 mod blockio;
 mod console;
+mod front;
 mod gop;
+mod input;
 mod platform;
 
 /// SBAT metadata (shim's revocation scheme). shim refuses to start a second
@@ -114,6 +116,7 @@ fn main() -> Status {
     // unencrypted volume.
     let mut vol = BdeVolume::new(stage4, meta);
     let out = paguro_boot::run(&mut p, &mut vol, bufs, &Params::PRODUCTION);
+    p.release_consoles();
     info!("paguro: outcome {out:?}");
     match out {
         Outcome::Started(_) => Status::SUCCESS,

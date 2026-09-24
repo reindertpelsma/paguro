@@ -9,12 +9,12 @@ use core::ptr::NonNull;
 
 use log::info;
 
-use crate::console::Out;
-use crate::gop::{self, Gop};
+use crate::front::Front;
 use paguro_boot::platform::{DirView, DiskInfo, Input, Platform, PlatformError, Screen};
 use paguro_boot::ui::Key;
+use paguro_core::config::Ui;
 use paguro_core::guid::Guid;
-use paguro_ui::driver::{self, Console, Session};
+use paguro_ui::driver::{self, Session};
 use uefi::boot::{
     self, AllocateType, LoadImageSource, MemoryType, OpenProtocolAttributes, OpenProtocolParams,
     SearchType,
@@ -38,9 +38,9 @@ pub struct Efi {
     disks: [Option<Handle>; MAX_DISKS],
     disk_count: usize,
     bounce: NonNull<u8>,
-    /// The graphical front end; `None`: the text console.
-    gop: Option<Gop>,
-    session: Session,
+    /// The displays, consoles and inputs.
+    front: Front,
+    session: &'static mut Session,
 }
 
 fn dev(e: &uefi::Error<impl fmt::Debug>) -> PlatformError {
@@ -64,16 +64,33 @@ impl Efi {
             BOUNCE / 4096,
         )
         .map_err(|e| dev(&e))?;
-        let gop = gop::take_display();
-        if gop.is_none() {
+        let front = Front::new();
+        if front.gop.is_none() {
             info!("paguro: no usable graphics output, text console");
         }
+        // The session holds a text grid: pages, not the firmware's stack.
+        let size = core::mem::size_of::<Session>();
+        let p: NonNull<u8> = boot::allocate_pages(
+            AllocateType::AnyPages,
+            MemoryType::LOADER_DATA,
+            size.div_ceil(4096),
+        )
+        .map_err(|e| dev(&e))?;
+        let sp = p.as_ptr().cast::<Session>();
+        // SAFETY: a fresh, page-aligned allocation of at least
+        // `size_of::<Session>()` bytes, initialised before the reference is
+        // formed, owned by the loader for its lifetime.
+        let session = unsafe {
+            sp.write(Session::new());
+            &mut *sp
+        };
+        session.text = front.text();
         let mut me = Efi {
             disks: [None; MAX_DISKS],
             disk_count: 0,
             bounce,
-            gop,
-            session: Session::new(),
+            front,
+            session,
         };
         me.scan_disks();
         Ok(me)
@@ -99,6 +116,12 @@ impl Efi {
                 self.disk_count += 1;
             }
         }
+    }
+
+    /// Give the serial consoles back to the firmware (before returning to
+    /// it, or starting anything).
+    pub fn release_consoles(&mut self) {
+        self.front.release();
     }
 
     fn bounce(&mut self) -> &mut [u8] {
@@ -163,33 +186,6 @@ pub(crate) fn decode_key(k: UKey) -> Option<Key> {
                 c => Some(Key::Char(c)),
             }
         }
-    }
-}
-
-/// A key from `SimpleTextInput` (no modifiers).
-pub(crate) fn read_key() -> Key {
-    loop {
-        let ev = uefi::system::with_stdin(|i| i.wait_for_key_event().ok());
-        if let Some(ev) = ev {
-            let _ = boot::wait_for_event(&[ev]);
-        }
-        if let Some(k) =
-            uefi::system::with_stdin(|i| i.read_key().ok().flatten()).and_then(decode_key)
-        {
-            return k;
-        }
-    }
-}
-
-/// The text console for the no-GOP prompt.
-struct Tty;
-
-impl Console for Tty {
-    fn write_str(&mut self, s: &str) {
-        let _ = fmt::Write::write_str(&mut Out, s);
-    }
-    fn read_key(&mut self) -> Key {
-        gop::read_key()
     }
 }
 
@@ -392,17 +388,17 @@ impl Platform for Efi {
     }
 
     fn prompt(&mut self, screen: &Screen, secret: &mut [u8]) -> Input {
-        match self.gop.as_mut() {
-            Some(g) => driver::prompt(g, &mut self.session, screen, secret),
-            None => driver::prompt_text(&mut Tty, screen, secret),
-        }
+        driver::prompt(&mut self.front, self.session, screen, secret)
     }
 
     fn prompt_browse(&mut self, screen: &Screen, dir: &DirView<'_>) -> Input {
-        match self.gop.as_mut() {
-            Some(g) => driver::prompt_browse(g, &mut self.session, screen, dir),
-            None => driver::prompt_browse_text(&mut Tty, screen, dir),
-        }
+        driver::prompt_browse(&mut self.front, self.session, screen, dir)
+    }
+
+    fn ui_prefs(&mut self, ui: Ui) {
+        self.session.apply(ui);
+        self.front.configure(ui.mode, self.session.text);
+        self.session.text = self.front.text();
     }
 
     fn log(&mut self, args: fmt::Arguments<'_>) {
@@ -421,29 +417,40 @@ impl Platform for Efi {
     }
 
     fn load_start_image(&mut self, device_path: &[u8]) -> Result<(), PlatformError> {
-        let dp = <&DevicePath>::try_from(device_path).map_err(|_| PlatformError::Unsupported)?;
-        let img = boot::load_image(
-            boot::image_handle(),
-            LoadImageSource::FromDevicePath {
-                device_path: dp,
-                boot_policy: BootPolicy::ExactMatch,
-            },
-        )
-        .map_err(|e| dev(&e))?;
-        boot::start_image(img).map_err(|e| dev(&e))
+        // The image gets the consoles as the firmware set them up; the
+        // loader takes them back if it returns or is refused.
+        self.front.release();
+        let r = (|| {
+            let dp =
+                <&DevicePath>::try_from(device_path).map_err(|_| PlatformError::Unsupported)?;
+            let img = boot::load_image(
+                boot::image_handle(),
+                LoadImageSource::FromDevicePath {
+                    device_path: dp,
+                    boot_policy: BootPolicy::ExactMatch,
+                },
+            )
+            .map_err(|e| dev(&e))?;
+            boot::start_image(img).map_err(|e| dev(&e))
+        })();
+        self.front.configure(self.session.mode, self.session.text);
+        r
     }
 
     fn load_start_image_buffer(&mut self, image: &[u8]) -> Result<(), PlatformError> {
+        self.front.release();
         // LoadImage verifies it (Secure Boot / shim) exactly as by path.
-        let img = boot::load_image(
+        let r = boot::load_image(
             boot::image_handle(),
             LoadImageSource::FromBuffer {
                 buffer: image,
                 file_path: None,
             },
         )
-        .map_err(|e| dev(&e))?;
-        boot::start_image(img).map_err(|e| dev(&e))
+        .map_err(|e| dev(&e))
+        .and_then(|img| boot::start_image(img).map_err(|e| dev(&e)));
+        self.front.configure(self.session.mode, self.session.text);
+        r
     }
 
     fn alloc_image(&mut self, len: usize) -> Result<&'static mut [u8], PlatformError> {
@@ -478,6 +485,7 @@ impl Platform for Efi {
     }
 
     fn reset(&mut self) {
+        self.front.release();
         runtime::reset(ResetType::COLD, Status::SUCCESS, None)
     }
 }
