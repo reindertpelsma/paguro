@@ -975,6 +975,22 @@ the passphrase was set in Windows with the real layout, so unlocking fails.
 - Recovery does not read the `.ini`, so it starts in `us` with the layout
   selectable on screen (F4 cycles).
 
+### 13.6 On-screen settings, scrolling, typed paths
+
+- **Keyboard layout and language are selectable on every prompt** (F4 layout,
+  F5 language, also reachable by pointer), for this boot only — the loader
+  never writes the `.ini`. Switching to English is one obvious action.
+- **Every list scrolls**: unlock menu, volumes, layouts, languages, the
+  browser; in every variant and in text mode. Keyboard (↑ ↓ PageUp PageDown
+  Home End), mouse wheel (`RelativeMovementZ`) and clickable arrows. The side
+  that overflows is marked ("▲ 3 more" / "▼ 12 more"; ASCII in text mode), and
+  the selection is always visible.
+- **Browser**: folders first, case-insensitive natural sort (`disk2` before
+  `disk10`); a path can be typed at any time relative to the selected volume,
+  `\` or `/`; a leading drive letter (`C:`, `D:`) is ignored with a note, since
+  the loader cannot know Windows' drive letters.
+- **Later, not now:** an on-screen keyboard for pointer and touch input.
+
 ## 12. Testing contract
 
 Each interface ships with:
