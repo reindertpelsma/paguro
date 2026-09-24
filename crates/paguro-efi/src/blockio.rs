@@ -21,10 +21,13 @@ use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 
 use log::info;
+use paguro_boot::bde::{DecryptingReader, ReadError, UnitRead};
 use paguro_boot::platform::PlatformError;
 use paguro_boot::stage4::{ExposedDisk, FatAt};
+use paguro_core::bde::Layout;
 use paguro_core::ntfs;
 use paguro_core::range::Extent;
+use paguro_crypto::bitlocker::Xts;
 use uefi::boot::{self, AllocateType, MemoryType, SearchType};
 use uefi::proto::device_path::DevicePath;
 use uefi::proto::device_path::text::{AllowShortcuts, DevicePathToText, DisplayOnly};
@@ -56,6 +59,10 @@ struct Published {
     /// Payload sectors.
     sectors: u64,
     bounce: *mut u8,
+    /// BitLocker: the decrypted view's map and the FVEK's key schedule (in
+    /// pages of their own). Null `xts`: an unencrypted volume.
+    layout: Layout,
+    xts: *const Xts,
 }
 
 const BOUNCE: usize = 64 * 1024;
@@ -86,12 +93,58 @@ unsafe extern "efiapi" fn flush_blocks(_: *mut BlockIoProtocol) -> Status {
     Status::SUCCESS
 }
 
-/// Read `n` volume sectors from `sector` into `dst` through the physical
-/// disk (512- or 4096-byte blocks).
+/// Physical units of a BitLocker volume, for [`DecryptingReader`].
+struct RawUnits<'a> {
+    d: &'a Published,
+    bps: u64,
+}
+
+impl UnitRead for RawUnits<'_> {
+    fn read_units(&mut self, unit: u64, buf: &mut [u8]) -> Result<(), ReadError> {
+        let per = self.bps / 512;
+        let sector = unit.checked_mul(per).ok_or(ReadError::Range)?;
+        // SAFETY: `buf` is a live slice of `buf.len()` bytes.
+        let st = unsafe { read_raw(self.d, sector, (buf.len() / 512) as u64, buf.as_mut_ptr()) };
+        if st.is_error() {
+            return Err(ReadError::Io);
+        }
+        Ok(())
+    }
+}
+
+/// Read `n` volume sectors from `sector` into `dst`: the plaintext view —
+/// through the BitLocker layer when the volume is encrypted.
 ///
 /// # Safety
 /// `d` is a live [`Published`]; `dst` is valid for `n * 512` bytes.
 unsafe fn read_volume(d: &Published, sector: u64, n: u64, dst: *mut u8) -> Status {
+    if d.xts.is_null() {
+        // SAFETY: forwarded contract.
+        return unsafe { read_raw(d, sector, n, dst) };
+    }
+    // SAFETY: `xts` points at the key schedule written at publish time,
+    // never freed; `dst` holds `n * 512` bytes (the caller's contract).
+    let (xts, out) = unsafe {
+        (
+            &*d.xts,
+            core::slice::from_raw_parts_mut(dst, (n * 512) as usize),
+        )
+    };
+    let bps = u64::from(d.layout.bytes_per_sector);
+    let mut r = DecryptingReader::new(RawUnits { d, bps }, d.layout, xts);
+    match r.read_sectors(sector, out) {
+        Ok(()) => Status::SUCCESS,
+        Err(ReadError::Io) => Status::DEVICE_ERROR,
+        Err(_) => Status::INVALID_PARAMETER,
+    }
+}
+
+/// Read `n` volume sectors from `sector` into `dst` through the physical
+/// disk (512- or 4096-byte blocks), as stored.
+///
+/// # Safety
+/// `d` is a live [`Published`]; `dst` is valid for `n * 512` bytes.
+unsafe fn read_raw(d: &Published, sector: u64, n: u64, dst: *mut u8) -> Status {
     let Some(end) = sector.checked_add(n) else {
         return Status::INVALID_PARAMETER;
     };
@@ -232,11 +285,6 @@ pub fn expose(
     image: &str,
     out: &mut [u8],
 ) -> Result<usize, PlatformError> {
-    if disk.fve.is_some() {
-        // The decrypting read path is the BitLocker layer's to wire in.
-        info!("paguro: blockio: BitLocker volumes are not wired into the block device yet");
-        return Err(PlatformError::Unsupported);
-    }
     if disk.sectors == 0 || disk.extents.is_empty() {
         return Err(PlatformError::Unsupported);
     }
@@ -251,6 +299,39 @@ pub fn expose(
         ptr::copy_nonoverlapping(disk.extents.as_ptr(), extents.as_ptr(), disk.extents.len());
     }
     let bounce: NonNull<u8> = pages(BOUNCE).ok_or(PlatformError::TooLarge)?;
+    // BitLocker: the key schedule lives in pages the chained image's reads
+    // can reach after the loader is gone (INTERFACES.md §12.2: tweak = unit
+    // index, the relocated boot sectors, zeros over the metadata).
+    let (layout, xts) = match disk.fve {
+        Some((_, key, layout)) => {
+            if u64::from(layout.bytes_per_sector) < phys_block {
+                return Err(PlatformError::Unsupported);
+            }
+            let x = Xts::new(key).map_err(|_| PlatformError::Unsupported)?;
+            let at: NonNull<Xts> =
+                pages(core::mem::size_of::<Xts>()).ok_or(PlatformError::TooLarge)?;
+            // SAFETY: a fresh allocation large enough and aligned (pages).
+            unsafe { at.as_ptr().write(x) };
+            info!(
+                "paguro: blockio: BitLocker, {}-byte units, encrypted to {:#x}",
+                layout.bytes_per_sector, layout.encrypted_size
+            );
+            (layout, at.as_ptr().cast_const())
+        }
+        None => (
+            Layout {
+                bytes_per_sector: 512,
+                volume_size: 0,
+                metadata_offsets: [0; 3],
+                reloc_len: 0,
+                reloc_offset: 0,
+                encrypted_size: 0,
+                cipher: paguro_core::bde::Cipher::XtsAes128,
+                partial: false,
+            },
+            ptr::null(),
+        ),
+    };
     let d: NonNull<Published> =
         pages(core::mem::size_of::<Published>()).ok_or(PlatformError::TooLarge)?;
     let part_sectors = disk
@@ -292,6 +373,8 @@ pub fn expose(
         ptr::addr_of_mut!((*p).extent_count).write(disk.extents.len());
         ptr::addr_of_mut!((*p).sectors).write(disk.sectors);
         ptr::addr_of_mut!((*p).bounce).write(bounce.as_ptr());
+        ptr::addr_of_mut!((*p).layout).write(layout);
+        ptr::addr_of_mut!((*p).xts).write(xts);
     }
 
     // The device path: the physical disk's, then a vendor media node naming

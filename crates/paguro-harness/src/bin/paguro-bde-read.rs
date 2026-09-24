@@ -20,7 +20,7 @@ use std::os::unix::fs::FileExt;
 use std::process::exit;
 
 use paguro_boot::bde::{
-    DecryptingReader, ReadError, SectorRead, unlock_fvek, vmk_from_clear_key, vmk_from_password,
+    DecryptingReader, ReadError, UnitRead, unlock_fvek, vmk_from_clear_key, vmk_from_password,
     vmk_from_recovery, vmk_from_startup_key,
 };
 use paguro_boot::volume::parse_recovery_password;
@@ -34,7 +34,7 @@ fn die(msg: &str) -> ! {
 
 struct Img(File, u32);
 
-impl SectorRead for Img {
+impl UnitRead for Img {
     fn read_units(&mut self, unit: u64, buf: &mut [u8]) -> Result<(), ReadError> {
         self.0
             .read_exact_at(buf, unit * u64::from(self.1))

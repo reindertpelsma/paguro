@@ -12,7 +12,7 @@
 use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
-use paguro_boot::bde::{DecryptingReader, ReadError, SectorRead, unlock_fvek, vmk_from_clear_key};
+use paguro_boot::bde::{DecryptingReader, ReadError, UnitRead, unlock_fvek, vmk_from_clear_key};
 use paguro_core::bde::*;
 
 struct Sparse<'a> {
@@ -20,7 +20,7 @@ struct Sparse<'a> {
     bps: u64,
 }
 
-impl SectorRead for Sparse<'_> {
+impl UnitRead for Sparse<'_> {
     fn read_units(&mut self, unit: u64, buf: &mut [u8]) -> std::result::Result<(), ReadError> {
         buf.fill(0);
         let at = unit.checked_mul(self.bps).ok_or(ReadError::Range)?;

@@ -23,6 +23,7 @@
 //!
 //! No step writes anything, anywhere.
 
+use paguro_core::bde::Layout;
 use paguro_core::config::{self, Efi, Entry};
 use paguro_core::disk::{self, DiskError, EfiFs};
 use paguro_core::fat::{self, FatError};
@@ -65,6 +66,18 @@ pub enum Stage4Error {
     Expose(PlatformError),
     /// The platform could not provide memory for the `efi_file`.
     Memory(PlatformError),
+    /// The efi disk's extents cover a BitLocker non-data region (the
+    /// relocated boot sectors or their copy, a metadata region).
+    Reserved,
+}
+
+/// Whether any extent (512-byte volume sectors) meets one of `l`'s
+/// reserved ranges.
+fn overlaps_reserved(ext: &[Extent], l: &Layout) -> bool {
+    l.reserved_ranges().iter().any(|&(start, len)| {
+        ext.iter()
+            .any(|e| e.start < start.saturating_add(len) && start < e.end)
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -557,7 +570,7 @@ impl Stage4 {
         p: &mut P,
         r: &mut R,
         part: &Partition,
-        fve: Option<(u16, &[u8], FveLayout)>,
+        fve: Option<(u16, &[u8], Layout)>,
         entry: Option<&Entry<'_>>,
         out: &mut Located,
     ) -> Result<(), BootError> {
@@ -705,6 +718,14 @@ impl Stage4 {
                     EfiFs::Esp { first_lba, sectors } => FatAt::Partition { first_lba, sectors },
                     EfiFs::Superfloppy(_) => FatAt::Whole,
                 };
+                // A disk over BitLocker's non-data regions is not the
+                // disk's data in either view (INTERFACES.md §12.2): refuse.
+                if let Some((_, _, l)) = fve {
+                    let ext = self.ext.get(..self.ext_n).unwrap_or(&[]);
+                    if overlaps_reserved(ext, &l) {
+                        return Err(Stage4Error::Reserved.into());
+                    }
+                }
                 let exposed = ExposedDisk {
                     part: *part,
                     extents: self.ext.get(..self.ext_n).unwrap_or(&[]),
@@ -1008,8 +1029,9 @@ pub struct ExposedDisk<'a> {
     /// The file's identity, which makes the device path unique.
     pub file: FileId,
     /// For a BitLocker volume: the FVEK (cipher, key) and the layout the
-    /// block device must decrypt with. `None`: an unencrypted volume.
-    pub fve: Option<(u16, &'a [u8], FveLayout)>,
+    /// block device must decrypt with (`paguro_boot::bde::DecryptingReader`).
+    /// `None`: an unencrypted volume.
+    pub fve: Option<(u16, &'a [u8], Layout)>,
 }
 
 /// The production [`Volume`] for an **unencrypted** NTFS volume: stage 4

@@ -317,6 +317,18 @@ pub trait Volume<P: Platform> {
     fn layout(&self) -> Option<FveLayout>;
     /// The VMK behind the recovery-password protector for this 16-byte key.
     fn recovery_key(&mut self, p: &mut P, key: &[u8; 16]) -> Result<Option<Key>, BootError>;
+    /// The VMK behind a BitLocker password protector for this user hash
+    /// (`SHA-256(SHA-256(UTF-16LE(password)))`). FVE-sourced, merged into
+    /// the password row as a free protector (DESIGN.md §6). Default: none.
+    fn bitlocker_password(&mut self, p: &mut P, user: &Key) -> Result<Option<Key>, BootError> {
+        let _ = (p, user);
+        Ok(None)
+    }
+    /// Whether the volume has a BitLocker password protector (it makes the
+    /// password row usable). Default: no.
+    fn has_bitlocker_password(&self) -> bool {
+        false
+    }
     /// Stage 4: parse NTFS, locate `entry`'s `root` and `efi_disk` or
     /// `efi_file` (or, in recovery and on a first boot, find an installation),
     /// validate their maps, and either publish the efi disk's FAT32 and name

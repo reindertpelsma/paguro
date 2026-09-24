@@ -10,12 +10,14 @@
 //!   [`unlock_fvek`] unwraps the FVEK under a VMK and then authenticates the
 //!   whole metadata block against its VMK-wrapped SHA-256 (Windows 8+).
 //! - **reading**: [`DecryptingReader`] serves the volume as Windows sees
-//!   it over any [`SectorRead`]: the relocated boot sectors at the front,
+//!   it over any [`UnitRead`]: the relocated boot sectors at the front,
 //!   zeros over the metadata regions and the relocated copy, XTS below
 //!   `encrypted_size` with tweak = sector index, plaintext above.
-//! - **the loader**: [`BdeVolume`] implements the stage-3 half of
-//!   [`Volume`] on a real partition and forwards stage 4 to a [`Stage4`]
-//!   that reads through the decrypted view.
+//!   [`BdeSectors`] is the same view as stage 4's [`SectorRead`], so every
+//!   NTFS read goes through it; the UEFI block device reuses the reader.
+//! - **the loader**: [`BdeVolume`] is the production [`Volume`] for
+//!   BitLocker and plain NTFS partitions: stage 3 here, stage 4 by
+//!   [`Stage4`] over the decrypted (or plain) sectors.
 
 use paguro_core::bde::{
     self, BdeError, Ccm, Cipher, Layout, Metadata, ProtectorKind, Source, StartupKey, VolumeHeader,
@@ -28,7 +30,8 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::BootError;
-use crate::platform::{DirListing, Platform};
+use crate::platform::{DirListing, Platform, PlatformError};
+use crate::stage4::{PartitionReader, SectorRead, Stage4};
 use crate::volume::{Key, Located, Partition, Volume, VolumeKind};
 
 pub type Vmk = [u8; 32];
@@ -92,6 +95,13 @@ fn stretched(
         }
     }
     Ok(None)
+}
+
+/// The VMK behind a BitLocker password protector, from the user hash
+/// (`SHA-256(SHA-256(UTF-16LE(password)))`, what the loader's password
+/// row already computes).
+pub fn vmk_from_password_hash(m: &Metadata<'_>, user: &[u8; 32]) -> Result<Option<Vmk>, BdeError> {
+    stretched(m, ProtectorKind::Password, user)
 }
 
 /// The VMK behind a BitLocker password protector.
@@ -190,7 +200,7 @@ pub fn unlock_fvek(m: &Metadata<'_>, vmk: &Vmk) -> Result<Option<Fvek>, BdeError
 
 /// The read callback: whole volume sectors (units of the volume header's
 /// `bytes_per_sector`), counted from the volume start.
-pub trait SectorRead {
+pub trait UnitRead {
     fn read_units(&mut self, unit: u64, buf: &mut [u8]) -> Result<(), ReadError>;
 }
 
@@ -212,12 +222,12 @@ pub struct DecryptingReader<'k, R> {
     xts: Option<&'k Xts>,
     bps: u32,
     units: u64,
-    /// One unit, for [`ntfs::Disk`]'s 512-byte reads on 4 KiB volumes.
+    /// One unit, for 512-byte reads on 4 KiB volumes.
     cache: [u8; 4096],
     cached: Option<u64>,
 }
 
-impl<'k, R: SectorRead> DecryptingReader<'k, R> {
+impl<'k, R: UnitRead> DecryptingReader<'k, R> {
     pub fn new(dev: R, layout: Layout, xts: &'k Xts) -> Self {
         DecryptingReader {
             dev,
@@ -287,28 +297,66 @@ impl<'k, R: SectorRead> DecryptingReader<'k, R> {
         }
         Ok(())
     }
-}
 
-impl<R: SectorRead> ntfs::Disk for DecryptingReader<'_, R> {
-    fn read(&mut self, sector: u64, buf: &mut [u8; 512]) -> Result<(), ntfs::IoError> {
+    /// Read 512-byte sectors of the view, whatever the unit size: whole
+    /// units straight through, partial ones via a one-unit cache.
+    pub fn read_sectors(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), ReadError> {
+        if buf.len() % 512 != 0 {
+            return Err(ReadError::Alignment);
+        }
         if self.bps == 512 {
-            return DecryptingReader::read(self, sector, buf).map_err(|_| ntfs::IoError);
+            return self.read(sector, buf);
         }
         let per = u64::from(self.bps / 512);
-        let unit = sector / per;
-        if self.cached != Some(unit) {
-            self.cached = None;
-            let bps = self.bps as usize;
-            let mut c = self.cache;
-            let r = DecryptingReader::read(self, unit, c.get_mut(..bps).ok_or(ntfs::IoError)?);
-            self.cache = c;
-            c.zeroize();
-            r.map_err(|_| ntfs::IoError)?;
-            self.cached = Some(unit);
+        let n = (buf.len() / 512) as u64;
+        if sector
+            .checked_add(n)
+            .is_none_or(|e| e > self.units.saturating_mul(per))
+        {
+            return Err(ReadError::Range);
         }
-        let at = ((sector % per) * 512) as usize;
-        buf.copy_from_slice(self.cache.get(at..at + 512).ok_or(ntfs::IoError)?);
+        let mut done = 0u64;
+        while done < n {
+            let s = sector + done;
+            let at = (done * 512) as usize;
+            if s % per == 0 && n - done >= per {
+                let whole = (n - done) / per;
+                let dst = buf
+                    .get_mut(at..at + (whole * per * 512) as usize)
+                    .ok_or(ReadError::Range)?;
+                self.read(s / per, dst)?;
+                done += whole * per;
+                continue;
+            }
+            let unit = s / per;
+            if self.cached != Some(unit) {
+                self.cached = None;
+                let bps = self.bps as usize;
+                let mut c = self.cache;
+                let r = self.read(unit, c.get_mut(..bps).ok_or(ReadError::Alignment)?);
+                self.cache = c;
+                c.zeroize();
+                r?;
+                self.cached = Some(unit);
+            }
+            let within = s % per;
+            let take = (per - within).min(n - done);
+            let src = self
+                .cache
+                .get((within * 512) as usize..((within + take) * 512) as usize)
+                .ok_or(ReadError::Range)?;
+            buf.get_mut(at..at + src.len())
+                .ok_or(ReadError::Range)?
+                .copy_from_slice(src);
+            done += take;
+        }
         Ok(())
+    }
+}
+
+impl<R: UnitRead> ntfs::Disk for DecryptingReader<'_, R> {
+    fn read(&mut self, sector: u64, buf: &mut [u8; 512]) -> Result<(), ntfs::IoError> {
+        self.read_sectors(sector, buf).map_err(|_| ntfs::IoError)
     }
 }
 
@@ -326,7 +374,7 @@ pub struct PartIo<'p, P> {
     pub unit_size: u32,
 }
 
-impl<P: Platform> SectorRead for PartIo<'_, P> {
+impl<P: Platform> UnitRead for PartIo<'_, P> {
     fn read_units(&mut self, unit: u64, buf: &mut [u8]) -> Result<(), ReadError> {
         let bs = u64::from(self.part.block_size);
         let per = u64::from(self.unit_size) / bs.max(1);
@@ -340,107 +388,75 @@ impl<P: Platform> SectorRead for PartIo<'_, P> {
     }
 }
 
-/// The plaintext of the chosen volume, as stage 4 reads it: an
-/// [`ntfs::Disk`] (512-byte sectors) and whole-unit reads, plus the
-/// platform for everything else.
-pub type Plain<'a, P> = DecryptingReader<'a, PartIo<'a, P>>;
-
-/// Stage 4 (INTERFACES.md §10.1, §13.4) over the decrypted view. Mirrors
-/// the stage-4 half of [`Volume`]; the platform is `disk.dev.p`.
-pub trait Stage4<P: Platform> {
-    fn locate(
-        &mut self,
-        disk: &mut Plain<'_, P>,
-        entry: Option<&Entry<'_>>,
-        out: &mut Located,
-    ) -> Result<(), BootError>;
-    fn efi_image(&mut self, disk: &mut Plain<'_, P>) -> Result<&[u8], BootError>;
-    fn list_dir(
-        &mut self,
-        disk: &mut Plain<'_, P>,
-        path: &str,
-        out: &mut DirListing,
-    ) -> Result<(), BootError>;
-    fn list_efi_dir(
-        &mut self,
-        disk: &mut Plain<'_, P>,
-        file: &str,
-        path: &str,
-        out: &mut DirListing,
-    ) -> Result<bool, BootError>;
+/// An unlocked BitLocker partition as stage 4 reads it: 512-byte sectors
+/// of the decrypted view.
+#[derive(Clone, Copy)]
+pub struct BdeSectors<'k> {
+    pub part: Partition,
+    pub layout: Layout,
+    pub xts: &'k Xts,
 }
 
-impl<P: Platform> Stage4<P> for crate::volume::Unimplemented {
-    fn locate(
-        &mut self,
-        _: &mut Plain<'_, P>,
-        _: Option<&Entry<'_>>,
-        _: &mut Located,
-    ) -> Result<(), BootError> {
-        Err(BootError::NotImplemented("stage 4: NTFS + image"))
+impl<P: Platform> SectorRead<P> for BdeSectors<'_> {
+    fn read(&mut self, p: &mut P, sector: u64, buf: &mut [u8]) -> Result<(), PlatformError> {
+        if buf.is_empty() {
+            return Err(PlatformError::Unsupported);
+        }
+        let io = PartIo {
+            p,
+            part: self.part,
+            unit_size: self.layout.bytes_per_sector,
+        };
+        DecryptingReader::new(io, self.layout, self.xts)
+            .read_sectors(sector, buf)
+            .map_err(|e| match e {
+                ReadError::Io => PlatformError::Device(0),
+                ReadError::Range => PlatformError::TooLarge,
+                ReadError::Alignment => PlatformError::Unsupported,
+            })
     }
-    fn efi_image(&mut self, _: &mut Plain<'_, P>) -> Result<&[u8], BootError> {
-        Err(BootError::NotImplemented("stage 4: efi_file read"))
-    }
-    fn list_dir(
-        &mut self,
-        _: &mut Plain<'_, P>,
-        _: &str,
-        _: &mut DirListing,
-    ) -> Result<(), BootError> {
-        Err(BootError::NotImplemented("stage 4: NTFS directories"))
-    }
-    fn list_efi_dir(
-        &mut self,
-        _: &mut Plain<'_, P>,
-        _: &str,
-        _: &str,
-        _: &mut DirListing,
-    ) -> Result<bool, BootError> {
-        Err(BootError::NotImplemented(
-            "stage 4: EFI partition directories",
-        ))
+    fn sectors(&self) -> u64 {
+        self.layout.units() * u64::from(self.layout.bytes_per_sector / 512)
     }
 }
 
 /// The loader's [`Volume`] for BitLocker and plain NTFS partitions.
 ///
-/// ~72 KiB (one 64 KiB metadata region): allocate it in pages, not on the
-/// firmware stack.
-pub struct BdeVolume<S> {
-    pub stage4: S,
+/// It borrows its two large parts — stage 4's working memory (~2.5 MiB)
+/// and one 64 KiB metadata region — so the loader can place them in pages
+/// (all-zero is valid for both) and keep this small struct on the stack.
+pub struct BdeVolume<'a> {
+    pub stage4: &'a mut Stage4,
+    /// Copy 0 of the FVE metadata (the whole 64 KiB region).
+    meta: &'a mut [u8; bde::REGION_SIZE as usize],
     part: Option<Partition>,
     hdr: Option<VolumeHeader>,
     layout: Option<Layout>,
     fvek: Option<Fvek>,
     xts: Option<Xts>,
-    /// Copy 0 of the FVE metadata (the whole 64 KiB region).
-    meta: [u8; bde::REGION_SIZE as usize],
-    scratch: [u8; 4096],
 }
 
 fn fail(e: BdeError) -> BootError {
     BootError::Bde(e)
 }
 
-impl<S> BdeVolume<S> {
-    pub fn new(stage4: S) -> Self {
+impl<'a> BdeVolume<'a> {
+    pub fn new(stage4: &'a mut Stage4, meta: &'a mut [u8; bde::REGION_SIZE as usize]) -> Self {
         BdeVolume {
             stage4,
+            meta,
             part: None,
             hdr: None,
             layout: None,
             fvek: None,
             xts: None,
-            meta: [0; bde::REGION_SIZE as usize],
-            scratch: [0; 4096],
         }
     }
 
     /// The parsed metadata of the opened BitLocker volume.
     pub fn metadata(&self) -> Result<Metadata<'_>, BdeError> {
         let hdr = self.hdr.as_ref().ok_or(BdeError::NotBitLocker)?;
-        Metadata::parse(bde::parse_block(&self.meta, 0, hdr)?)
+        Metadata::parse(bde::parse_block(&self.meta[..], 0, hdr)?)
     }
 
     pub fn layout_detail(&self) -> Option<&Layout> {
@@ -457,8 +473,7 @@ impl<S> BdeVolume<S> {
         self.layout.map(|l| l.fve_layout())
     }
 
-    /// Unlock with a BitLocker password protector (not a loader rung; the
-    /// recovery browser and tests use it).
+    /// Unlock with a BitLocker password protector.
     pub fn unlock_password(&mut self, password: &str) -> Result<bool, BdeError> {
         let v = vmk_from_password(&self.metadata()?, password)?;
         self.accept(v)
@@ -491,15 +506,24 @@ impl<S> BdeVolume<S> {
         Ok(true)
     }
 
-    /// The plaintext view, once unlocked (or of a plain NTFS volume).
-    pub fn plain<'a, P: Platform>(&'a self, p: &'a mut P) -> Result<Plain<'a, P>, BootError> {
-        plain_parts(
-            p,
+    /// Read 512-byte sectors of the plaintext view (once unlocked, or of a
+    /// plain NTFS volume).
+    pub fn read_sectors<P: Platform>(
+        &self,
+        p: &mut P,
+        sector: u64,
+        buf: &mut [u8],
+    ) -> Result<(), BootError> {
+        match reader(
             self.part,
             self.layout,
             self.xts.as_ref(),
             self.hdr.is_some(),
-        )
+        )? {
+            Reader::Plain(mut r) => r.read(p, sector, buf),
+            Reader::Bde(mut r) => r.read(p, sector, buf),
+        }
+        .map_err(BootError::Platform)
     }
 
     fn open_bitlocker<P: Platform>(
@@ -512,7 +536,8 @@ impl<S> BdeVolume<S> {
             .sectors
             .checked_mul(u64::from(part.block_size))
             .ok_or(fail(BdeError::MetadataOffset))?;
-        let first = self.scratch.get_mut(..bs).ok_or(BootError::Disk)?;
+        let mut scratch = [0u8; 4096];
+        let first = scratch.get_mut(..bs).ok_or(BootError::Disk)?;
         p.read_blocks(part.disk, part.first_lba, first)
             .map_err(BootError::Platform)?;
         let hdr = bde::parse_volume_header(first).map_err(fail)?;
@@ -528,9 +553,9 @@ impl<S> BdeVolume<S> {
         }
         let lba = |o: u64| part.first_lba + o / u64::from(part.block_size);
         let [m0, m1, m2] = hdr.metadata_offsets;
-        p.read_blocks(part.disk, lba(m0), &mut self.meta)
+        p.read_blocks(part.disk, lba(m0), &mut self.meta[..])
             .map_err(BootError::Platform)?;
-        let agreed = bde::parse_block(&self.meta, 0, &hdr)
+        let agreed = bde::parse_block(&self.meta[..], 0, &hdr)
             .map_err(fail)?
             .agreed
             .len();
@@ -539,7 +564,7 @@ impl<S> BdeVolume<S> {
             let mut done = 0usize;
             let mut l = lba(o);
             while done < agreed {
-                let blk = self.scratch.get_mut(..bs).ok_or(BootError::Disk)?;
+                let blk = scratch.get_mut(..bs).ok_or(BootError::Disk)?;
                 p.read_blocks(part.disk, l, blk)
                     .map_err(BootError::Platform)?;
                 let n = bs.min(agreed - done);
@@ -558,44 +583,34 @@ impl<S> BdeVolume<S> {
     }
 }
 
-fn plain_parts<'a, P: Platform>(
-    p: &'a mut P,
+enum Reader<'k> {
+    Plain(PartitionReader),
+    Bde(BdeSectors<'k>),
+}
+
+fn reader<'k>(
     part: Option<Partition>,
     layout: Option<Layout>,
-    xts: Option<&'a Xts>,
+    xts: Option<&'k Xts>,
     bitlocker: bool,
-) -> Result<Plain<'a, P>, BootError> {
+) -> Result<Reader<'k>, BootError> {
     let part = part.ok_or(BootError::NoVolume)?;
     match (layout, xts) {
-        (Some(l), Some(x)) => Ok(DecryptingReader::new(
-            PartIo {
-                p,
-                part,
-                unit_size: l.bytes_per_sector,
-            },
-            l,
-            x,
-        )),
-        (None, None) if !bitlocker => {
-            let unit_size = part.block_size;
-            Ok(DecryptingReader::passthrough(
-                PartIo { p, part, unit_size },
-                unit_size,
-                part.sectors,
-            ))
-        }
+        (Some(layout), Some(xts)) => Ok(Reader::Bde(BdeSectors { part, layout, xts })),
+        (None, None) if !bitlocker => Ok(Reader::Plain(PartitionReader { part })),
         // BitLocker, not unlocked: stage 4 never runs before a key.
         _ => Err(BootError::Bde(BdeError::FvekMismatch)),
     }
 }
 
-impl<P: Platform, S: Stage4<P>> Volume<P> for BdeVolume<S> {
+impl<P: Platform> Volume<P> for BdeVolume<'_> {
     fn open(&mut self, p: &mut P, part: &Partition, kind: VolumeKind) -> Result<(), BootError> {
         self.part = None;
         self.hdr = None;
         self.layout = None;
         self.fvek = None;
         self.xts = None;
+        self.stage4.reset();
         match kind {
             VolumeKind::BitLocker => {
                 let r = self.open_bitlocker(p, part);
@@ -648,42 +663,62 @@ impl<P: Platform, S: Stage4<P>> Volume<P> for BdeVolume<S> {
         vmk_from_recovery(&self.metadata().map_err(fail)?, key).map_err(fail)
     }
 
+    fn bitlocker_password(&mut self, _: &mut P, user: &Key) -> Result<Option<Key>, BootError> {
+        if self.hdr.is_none() {
+            return Ok(None);
+        }
+        vmk_from_password_hash(&self.metadata().map_err(fail)?, user).map_err(fail)
+    }
+
+    fn has_bitlocker_password(&self) -> bool {
+        self.metadata()
+            .is_ok_and(|m| m.of_kind(ProtectorKind::Password).next().is_some())
+    }
+
     fn locate(
         &mut self,
         p: &mut P,
         entry: Option<&Entry<'_>>,
         out: &mut Located,
     ) -> Result<(), BootError> {
-        let mut d = plain_parts(
-            p,
+        let part = self.part.ok_or(BootError::NoVolume)?;
+        let fve = match (&self.fvek, self.layout) {
+            (Some(f), Some(l)) => Some((f.cipher.to_u16(), f.key(), l)),
+            _ => None,
+        };
+        match reader(
             self.part,
             self.layout,
             self.xts.as_ref(),
             self.hdr.is_some(),
-        )?;
-        self.stage4.locate(&mut d, entry, out)
+        )? {
+            Reader::Plain(mut r) => self.stage4.locate(p, &mut r, &part, fve, entry, out),
+            Reader::Bde(mut r) => self.stage4.locate(p, &mut r, &part, fve, entry, out),
+        }
     }
 
     fn efi_image(&mut self, p: &mut P) -> Result<&[u8], BootError> {
-        let mut d = plain_parts(
-            p,
+        match reader(
             self.part,
             self.layout,
             self.xts.as_ref(),
             self.hdr.is_some(),
-        )?;
-        self.stage4.efi_image(&mut d)
+        )? {
+            Reader::Plain(mut r) => self.stage4.efi_image(p, &mut r),
+            Reader::Bde(mut r) => self.stage4.efi_image(p, &mut r),
+        }
     }
 
     fn list_dir(&mut self, p: &mut P, path: &str, out: &mut DirListing) -> Result<(), BootError> {
-        let mut d = plain_parts(
-            p,
+        match reader(
             self.part,
             self.layout,
             self.xts.as_ref(),
             self.hdr.is_some(),
-        )?;
-        self.stage4.list_dir(&mut d, path, out)
+        )? {
+            Reader::Plain(mut r) => self.stage4.list_dir(p, &mut r, path, out),
+            Reader::Bde(mut r) => self.stage4.list_dir(p, &mut r, path, out),
+        }
     }
 
     fn list_efi_dir(
@@ -693,13 +728,14 @@ impl<P: Platform, S: Stage4<P>> Volume<P> for BdeVolume<S> {
         path: &str,
         out: &mut DirListing,
     ) -> Result<bool, BootError> {
-        let mut d = plain_parts(
-            p,
+        match reader(
             self.part,
             self.layout,
             self.xts.as_ref(),
             self.hdr.is_some(),
-        )?;
-        self.stage4.list_efi_dir(&mut d, disk, path, out)
+        )? {
+            Reader::Plain(mut r) => self.stage4.list_efi_dir(p, &mut r, disk, path, out),
+            Reader::Bde(mut r) => self.stage4.list_efi_dir(p, &mut r, disk, path, out),
+        }
     }
 }

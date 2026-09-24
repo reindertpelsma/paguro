@@ -84,6 +84,8 @@ pub struct Exposed {
     pub file: FileId,
     pub fat: paguro_boot::stage4::FatAt,
     pub image: String,
+    /// BitLocker: the cipher, FVEK and layout the device decrypts with.
+    pub fve: Option<(u16, Vec<u8>, paguro_core::bde::Layout)>,
 }
 
 /// The device path the mock returns for a published disk's image.
@@ -379,6 +381,7 @@ impl Platform for Mock {
             file: disk.file,
             fat,
             image: image.to_string(),
+            fve: disk.fve.map(|(c, k, l)| (c, k.to_vec(), l)),
         });
         if self.expose_fails {
             return Err(PlatformError::Unsupported);

@@ -86,8 +86,10 @@ jobs:
       - name: install the oracles and image tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libbde-utils dislocker ntfs-3g fuse3 xz-utils
+          sudo apt-get install -y -qq libbde-utils dislocker ntfs-3g fuse3 xz-utils gdisk mtools dosfstools qemu-utils
       - run: cargo build --release -p paguro-harness --bin paguro-bde-read --bin paguro-bde-write
+      # The stage machine and stage 4 over make.sh-encrypted NTFS volumes.
+      - run: cargo test -p paguro-boot --test bde_stage4 -- --nocapture 2>&1 | tee s4.log && ! grep -q "skipped" s4.log
       # Windows-made volumes and make.sh's generated ones, whole-volume
       # byte comparisons; root for the FUSE mounts.
       - run: sudo -E PAGURO_BDE_PREBUILT=1 test/fixtures/bde/diff.sh

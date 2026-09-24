@@ -723,10 +723,16 @@ fn layout_refusals() {
     let m = Metadata::parse(cross_check([&r, &r, &r], &v.header()).unwrap()).unwrap();
     let mut h = v.header();
     h.metadata_offsets[1] = i64::MAX as u64;
-    assert_eq!(Layout::new(&h, &m, v.size).err(), Some(BdeError::MetadataOffset));
+    assert_eq!(
+        Layout::new(&h, &m, v.size).err(),
+        Some(BdeError::MetadataOffset)
+    );
     let mut h = v.header();
     h.bytes_per_sector = 1024;
-    assert_eq!(Layout::new(&h, &m, v.size).err(), Some(BdeError::SectorSize(1024)));
+    assert_eq!(
+        Layout::new(&h, &m, v.size).err(),
+        Some(BdeError::SectorSize(1024))
+    );
     // Paused and running conversions are read; the boundary is encrypted_size.
     for st in [(5, 4), (2, 4)] {
         let mut v = base.clone();

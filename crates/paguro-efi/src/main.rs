@@ -35,7 +35,8 @@ static SBAT: [u8; include_bytes!("../sbat.csv").len()] = *include_bytes!("../sba
 use core::ptr::{self, NonNull, addr_of_mut};
 
 use log::info;
-use paguro_boot::{Buffers, NtfsVolume, Outcome, Params};
+use paguro_boot::stage4::Stage4;
+use paguro_boot::{BdeVolume, Buffers, Outcome, Params};
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::prelude::*;
 
@@ -59,21 +60,30 @@ fn buffers() -> Option<&'static mut Buffers> {
     }
 }
 
-/// Place the stage-4 volume (~2.5 MiB) in zeroed pages: all-zero is a valid
-/// `NtfsVolume` (an unopened, unmounted volume; see `paguro_boot::stage4`).
-fn volume() -> Option<&'static mut NtfsVolume> {
-    let size = core::mem::size_of::<NtfsVolume>();
+/// Zeroed pages for a `T` for which all-zero bytes are a valid value.
+///
+/// # Safety
+/// All-zero must be a valid `T`.
+unsafe fn zeroed<T>() -> Option<&'static mut T> {
+    let size = core::mem::size_of::<T>();
     let pages = size.div_ceil(4096);
     let p: NonNull<u8> =
         boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages).ok()?;
     // SAFETY: a fresh, page-aligned allocation of at least `size` bytes,
-    // exclusively ours; every field of NtfsVolume is an integer, a bool, an
-    // array of those, a Guid, or an `Option<&mut [u8]>` (None is null), so
-    // all-zero bytes are a valid value.
+    // exclusively ours; the caller vouches for the all-zero value.
     unsafe {
         ptr::write_bytes(p.as_ptr(), 0, pages * 4096);
-        Some(&mut *p.as_ptr().cast::<NtfsVolume>())
+        Some(&mut *p.as_ptr().cast::<T>())
     }
+}
+
+/// The volume's two large parts, in pages: stage 4's memory (~2.5 MiB) and
+/// one 64 KiB FVE metadata region.
+fn volume_memory() -> Option<(&'static mut Stage4, &'static mut [u8; 0x1_0000])> {
+    // SAFETY: all-zero is a valid Stage4 (an unmounted volume; every field
+    // is an integer, a bool, an array of those, or an `Option<&mut [u8]>`,
+    // whose None is null) and a valid byte array.
+    unsafe { Some((zeroed::<Stage4>()?, zeroed::<[u8; 0x1_0000]>()?)) }
 }
 
 #[entry]
@@ -96,14 +106,14 @@ fn main() -> Status {
             return Status::DEVICE_ERROR;
         }
     };
-    let Some(vol) = volume() else {
+    let Some((stage4, meta)) = volume_memory() else {
         info!("paguro: out of memory");
         return Status::OUT_OF_RESOURCES;
     };
-    // Stage 4 over an unencrypted NTFS volume; stage 3's FVE side (BitLocker)
-    // is not written yet and refuses with a typed error after the rungs that
-    // need no volume structures have run.
-    let out = paguro_boot::run(&mut p, vol, bufs, &Params::PRODUCTION);
+    // BitLocker (stage 3) and NTFS (stage 4), or NTFS alone on an
+    // unencrypted volume.
+    let mut vol = BdeVolume::new(stage4, meta);
+    let out = paguro_boot::run(&mut p, &mut vol, bufs, &Params::PRODUCTION);
     info!("paguro: outcome {out:?}");
     match out {
         Outcome::Started(_) => Status::SUCCESS,

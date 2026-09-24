@@ -1193,7 +1193,8 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             let tpm_row = self.tpm_usable(cfg, parsed);
             let free_pw = self.setup_usable(cfg, parsed)
                 || self.passphrase_usable(cfg, parsed)
-                || self.st.bootstrap.is_some();
+                || self.st.bootstrap.is_some()
+                || self.v.has_bitlocker_password();
             let menu = UnlockMenu {
                 password_or_pin: tpm_row || free_pw,
                 recovery_passphrase: self.passphrase_usable(cfg, parsed),
@@ -1419,6 +1420,13 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
                 if self.accept(vmk)? {
                     return Ok(Some(Rung::Bootstrap));
                 }
+            }
+        }
+        // A BitLocker password protector on the volume itself (FVE-sourced,
+        // unsigned, self-validating: the FVEK's MAC is the check).
+        if let Some(vmk) = self.v.bitlocker_password(self.p, user)? {
+            if self.accept(vmk)? {
+                return Ok(Some(Rung::Passphrase));
             }
         }
         // tpm: the only rung that costs an attempt.

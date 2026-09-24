@@ -19,7 +19,8 @@ use std::path::PathBuf;
 use mock::*;
 use paguro_boot::bde::*;
 use paguro_boot::platform::{Input, Row};
-use paguro_boot::volume::{Partition, Unimplemented, Volume, VolumeKind, parse_recovery_password};
+use paguro_boot::stage4::Stage4;
+use paguro_boot::volume::{Partition, Volume, VolumeKind, parse_recovery_password};
 use paguro_boot::{BootError, Buffers, Outcome};
 use paguro_core::bde::{self as core, BdeError, Cipher, Layout, Metadata, ProtectorKind, Source};
 use paguro_core::gpt;
@@ -148,6 +149,19 @@ fn fields(m: &Metadata<'_>) -> Vec<String> {
     v
 }
 
+/// A volume with its large parts leaked (tests only): all-zero is a valid
+/// `Stage4`, and 2.5 MiB would not fit a test thread's stack.
+fn new_vol() -> BdeVolume<'static> {
+    let mut b: Box<std::mem::MaybeUninit<Stage4>> = Box::new_uninit();
+    // SAFETY: all-zero is a valid Stage4 (documented in stage4).
+    let s = unsafe {
+        std::ptr::write_bytes(b.as_mut_ptr(), 0, 1);
+        b.assume_init()
+    };
+    let m = vec![0u8; 0x1_0000].into_boxed_slice();
+    BdeVolume::new(Box::leak(s), Box::leak(m.try_into().unwrap()))
+}
+
 /// A mock platform whose disk 0 is the bare volume.
 fn platform(vol: Vec<u8>, block_size: u32) -> (Mock, Partition) {
     let mut m = Mock::new();
@@ -239,7 +253,7 @@ fn check_fixture(f: &Fixture) {
     }
     for bs in sizes {
         let (mut p, part) = platform(vol.clone(), bs);
-        let mut v = Box::new(BdeVolume::new(Unimplemented));
+        let mut v = new_vol();
         let opened = v.open(&mut p, &part, VolumeKind::BitLocker);
         if let Some(r) = refusal(f) {
             let e = opened.err().or_else(|| {
@@ -262,7 +276,10 @@ fn check_fixture(f: &Fixture) {
         assert_eq!(n, 28 + m.fvek.ciphertext.len());
         assert!(!v.try_vmk(&mut p, &[0x5a; 32]).unwrap());
         assert!(v.fvek().is_none());
-        assert!(v.plain(&mut p).is_err(), "no view before a key");
+        assert!(
+            v.read_sectors(&mut p, 0, &mut [0; 512]).is_err(),
+            "no view before a key"
+        );
         let key = if let Some(rp) = f.recovery.first() {
             let k = parse_recovery_password(rp.as_bytes()).unwrap();
             v.recovery_key(&mut p, &k).unwrap().unwrap()
@@ -281,11 +298,12 @@ fn check_fixture(f: &Fixture) {
             u64::from(l.boot_sector_reloc_sectors) * 512,
             m.volume_header.1
         );
-        let detail = *v.layout_detail().unwrap();
-        let bps = detail.bytes_per_sector;
-        let mut d = v.plain(&mut p).unwrap();
+        assert_eq!(
+            v.layout_detail().unwrap().bytes_per_sector,
+            hdr.bytes_per_sector
+        );
         let mut boot = vec![0u8; 8192];
-        d.read(0, &mut boot).unwrap();
+        v.read_sectors(&mut p, 0, &mut boot).unwrap();
         assert_eq!(
             Some(sha(&boot)),
             f.boot_sha256,
@@ -295,13 +313,13 @@ fn check_fixture(f: &Fixture) {
         // 512-byte reads for the NTFS parser, from any sector size.
         let mut s = [0u8; 512];
         for i in 0..16 {
-            paguro_core::ntfs::Disk::read(&mut d, i, &mut s).unwrap();
+            v.read_sectors(&mut p, i, &mut s).unwrap();
             assert_eq!(&s[..], &boot[i as usize * 512..][..512]);
         }
         // The non-data regions read as zeros.
         for o in hdr.metadata_offsets.into_iter().chain([m.volume_header.0]) {
             let mut z = vec![0xffu8; 8192];
-            DecryptingReader::read(&mut d, o / u64::from(bps), &mut z).unwrap();
+            v.read_sectors(&mut p, o / 512, &mut z).unwrap();
             assert!(z.iter().all(|&b| b == 0), "{}: region at {o:#x}", f.name);
         }
     }
@@ -356,16 +374,9 @@ fn edit_copies(vol: &mut [u8], copies: &[usize], edit: impl Fn(&mut [u8])) {
     }
 }
 
-fn open(
-    vol: Vec<u8>,
-) -> (
-    Mock,
-    Partition,
-    Box<BdeVolume<Unimplemented>>,
-    Result<(), BootError>,
-) {
+fn open(vol: Vec<u8>) -> (Mock, Partition, BdeVolume<'static>, Result<(), BootError>) {
     let (mut p, part) = platform(vol, 512);
-    let mut v = Box::new(BdeVolume::new(Unimplemented));
+    let mut v = new_vol();
     let r = v.open(&mut p, &part, VolumeKind::BitLocker);
     (p, part, v, r)
 }
@@ -454,7 +465,7 @@ fn volume_level_refusals() {
     assert_eq!(open(ntfs).3, Err(BootError::Bde(BdeError::NotBitLocker)));
     // 512-byte BitLocker sectors on a 4Kn disk cannot be.
     let (mut p, part) = platform(vol.clone(), 4096);
-    let mut v = Box::new(BdeVolume::new(Unimplemented));
+    let mut v = new_vol();
     assert_eq!(
         v.open(&mut p, &part, VolumeKind::BitLocker),
         Err(BootError::Bde(BdeError::SectorSize(512)))
@@ -465,19 +476,14 @@ fn volume_level_refusals() {
     );
     // A plain NTFS volume: no FVE, the view is the disk.
     let (mut p, part) = platform(vec![7u8; 1 << 20], 512);
-    let mut v = Box::new(BdeVolume::new(Unimplemented));
+    let mut v = new_vol();
     v.open(&mut p, &part, VolumeKind::Ntfs).unwrap();
     assert_eq!(v.clear_key(&mut p), Ok(None));
     assert!(v.layout().is_none());
-    let mut d = v.plain(&mut p).unwrap();
     let mut s = [0u8; 512];
-    paguro_core::ntfs::Disk::read(&mut d, 5, &mut s).unwrap();
+    v.read_sectors(&mut p, 5, &mut s).unwrap();
     assert!(s.iter().all(|&b| b == 7));
-    assert_eq!(
-        DecryptingReader::read(&mut d, 2048, &mut [0; 512]),
-        Err(ReadError::Range)
-    );
-    drop(d);
+    assert!(v.read_sectors(&mut p, 2048, &mut [0; 512]).is_err());
     assert_eq!(
         v.fvek_blob(&mut p, &mut [0; 1024]).err(),
         Some(BootError::Bde(BdeError::NotBitLocker))
@@ -489,7 +495,7 @@ fn volume_level_refusals() {
 
 struct Mem(Vec<u8>, u32);
 
-impl SectorRead for Mem {
+impl UnitRead for Mem {
     fn read_units(&mut self, unit: u64, buf: &mut [u8]) -> Result<(), ReadError> {
         let o = unit as usize * self.1 as usize;
         buf.copy_from_slice(self.0.get(o..o + buf.len()).ok_or(ReadError::Io)?);
@@ -609,7 +615,7 @@ fn gpt_disk(vol: &[u8]) -> Disk {
     }
 }
 
-fn run(w: &mut World, v: &mut BdeVolume<Unimplemented>) -> Outcome {
+fn run(w: &mut World, v: &mut BdeVolume<'_>) -> Outcome {
     let mut bufs = Box::new(Buffers::new());
     paguro_boot::run(&mut w.m, v, &mut bufs, &PARAMS)
 }
@@ -622,11 +628,14 @@ fn the_loader_unlocks_a_windows_clear_key_volume() {
         .unwrap();
     let mut w = World::new();
     w.m.disks = vec![gpt_disk(&volume(&f))];
-    let mut v = Box::new(BdeVolume::new(Unimplemented));
+    let mut v = new_vol();
     // Stage 3 done by the real reader; stage 4 is not this module's.
+    // Stage 3 by the real reader; stage 4 then mounts the decrypted NTFS,
+    // which cryptsetup trimmed away, so it refuses there.
+    let out = run(&mut w, &mut v);
     assert!(
-        matches!(run(&mut w, &mut v), Outcome::Halted(BootError::NotImplemented(s)) if s.starts_with("stage 4")),
-        "stage 3 unlocked; stage 4 is not written"
+        matches!(out, Outcome::Halted(BootError::Stage4(_))),
+        "{out:?}"
     );
     assert!(
         !w.m.screens
@@ -660,10 +669,13 @@ fn the_loader_unlocks_a_windows_volume_with_its_recovery_password() {
     w.m.input(Input::Recover)
         .input(Input::Select(Row::RecoveryKey))
         .secret(&f.recovery[0]);
-    let mut v = Box::new(BdeVolume::new(Unimplemented));
+    let mut v = new_vol();
+    // Stage 3 by the real reader; stage 4 then mounts the decrypted NTFS,
+    // which cryptsetup trimmed away, so it refuses there.
+    let out = run(&mut w, &mut v);
     assert!(
-        matches!(run(&mut w, &mut v), Outcome::Halted(BootError::NotImplemented(s)) if s.starts_with("stage 4")),
-        "stage 3 unlocked; stage 4 is not written"
+        matches!(out, Outcome::Halted(BootError::Stage4(_))),
+        "{out:?}"
     );
     let (cipher, key) = v.fvek().unwrap();
     assert_eq!((cipher, key.len()), (0x8005, 64));
