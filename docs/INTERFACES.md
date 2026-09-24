@@ -58,10 +58,11 @@ aarch64 under qemu-user and boots the aarch64 loader under AAVMF.
   shim<arch>.efi, mm<arch>.efi   distribution shim (optional; see DESIGN §12)
   paguro.efi                 the loader
   paguro.ini                 configuration only (§3)
-  tpm_seal.bin               §4
-  setuptpm_seal.bin          §4
-  passphrase_seal.bin        §4
-  tpm_pin_bypass_seal.bin    §4
+  <volume-guid>\             one directory per NTFS volume paguro unlocks
+    tpm_seal.bin             §4
+    setuptpm_seal.bin        §4
+    passphrase_seal.bin      §4
+    tpm_pin_bypass_seal.bin  §4
 ```
 
 The loader **reads** these files and never writes any of them. The initrd and
@@ -77,31 +78,36 @@ LF or CRLF. **Maximum 65 536 bytes**, read into a buffer one byte larger.
 `#` starts a comment only at the start of a line (no inline comments). A key
 before any section header is an error. Duplicate keys within a known section are
 an error. Unknown sections are ignored; unknown keys in a known section are an
-error (so typos are loud). Booleans are exactly `0` or `1`. In `[Image.*]`,
-`path` and `format` are required.
+error (so typos are loud). Booleans are exactly `0` or `1`. In `[Boot.*]`,
+`volume` and `root` are required.
 
 Reference: `paguro-core::ini` (grammar) and `paguro-core::config` (schema).
 
 ### 3.2 Schema v1 — DRAFT
 
+**The `.ini` is the bootloader's configuration and nothing else.** Each boot
+entry says two things: where the Linux root disk is (a hint forwarded to
+Linux), and where the next UEFI image is. Additional disks, mounts and
+Linux-side policy are Linux's configuration, not the loader's.
+
 ```ini
 # paguro configuration. Not hand-editable: use `paguro config`.
 [Paguro]
 version = 1
-# an [Image.*] name
+# a [Boot.*] name
 default = debian
-# GPT partition GUID of the NTFS volume (C:)
-volume  = 6c0a0000-0000-4000-8000-000000000000
 
-[Image.debian]
-# absolute NTFS path, backslashes, no . or ..
-path   = \paguro\debian.vhd
-# vhd (fixed) | raw
-format = vhd
-# block | file; optional, default block
-expose = block
-# inside the nested ESP; optional, default shown
-chain  = \EFI\BOOT\BOOTX64.EFI
+[Boot.debian]
+# GPT partition GUID of the NTFS volume holding this entry's files;
+# may be on any disk
+volume   = 6c0a0000-0000-4000-8000-000000000000
+# the Linux root disk: claimed by the module, handed to Linux as its root
+root     = \paguro\debian.vhd
+# the disk holding the next UEFI image; optional, default = root
+efi_disk = \paguro\debian.vhd
+# the UEFI image on efi_disk's FAT32; optional,
+# default = the removable-media path for this architecture
+efi      = \EFI\BOOT\BOOTX64.EFI
 
 [TPM]
 enabled = 1
@@ -117,11 +123,45 @@ enabled = 0
 | Key | Type | Bounds |
 |---|---|---|
 | `version` | integer | must be `1` |
-| `volume` | GUID | canonical 36-char form |
-| `path` | NTFS path | ≤ 32 components, each ≤ 255 UTF-16 units, total ≤ 1024 bytes |
-| `default` | image name | must name a present `[Image.*]` |
-| image name | `[A-Za-z0-9_-]{1,32}` | ≤ 16 images |
-| `format`, `expose` | enum | as listed |
+| `default` | entry name | must name a present `[Boot.*]` |
+| entry name | `[A-Za-z0-9_-]{1,32}` | ≤ 16 entries |
+| `volume` | GPT partition GUID | canonical 36-char form |
+| `root`, `efi_disk` | NTFS path on `volume` | ≤ 32 components, each ≤ 255 UTF-16 units, total ≤ 1024 bytes |
+| `efi` | FAT path | same bounds |
+
+**Disk format is detected, not configured.** A file whose last 512 bytes are a
+valid fixed-VHD footer (cookie, disk type 2, checksum, `current_size` = file
+length − 512) is a VHD and its payload is everything before the footer;
+anything else is a raw disk. The loader finds the FAT32 on `efi_disk` by
+content:
+
+| Payload starts with | UEFI image is read from |
+|---|---|
+| a GPT | the one partition of type ESP (`C12A7328-…`); zero or several → refuse |
+| a FAT32 boot sector | the whole payload (a "superfloppy" FAT32 disk) |
+| anything else | refuse |
+
+Either way the FAT32 is published as a real `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL`
+and the UEFI image is loaded by device path, so it inherits a `DeviceHandle`
+(DESIGN §4.2 — systemd-stub needs it).
+
+**Decisions, argued:**
+
+- **One volume per entry, any disk.** `volume` moved from `[Paguro]` into each
+  entry, so entries may live on different NTFS volumes and different disks.
+  The loader unlocks only the chosen entry's volume, with that volume's seals
+  (`\EFI\paguro\<volume-guid>\`). `root` and `efi_disk` share the entry's
+  volume: two volumes for one boot would mean two unlocks before the kernel.
+- **No UEFI image directly on NTFS.** Loading from NTFS would mean either
+  `LoadImage` from a buffer, which leaves `DeviceHandle` unset and breaks
+  systemd-stub's credentials and add-ons, or our own NTFS `SimpleFileSystem`,
+  more parser for nothing a small FAT32 VHD beside it does not already give.
+- **No discovery inside the ESP.** Multiple kernels, boot counting and rollback
+  are systemd-boot's job: point `efi` at systemd-boot and it enumerates
+  `/EFI/Linux` and `/loader/entries` off the `DeviceHandle` we gave it. The
+  loader's own picker chooses between `[Boot.*]` entries and nothing else.
+- **No `format` or `expose` keys.** Format is detected (above). How Linux
+  presents a disk (block device or file, the WSL tier) is Linux's policy.
 
 PCR selection is **not** in the `.ini`: it lives in each seal file (§4), where a
 wrong value fails the policy digest instead of needing a parser to trust it.
@@ -237,14 +277,16 @@ record   type u16 | len u32 | value[len]        (no padding)
 | 5 | `B` | 32 bytes | 1 |
 | 6 | `PCRS` | mask u32 \| n×32-byte SHA-256 values (no TPM: mask `0x95`, zero values) | 1 |
 | 7 | `CONFIG` | the verified `paguro.ini` bytes | 0–1 |
-| 8 | `IMAGE` | name len u8 \| name \| mft_record u64 \| mft_seq u16 | 1–16 |
+| 8 | `IMAGE` | role u8 (1 = root, 2 = efi disk) \| name len u8 \| name \| mft_record u64 \| mft_seq u16 | 1–2: the chosen entry's `root`, and its `efi_disk` when different |
 | 9 | `STATE` | flags u32: 1 = hibernation image, 2 = dirty bit, 4 = config unverified (also: Secure Boot off, first boot), 8 = recovery path | 1 |
 | 10 | `RUNG` | u8: 1 tpm, 2 setuptpm, 3 passphrase, 4 recovery, 5 pin bypass, 6 bootstrap, 7 clear key (BitLocker suspended), 8 unencrypted volume | 1 |
 | 11 | `PROVISION` | sealed object, wrapped VMK, salt (as the tpm seal body), sealed against the load taint of the `CONFIG` the loader authored on this boot | 0–1 |
 
 Unknown type → refuse. Duplicate of a type that occurs at most once → refuse.
 
-`IMAGE` gives the file's identity; it never gives its location. The kernel
+`IMAGE` gives the file's identity; it never gives its location. Only the chosen
+entry's files are forwarded; the whole verified configuration travels in
+`CONFIG` for anything else Linux needs. The kernel
 module reads the extents itself (§10).
 
 ### 8.1 Decisions recorded from the first implementation
@@ -279,7 +321,7 @@ The installer's one-shot `Boot####` entry points at `paguro.efi`; its
 `OptionalData`:
 
 ```text
-magic "PGRBST\0\x01" | salt[16] | wrapped_vmk[32]
+magic "PGRBST\0\x01" | volume GUID[16] | salt[16] | wrapped_vmk[32]
 wrapped_vmk = VMK XOR HMAC(pass_hash, "paguro/bootstrap" || salt)
 ```
 
