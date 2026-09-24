@@ -897,6 +897,7 @@ impl Stage4 {
         out: &mut DirListing,
     ) -> Result<(), BootError> {
         self.mount(p, r)?;
+        log(p, format_args!("paguro: stage4 listing {path}"));
         let f = match self.resolve(p, r, path) {
             Ok(f) if f.is_dir => f,
             // A missing directory is an empty listing.
@@ -928,6 +929,7 @@ impl Stage4 {
         out: &mut DirListing,
     ) -> Result<bool, BootError> {
         self.mount(p, r)?;
+        log(p, format_args!("paguro: stage4 listing {disk_path} {path}"));
         let (d, f) = match self.open_disk(p, r, disk_path) {
             Ok(v) => v,
             Err(e) => {

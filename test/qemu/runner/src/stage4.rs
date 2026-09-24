@@ -1066,20 +1066,21 @@ pub fn recovery_browser(env: &Env) -> R<()> {
     boot(env, &c, |vm| {
         vm.expect("recovery (NoConfig)", 30)?;
         vm.expect("entries in \\paguro\\", 60)?;
-        vm.expect("gpt.vhd", 20)?;
-        // Type to jump to gpt.vhd, open it.
+        // The browser: the rows are drawn on GOP, the log marks each
+        // listing. Type to jump to gpt.vhd, open it.
+        vm.expect("stage4 listing \\paguro\n", 20)?;
         vm.send("g")?;
         vm.send("\r")?;
         vm.expect("Start gpt.vhd", 20)?;
         vm.send("2")?;
         // The FAT32 browser: EFI, other, probe.efi.
-        vm.expect("EFI", 20)?;
+        vm.expect("stage4 listing \\paguro\\gpt.vhd \\\n", 30)?;
         vm.send("e")?;
         vm.send("\r")?;
-        vm.expect("other", 20)?;
+        vm.expect("stage4 listing \\paguro\\gpt.vhd \\EFI\n", 30)?;
         vm.send("o")?;
         vm.send("\r")?;
-        vm.expect("probe.efi", 20)?;
+        vm.expect("stage4 listing \\paguro\\gpt.vhd \\EFI\\other\n", 30)?;
         vm.send("p")?;
         vm.send("\r")?;
         vm.expect(
