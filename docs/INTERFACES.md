@@ -90,7 +90,21 @@ addition to its own vendor key, **anything signed by a key in `MokList`**. So:
   newer shims are signed by the UEFI CA 2023, which only boots where Windows
   Update has added that certificate to `db`. The installer reads `db` and picks
   the matching build (x64 and aa64).
-- **What a shim revocation means for us:** if that distribution's shim is
+- **When the first image cannot be a Microsoft-signed shim.** Some machines
+  (Secured-core / Copilot+ PCs) ship with the third-party UEFI CA disabled,
+  so no distribution shim loads. The fallbacks both change `db`, and a `db`
+  change moves Windows' PCR 7:
+  1. enable "Allow Microsoft third-party UEFI CA" in firmware setup (one
+     toggle; adds that CA to `db`), then the normal shim path;
+  2. enrol our certificate in `db` directly: firmware setup's "enroll
+     signature/image" where offered, or Setup Mode. Last resort: per-vendor
+     menus, and removing Microsoft's CAs by mistake breaks GPU option ROMs.
+
+  Either way **the Windows tool first suspends BitLocker for exactly one
+  reboot** (`manage-bde -protectors -disable C: -RebootCount 1`), so the next
+  Windows boot does not ask for the recovery key and re-seals to the new
+  PCR 7 by itself. Then it guides the firmware step.
+ if that distribution's shim is
   revoked by SBAT or `dbx`, paguro follows the distribution's replacement; the
   repair hook installs it. Nothing else changes, because our trust is the MOK
   key, not the shim vendor's.
