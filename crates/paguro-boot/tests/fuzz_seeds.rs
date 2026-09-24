@@ -191,7 +191,11 @@ fn write_fuzz_seeds() {
     put("ini_config", "ui", &ui);
 
     // edid: a 1080p panel, and a 4K one with an extension block
-    put("edid", "1080p", &paguro_core::edid::build::block(1920, 1080, false));
+    put(
+        "edid",
+        "1080p",
+        &paguro_core::edid::build::block(1920, 1080, false),
+    );
     let mut uhd = paguro_core::edid::build::block(3840, 2160, false).to_vec();
     uhd.extend_from_slice(&[0x02; 128]);
     put("edid", "2160p-ext", &uhd);
