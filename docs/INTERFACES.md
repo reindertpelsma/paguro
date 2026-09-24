@@ -862,18 +862,34 @@ grouped in sixes as typed and accepts digits only.
 ### 13.4 Recovery: telling the loader where Linux is
 
 Recovery never reads `paguro.ini` (DESIGN §4.1), so what it boots is chosen
-on screen:
+on screen, with a file browser on two levels:
 
 1. **volume** — a list of the NTFS volumes found on every disk (label, size,
    disk), each unlocked with the usual rungs;
-2. **what to boot** — the entries found by convention in `\paguro\` on that
-   volume, or a path typed into a text field;
-3. if the choice is a **disk** (`efi_disk`), it is also the root;
-   if it is a **UEFI image on NTFS** (`efi_file`), the root hint is picked:
-   the only root candidate in `\paguro\` if there is exactly one, otherwise a
-   list, otherwise none — and the initrd then asks.
+2. **NTFS browser** on that volume, starting at `\paguro\`: folders, disks
+   (`.vhd`, `.vhdx`, `.img`, `.raw`) and UEFI images (`.efi`); a typed path
+   as the fallback;
+3. choosing a **disk** makes it the root and the `efi_disk`; the loader finds
+   its FAT32 (GPT ESP or superfloppy) and offers the default
+   `\EFI\BOOT\BOOT<arch>.EFI` or a **FAT32 browser** of folders and `.efi`
+   files to pick another (systemd-boot, a specific UKI, shim + GRUB);
+4. choosing a **UEFI image on NTFS** (`efi_file`) leads to the root hint: the
+   only disk in `\paguro\` if there is exactly one, otherwise the browser
+   again to pick one, otherwise none — and the initrd then asks.
 
-The screen says the boot is unattested (DESIGN §4.1).
+| Browser key | Effect |
+|---|---|
+| ↑ / ↓, PageUp / PageDown, Home / End | move the selection |
+| Enter | open a folder / choose a file |
+| Backspace or ← | parent folder |
+| Esc | back to the previous screen |
+
+Listings are bounded (entries per directory, path depth, name length),
+sorted folders first, case-insensitively; long names are truncated with an
+ellipsis. Directory listing reuses the path-lookup code the loader needs
+anyway, so the browser adds UI, not new parsing, and it runs only after the
+volume is unlocked and PCR 12 capped (recovery caps on entry). The screens say
+the boot is unattested.
 
 ## 12. Testing contract
 
