@@ -71,6 +71,8 @@ pub struct Mock {
     pub ui: Vec<paguro_core::config::Ui>,
     /// Each disk stage 4 published (`Platform::expose_disk`).
     pub exposed: Vec<Exposed>,
+    /// `expose_disk` fails as if no firmware file system bound (tier 1).
+    pub expose_fails: bool,
 }
 
 /// A published disk, as the mock recorded it.
@@ -109,6 +111,7 @@ impl Mock {
             extend_fails: false,
             ui: Vec::new(),
             exposed: Vec::new(),
+            expose_fails: false,
         }
     }
 
@@ -377,6 +380,9 @@ impl Platform for Mock {
             fat,
             image: image.to_string(),
         });
+        if self.expose_fails {
+            return Err(PlatformError::Unsupported);
+        }
         out[..MOCK_CHAIN.len()].copy_from_slice(MOCK_CHAIN);
         Ok(MOCK_CHAIN.len())
     }

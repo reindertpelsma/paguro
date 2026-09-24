@@ -274,6 +274,33 @@ fn a_vhd_entry_is_published_and_chained() {
     assert_eq!(e.file.mft_record, rec);
 }
 
+/// Tier 2 (our own FAT32 SimpleFileSystem) is not built: when the firmware
+/// binds no file system to the published disk, the boot stops with the
+/// typed reason and the "could not be started" screen, nothing chained.
+#[test]
+fn no_firmware_fat_binding_is_a_clean_refusal() {
+    let d = tmp("tier2");
+    let Some(vhd) = payload_vhd(&d, b"MZ") else {
+        return;
+    };
+    let Some(b) = build("tier2", move |m| {
+        std::fs::create_dir_all(m.join("paguro")).unwrap();
+        std::fs::write(m.join("paguro/linux.vhd"), &vhd).unwrap();
+    }) else {
+        return;
+    };
+    let mut m = mock(b.disk, Some("root = \\paguro\\linux.vhd"));
+    m.expose_fails = true;
+    assert_eq!(
+        run(&mut m),
+        Outcome::Halted(BootError::Stage4(Stage4Error::Expose(
+            paguro_boot::PlatformError::Unsupported
+        )))
+    );
+    assert_eq!(m.screens.last(), Some(&Screen::Notice(Notice::StartFailed)));
+    assert!(!m.events.iter().any(|e| matches!(e, Event::Start(_))));
+}
+
 #[test]
 fn an_efi_file_is_read_whole() {
     let image: Vec<u8> = (0..300_001u32).map(|i| (i * 7) as u8).collect();
