@@ -69,7 +69,23 @@ pub struct Mock {
     pub extend_fails: bool,
     /// Every `Platform::ui_prefs` call.
     pub ui: Vec<paguro_core::config::Ui>,
+    /// Each disk stage 4 published (`Platform::expose_disk`).
+    pub exposed: Vec<Exposed>,
 }
+
+/// A published disk, as the mock recorded it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exposed {
+    pub part: Partition,
+    pub extents: Vec<paguro_core::range::Extent>,
+    pub sectors: u64,
+    pub file: FileId,
+    pub fat: paguro_boot::stage4::FatAt,
+    pub image: String,
+}
+
+/// The device path the mock returns for a published disk's image.
+pub const MOCK_CHAIN: &[u8] = b"mock-chain\x7f\xff\x04\x00";
 
 impl Mock {
     pub fn new() -> Self {
@@ -92,6 +108,7 @@ impl Mock {
             raw_tpm: VecDeque::new(),
             extend_fails: false,
             ui: Vec::new(),
+            exposed: Vec::new(),
         }
     }
 
@@ -339,6 +356,29 @@ impl Platform for Mock {
             return Err(PlatformError::Device(26));
         }
         Ok(())
+    }
+
+    fn alloc_image(&mut self, len: usize) -> Result<&'static mut [u8], PlatformError> {
+        Ok(Box::leak(vec![0u8; len].into_boxed_slice()))
+    }
+
+    fn expose_disk(
+        &mut self,
+        disk: &paguro_boot::stage4::ExposedDisk<'_>,
+        fat: paguro_boot::stage4::FatAt,
+        image: &str,
+        out: &mut [u8],
+    ) -> Result<usize, PlatformError> {
+        self.exposed.push(Exposed {
+            part: disk.part,
+            extents: disk.extents.to_vec(),
+            sectors: disk.sectors,
+            file: disk.file,
+            fat,
+            image: image.to_string(),
+        });
+        out[..MOCK_CHAIN.len()].copy_from_slice(MOCK_CHAIN);
+        Ok(MOCK_CHAIN.len())
     }
 
     fn reset(&mut self) {

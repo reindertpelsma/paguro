@@ -87,6 +87,8 @@ pub const STRINGS: &[StringSpec] = &[
     s("act_recover_short", "label"),
     s("notimpl_title", "title"),
     s("notimpl_body", "body"),
+    s("startfail_title", "title"),
+    s("startfail_body", "body"),
     s("act_continue", "label"),
     s("noinst_title", "title"),
     s("noinst_body", "body"),

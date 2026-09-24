@@ -3,9 +3,10 @@
 //! Partition discovery (GPT walk, BitLocker/NTFS signature probe) is
 //! implemented here over [`Platform::read_blocks`]. The FVE-metadata side of
 //! stage 3 (FVEK blob, clear key, recovery-password and FVEK unwrap) and all of
-//! stage 4 (NTFS, the entry's disks, the UEFI image) sit behind [`Volume`], whose
-//! production implementation is [`Unimplemented`] until `paguro-core::ntfs`
-//! and the FVE parser land. The mock boot tests supply a fake.
+//! stage 4 (NTFS, the entry's disks, the UEFI image) sit behind [`Volume`].
+//! Stage 4 is [`crate::stage4`] ([`crate::NtfsVolume`] for an unencrypted
+//! volume); the FVE side is [`Unimplemented`] until the BitLocker layer
+//! lands. The mock boot tests supply a fake.
 
 use paguro_core::config::Entry;
 use paguro_core::fve;
@@ -203,6 +204,10 @@ pub struct FileId {
     pub mft_seq: u16,
 }
 
+/// Longest device path of a chained image: the disk's path, a vendor node,
+/// a partition node, and a file path of up to 1024 UTF-8 bytes as UTF-16.
+pub const CHAIN_MAX: usize = 4096;
+
 /// Stage 4's result: the boot entry's disks, found on the unlocked volume.
 ///
 /// Stage 4 reads each disk file's last 512 bytes and first sectors and
@@ -224,7 +229,7 @@ pub struct Located {
     pub flags: u32,
     /// Device path of the UEFI image on the published FAT32 (unused for an
     /// `efi_file`).
-    pub chain: [u8; 512],
+    pub chain: [u8; CHAIN_MAX],
     pub chain_len: usize,
     /// NTFS paths of the root, the efi disk (when separate) and the efi file,
     /// from which the loader authors the configuration on a provisioning boot.
@@ -249,7 +254,7 @@ impl Located {
             efi_disk: None,
             efi_file: None,
             flags: 0,
-            chain: [0; 512],
+            chain: [0; CHAIN_MAX],
             chain_len: 0,
             root_path: [0; 1024],
             root_path_len: 0,

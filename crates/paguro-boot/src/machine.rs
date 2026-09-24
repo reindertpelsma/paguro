@@ -128,8 +128,14 @@ pub fn run<P: Platform, V: Volume<P>>(
         Ok(Step::Go(o) | Step::Done(o)) => o,
         Err(e) => {
             m.p.log(format_args!("paguro: halted: {e:?}"));
-            if let BootError::NotImplemented(_) = e {
-                m.p.prompt(&Screen::Notice(Notice::NotImplemented), &mut []);
+            match e {
+                BootError::NotImplemented(_) => {
+                    m.p.prompt(&Screen::Notice(Notice::NotImplemented), &mut []);
+                }
+                BootError::Stage4(_) => {
+                    m.p.prompt(&Screen::Notice(Notice::StartFailed), &mut []);
+                }
+                _ => {}
             }
             Outcome::Halted(e)
         }
@@ -340,17 +346,27 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             "paguro: handoff published ({n} bytes, rung {rung:?})"
         ));
         handoff.zeroize();
-        if located.efi_file.is_some() {
+        let started = if located.efi_file.is_some() {
             // An efi_file: LoadImage(SourceBuffer), never a jump.
             let image = self.v.efi_image(self.p)?;
-            self.p
-                .load_start_image_buffer(image)
-                .map_err(BootError::Platform)?;
+            self.p.log(format_args!(
+                "paguro: starting efi_file ({} bytes) from a buffer",
+                image.len()
+            ));
+            self.p.load_start_image_buffer(image)
         } else {
-            self.p
-                .load_start_image(located.chain())
-                .map_err(BootError::Platform)?;
+            self.log(format_args!(
+                "paguro: starting the image by device path ({} bytes)",
+                located.chain().len()
+            ));
+            self.p.load_start_image(located.chain())
+        };
+        if let Err(e) = started {
+            self.log(format_args!("paguro: LoadImage/StartImage failed: {e:?}"));
+            self.p.prompt(&Screen::Notice(Notice::StartFailed), &mut []);
+            return Err(BootError::Platform(e));
         }
+        self.log(format_args!("paguro: the chained image returned"));
         Ok(Step::Go(Outcome::Started(rung)))
     }
 

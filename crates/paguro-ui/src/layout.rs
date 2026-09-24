@@ -623,6 +623,11 @@ fn describe<'a>(
                         Some(Str::NotimplBody),
                         [Some((Str::KeyEnter, Str::ActContinue)), None],
                     ),
+                    Notice::StartFailed => (
+                        Str::StartfailTitle,
+                        Some(Str::StartfailBody),
+                        [Some((Str::KeyEnter, Str::ActContinue)), None],
+                    ),
                 },
                 Screen::PathRefused => (
                     Str::PathRefused,

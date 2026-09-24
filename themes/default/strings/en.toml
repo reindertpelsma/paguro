@@ -74,6 +74,8 @@ missing_body = "The volume named in the configuration is not on any disk connect
 act_recover_short = "Recover Linux"
 notimpl_title = "This build cannot finish starting Linux"
 notimpl_body = "A later stage of paguro is not implemented yet. Nothing was changed."
+startfail_title = "Linux could not be started"
+startfail_body = "Its boot image is missing or was refused. Nothing was changed on your disk."
 act_continue = "Continue"
 
 noinst_title = "No Linux installation found"

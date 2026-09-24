@@ -92,6 +92,10 @@ pub enum Notice {
     VolumeMissing,
     /// A later stage is not implemented in this build.
     NotImplemented,
+    /// The chosen entry's UEFI image could not be found, read or started
+    /// (a missing file, a refused disk, `LoadImage` refusing it). The log
+    /// says which.
+    StartFailed,
 }
 
 /// Longest [`Label`] in bytes (a GPT partition name is at most 36 UTF-16
@@ -641,6 +645,34 @@ pub trait Platform {
     /// harnesses).
     fn load_start_image_buffer(&mut self, image: &[u8]) -> Result<(), PlatformError> {
         let _ = image;
+        Err(PlatformError::Unsupported)
+    }
+
+    /// Memory for an `efi_file` of `len` bytes, held until the image has been
+    /// loaded (`AllocatePages` in UEFI).
+    ///
+    /// Defaults to `Unsupported` for platforms that never chain.
+    fn alloc_image(&mut self, len: usize) -> Result<&'static mut [u8], PlatformError> {
+        let _ = len;
+        Err(PlatformError::Unsupported)
+    }
+
+    /// Publish a disk file as a **read-only** block device
+    /// (`EFI_BLOCK_IO_PROTOCOL`, `WriteBlocks` → `EFI_WRITE_PROTECTED`) with a
+    /// device path of its own, let the firmware's partition and FAT drivers
+    /// bind it (`ConnectController`, recursive), find the file system `fat`
+    /// names, and write the device path of `image` on it to `out`
+    /// (INTERFACES.md §3.2; DESIGN.md §4.2 tier 1). Returns its length.
+    ///
+    /// Defaults to `Unsupported` for platforms that never chain.
+    fn expose_disk(
+        &mut self,
+        disk: &crate::stage4::ExposedDisk<'_>,
+        fat: crate::stage4::FatAt,
+        image: &str,
+        out: &mut [u8],
+    ) -> Result<usize, PlatformError> {
+        let _ = (disk, fat, image, out);
         Err(PlatformError::Unsupported)
     }
 

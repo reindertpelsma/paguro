@@ -977,6 +977,11 @@ pub fn render(screen: &Screen, w: &mut dyn Write) -> fmt::Result {
                     "A later stage is not implemented yet.",
                     "Any key",
                 ),
+                Notice::StartFailed => (
+                    "Linux could not be started",
+                    "Its boot image is missing or was refused.\r\n   Nothing was changed on your disk.",
+                    "Any key",
+                ),
             };
             write!(w, "   {title}\r\n\r\n   {body}\r\n\r\n   {actions}\r\n")
         }
@@ -1072,7 +1077,8 @@ pub fn map_key(screen: &Screen, key: Key) -> Option<Input> {
         | Screen::NoEfiPartition
         | Screen::TpmLocked
         | Screen::Notice(Notice::SealOverPlaintext)
-        | Screen::Notice(Notice::NotImplemented) => Some(Input::Continue),
+        | Screen::Notice(Notice::NotImplemented)
+        | Screen::Notice(Notice::StartFailed) => Some(Input::Continue),
         Screen::EnterSecret { .. } | Screen::EnterPath(_) | Screen::Browse(_) => None,
     }
 }
@@ -1168,6 +1174,7 @@ mod tests {
             Screen::Notice(Notice::SealOverPlaintext),
             Screen::Notice(Notice::VolumeMissing),
             Screen::Notice(Notice::NotImplemented),
+            Screen::Notice(Notice::StartFailed),
         ];
         for s in &screens {
             let t = text(s);

@@ -19,6 +19,7 @@
 
 pub mod machine;
 pub mod platform;
+pub mod stage4;
 pub mod tpm;
 pub mod ui;
 pub mod volume;
@@ -29,6 +30,7 @@ use paguro_core::{bootstrap, ini, seal};
 
 pub use machine::run;
 pub use platform::{Input, Platform, PlatformError, Screen};
+pub use stage4::NtfsVolume;
 pub use volume::{Unimplemented, Volume};
 
 /// Names on the ESP (INTERFACES.md §2) and in firmware (§5).
@@ -86,6 +88,8 @@ pub enum BootError {
     /// The user left every prompt.
     UserAbort,
     NotImplemented(&'static str),
+    /// Stage 4 refused the entry's files (DESIGN.md §4.1, INTERFACES.md §3.2).
+    Stage4(stage4::Stage4Error),
 }
 
 /// How the boot ended (the loader's `main` maps these to a status).
