@@ -419,6 +419,7 @@ dependencies = [
  "paguro-ui",
  "sha2",
  "uefi",
+ "uefi-raw",
 ]
 
 [[package]]
@@ -437,6 +438,14 @@ version = "0.0.0"
 dependencies = [
  "paguro-core",
  "paguro-crypto",
+]
+
+[[package]]
+name = "paguro-probe"
+version = "0.0.0"
+dependencies = [
+ "paguro-core",
+ "uefi",
 ]
 
 [[package]]

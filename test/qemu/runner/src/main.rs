@@ -12,6 +12,7 @@
 //! KVM is used when `/dev/kvm` is usable, TCG otherwise.
 #![allow(clippy::indexing_slicing)]
 
+mod stage4;
 mod vars;
 
 use paguro_boot::platform::{DiskInfo, Input, Platform, PlatformError, Screen};
@@ -85,6 +86,13 @@ fn sh(cmd: &mut Command) -> R<()> {
 struct Env {
     efi: PathBuf,
     efi_signed: Option<PathBuf>,
+    /// `probe.efi` (test/uefi-probe), unsigned and snakeoil-signed.
+    probe: Option<PathBuf>,
+    probe_signed: Option<PathBuf>,
+    /// The aarch64 loader and probe, and AAVMF.
+    efi_aa64: Option<PathBuf>,
+    probe_aa64: Option<PathBuf>,
+    aavmf: PathBuf,
     ovmf: PathBuf,
     work: PathBuf,
     kvm: bool,
@@ -371,7 +379,7 @@ struct Vm {
     out: Arc<Mutex<String>>,
     cursor: usize,
     log_path: PathBuf,
-    _tpm: Swtpm,
+    _tpm: Option<Swtpm>,
 }
 
 /// Strip ANSI escape sequences and carriage returns from the serial stream.
@@ -405,6 +413,18 @@ impl Vm {
         Self::start_with(env, name, secure, esp, data, vars, state, None)
     }
 
+    /// Boot OVMF with these disks (the first holds the loader's ESP).
+    fn start_disks(
+        env: &Env,
+        name: &str,
+        secure: bool,
+        disks: &[&Path],
+        vars: &Path,
+        state: &Path,
+    ) -> R<Vm> {
+        Self::launch(env, name, secure, disks, vars, state, None)
+    }
+
     /// As [`Vm::start`], with a QMP socket at `qmp` (for screendumps).
     #[allow(clippy::too_many_arguments)]
     fn start_with(
@@ -413,6 +433,19 @@ impl Vm {
         secure: bool,
         esp: &Path,
         data: &Path,
+        vars: &Path,
+        state: &Path,
+        qmp: Option<&Path>,
+    ) -> R<Vm> {
+        Self::launch(env, name, secure, &[esp, data], vars, state, qmp)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch(
+        env: &Env,
+        name: &str,
+        secure: bool,
+        disks: &[&Path],
         vars: &Path,
         state: &Path,
         qmp: Option<&Path>,
@@ -448,12 +481,16 @@ impl Vm {
                 code.display()
             ))
             .arg("-drive")
-            .arg(format!("if=pflash,format=raw,file={}", vars.display()))
-            .arg("-drive")
-            .arg(format!("format=raw,file={},if=virtio", esp.display()))
-            .arg("-drive")
-            .arg(format!("format=raw,file={},if=virtio", data.display()))
-            .args(["-device", "virtio-rng-pci"])
+            .arg(format!("if=pflash,format=raw,file={}", vars.display()));
+        for d in disks {
+            // snapshot: the guest can never change the images (the loader
+            // must not write anyway; this keeps a shared image pristine).
+            cmd.arg("-drive").arg(format!(
+                "format=raw,file={},if=virtio,snapshot=on",
+                d.display()
+            ));
+        }
+        cmd.args(["-device", "virtio-rng-pci"])
             .arg("-chardev")
             .arg(format!("socket,id=chrtpm,path={}", tpm.sock.display()))
             .args([
@@ -461,8 +498,13 @@ impl Vm {
                 "emulator,id=tpm0,chardev=chrtpm",
                 "-device",
                 "tpm-tis,tpmdev=tpm0",
-            ])
-            .stdin(Stdio::piped())
+            ]);
+        Self::spawn(cmd, env.work.join(format!("{name}.serial.log")), Some(tpm))
+    }
+
+    /// Start `cmd` (a QEMU with `-serial stdio`) and collect its serial log.
+    fn spawn(mut cmd: Command, log_path: PathBuf, tpm: Option<Swtpm>) -> R<Vm> {
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| format!("qemu: {e}"))?;
@@ -501,7 +543,7 @@ impl Vm {
             stdin,
             out,
             cursor: 0,
-            log_path: env.work.join(format!("{name}.serial.log")),
+            log_path,
             _tpm: tpm,
         })
     }
@@ -959,12 +1001,31 @@ const SCENARIOS: &[Scenario] = &[
     ("sb-hash-mismatch", secure_boot_hash_mismatch),
     ("sb-verified", secure_boot_verified),
     ("graphical-unlock", graphical_unlock),
+    ("s4-vhd-gpt", stage4::vhd_gpt),
+    (
+        "s4-superfloppy-raw-other",
+        stage4::vhd_superfloppy_raw_other,
+    ),
+    ("s4-efi-file", stage4::efi_file),
+    ("s4-root-frag", stage4::separate_root_fragmented),
+    ("s4-refusals", stage4::refusals),
+    ("s4-invalid-pe", stage4::invalid_pe),
+    ("s4-secure-boot", stage4::secure_boot),
+    ("s4-gates", stage4::gates),
+    ("s4-volume-missing", stage4::volume_missing),
+    ("s4-recovery-browser", stage4::recovery_browser),
+    ("s4-aarch64", stage4::aarch64),
 ];
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut efi = None;
     let mut efi_signed = None;
+    let mut probe = None;
+    let mut probe_signed = None;
+    let mut efi_aa64 = None;
+    let mut probe_aa64 = None;
+    let mut aavmf = PathBuf::from("/usr/share/AAVMF");
     let mut ovmf = PathBuf::from("/usr/share/OVMF");
     let mut work = std::env::temp_dir().join("paguro-qemu");
     let mut accel = "auto".to_string();
@@ -973,6 +1034,11 @@ fn main() {
         match a.as_str() {
             "--efi" => efi = args.next().map(PathBuf::from),
             "--efi-signed" => efi_signed = args.next().map(PathBuf::from),
+            "--probe" => probe = args.next().map(PathBuf::from),
+            "--probe-signed" => probe_signed = args.next().map(PathBuf::from),
+            "--efi-aa64" => efi_aa64 = args.next().map(PathBuf::from),
+            "--probe-aa64" => probe_aa64 = args.next().map(PathBuf::from),
+            "--aavmf" => aavmf = args.next().map(PathBuf::from).unwrap_or(aavmf),
             "--ovmf" => ovmf = args.next().map(PathBuf::from).unwrap_or(ovmf),
             "--work" => work = args.next().map(PathBuf::from).unwrap_or(work),
             "--accel" => accel = args.next().unwrap_or(accel),
@@ -1004,6 +1070,11 @@ fn main() {
     let env = Env {
         efi,
         efi_signed,
+        probe,
+        probe_signed,
+        efi_aa64,
+        probe_aa64,
+        aavmf,
         ovmf,
         work,
         kvm,
@@ -1011,7 +1082,12 @@ fn main() {
     println!("accelerator: {}", if kvm { "kvm" } else { "tcg" });
     let mut failed = 0;
     for (name, f) in SCENARIOS {
-        if !only.is_empty() && !only.iter().any(|o| o == name) {
+        // `NAME`, or `PREFIX*` for a group (CI runs `s4-*` as its own job).
+        let wanted = |o: &String| match o.strip_suffix('*') {
+            Some(p) => name.starts_with(p),
+            None => o == name,
+        };
+        if !only.is_empty() && !only.iter().any(wanted) {
             continue;
         }
         let t0 = Instant::now();

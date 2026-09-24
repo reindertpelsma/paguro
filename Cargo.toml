@@ -12,8 +12,9 @@ members = [
     "crates/paguro-ui",
     "crates/paguro-ui-preview",
     "test/qemu/runner",
+    "test/uefi-probe",
 ]
-# paguro-efi only builds for x86_64-unknown-uefi; see its README.
+# paguro-efi and paguro-probe only build for x86_64-unknown-uefi; see its README.
 default-members = [
     "crates/paguro-core",
     "crates/paguro-boot",

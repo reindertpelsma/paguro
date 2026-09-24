@@ -1,0 +1,20 @@
+[package]
+name = "paguro-probe"
+description = "A tiny UEFI app the QEMU scenarios chain into: prints how it was started, reads its own FAT and the handoff"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "probe"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+paguro-core.workspace = true
+uefi = { version = "0.41", features = ["panic_handler", "alloc", "global_allocator"] }
+
+[lints]
+workspace = true

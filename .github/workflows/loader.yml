@@ -20,13 +20,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: x86_64-unknown-uefi
-      - name: install swtpm (real-TPM integration tests)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq swtpm
+          targets: x86_64-unknown-uefi, aarch64-unknown-uefi
+      # swtpm: real-TPM integration tests. The NTFS tools, mtools, gdisk and
+      # qemu-img build the real volumes stage 4 is tested against.
+      - name: install swtpm and image tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq swtpm ntfs-3g attr mtools dosfstools gdisk qemu-utils
       - run: cargo fmt --all --check
       - run: cargo clippy -p paguro-core -p paguro-boot -p paguro-qemu --all-targets -- -D warnings
-      - run: cargo clippy -p paguro-efi --target x86_64-unknown-uefi -- -D warnings
+      - run: cargo clippy -p paguro-efi -p paguro-probe --target x86_64-unknown-uefi -- -D warnings
+      - run: cargo clippy -p paguro-efi -p paguro-probe --target aarch64-unknown-uefi -- -D warnings
       - run: cargo test -p paguro-core -p paguro-boot
+      - name: the real-volume NTFS tests really ran
+        run: cargo test -p paguro-core --test ntfs_dir -- --nocapture 2>&1 | tee ntfs.log && ! grep -q "skipped" ntfs.log
       - name: swtpm tests really ran
         run: cargo test -p paguro-boot --test swtpm -- --nocapture 2>&1 | tee swtpm.log && ! grep -q "skipping real-TPM" swtpm.log
 
@@ -50,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ini_config, seal, fve, gpt, fat_dir, handoff, bootstrap, tpm_response, tpm_client, edid, vt100]
+        target: [ini_config, seal, fve, gpt, fat_dir, handoff, bootstrap, tpm_response, tpm_client, edid, vt100, ntfs_index, ntfs_lookup]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -71,23 +78,37 @@ jobs:
           path: fuzz/artifacts/${{ matrix.target }}
 
   qemu:
-    name: QEMU (OVMF, Secure Boot, swtpm)
+    name: QEMU ${{ matrix.group }} (OVMF, Secure Boot, swtpm; AAVMF)
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: stages 1-3, graphics
+            scenarios: recovery-no-config load-taint-unseal sb-* graphical-unlock
+          # Stage 4 end to end: one shared NTFS volume, a boot per scenario.
+          - group: stage 4 boots
+            scenarios: s4-vhd-gpt s4-superfloppy-raw-other s4-efi-file s4-root-frag s4-secure-boot s4-gates s4-aarch64
+          - group: stage 4 refusals, recovery
+            scenarios: s4-refusals s4-invalid-pe s4-volume-missing s4-recovery-browser
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-uefi
-      - name: install QEMU, OVMF, swtpm, image tools
+          targets: x86_64-unknown-uefi, aarch64-unknown-uefi
+      # Stage 4 builds its NTFS volume with ntfs-3g (FUSE, through sudo -n),
+      # its VHDs with qemu-img, and boots one scenario under AAVMF.
+      - name: install QEMU, OVMF, AAVMF, swtpm, image tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 ovmf swtpm mtools dosfstools gdisk sbsigntool
+          sudo apt-get install -y -qq qemu-system-x86 qemu-system-arm qemu-efi-aarch64 qemu-utils \
+            ovmf swtpm mtools dosfstools gdisk sbsigntool ntfs-3g attr
       # TCG: OVMF + swtpm under (nested) KVM intermittently stops receiving
       # TPM responses inside the firmware; TCG is reliable and fast enough.
-      - name: boot scenarios
-        run: PAGURO_QEMU_ACCEL=tcg test/qemu/run.sh
+      - name: boot scenarios (${{ matrix.group }})
+        run: PAGURO_QEMU_ACCEL=tcg test/qemu/run.sh ${{ matrix.scenarios }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: qemu-serial-logs
+          name: qemu-serial-logs-${{ strategy.job-index }}
           path: target/qemu/*.log
