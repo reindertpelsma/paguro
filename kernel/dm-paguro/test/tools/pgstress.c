@@ -288,9 +288,14 @@ static int tree(const char *dir, uint64_t seed, long ops, const char *manifest)
 			}
 		} else if (r < 62 && f->live) {			/* rename */
 			snprintf(to, sizeof(to), "d%d/r%ld", (int)below(ndirs), op);
-			if (rename(f->path, to))
-				die("rename %s: %s", f->path, strerror(errno));
-			memcpy(f->path, to, sizeof(to));
+			/* A full volume may have no room for the new name. */
+			if (rename(f->path, to)) {
+				if (errno != ENOSPC)
+					die("rename %s: %s", f->path, strerror(errno));
+				enospc++;
+			} else {
+				memcpy(f->path, to, sizeof(to));
+			}
 		} else if (r < 92 && f->live) {			/* unlink */
 			if (unlink(f->path))
 				die("unlink %s: %s", f->path, strerror(errno));
