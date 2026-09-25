@@ -61,10 +61,10 @@ public sealed class GuiApp : IDisposable
         Retry.WhileNull(() => (under ?? Window).FindFirstDescendant(cf => cf.ByName(name)), TimeSpan.FromSeconds(seconds), TimeSpan.FromMilliseconds(200)).Result
         ?? throw new InvalidOperationException($"no element named {name}");
 
-    /// <summary>The open ContentDialog (it lives in a popup under the window).</summary>
-    public AutomationElement Dialog(int seconds = 20) =>
-        Retry.WhileNull(() => Window.FindFirstDescendant(cf => cf.ByAutomationId("Dialog"))
-                ?? Window.FindFirstDescendant(cf => cf.ByClassName("ContentDialog")), TimeSpan.FromSeconds(seconds), TimeSpan.FromMilliseconds(200)).Result
+    /// <summary>The open ContentDialog's primary button (the template part
+    /// PrimaryButton; the dialog lives in a popup under the window).</summary>
+    public AutomationElement DialogPrimary(int seconds = 20) =>
+        Retry.WhileNull(() => Window.FindFirstDescendant(cf => cf.ByAutomationId("PrimaryButton")), TimeSpan.FromSeconds(seconds), TimeSpan.FromMilliseconds(200)).Result
         ?? throw new InvalidOperationException("no dialog");
 
     public void Go(string page)

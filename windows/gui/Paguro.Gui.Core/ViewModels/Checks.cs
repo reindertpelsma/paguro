@@ -33,7 +33,7 @@ public sealed class ChecksViewModel : ObservableObject
         Error = session.LastError;
         if (r == null) return;
         Items.Clear();
-        foreach (var c in r.Data.Checks) Items.Add(new CheckItem(S, c));
+        foreach (var c in r.Data.Checks) Items.Add(new CheckItem(S, c, session.ReadOnly));
         Ready = r.Data.Ready;
         Raise(nameof(Summary));
         Fix.Refresh();
@@ -50,14 +50,15 @@ public sealed class ChecksViewModel : ObservableObject
 
 public sealed class CheckItem : ObservableObject
 {
-    public CheckItem(Strings s, SystemCheck c)
+    public CheckItem(Strings s, SystemCheck c, bool readOnly = false)
     {
         Id = c.Id;
         Title = s[$"check_{c.Id}"];
         Why = s[$"check_{c.Id}_why"];
         State = c.State;
         Detail = c.Detail;
-        CanFix = c.Fix?.Automatic == true && c.State != "ok";
+        // Only an administrator may fix; others still read the instruction.
+        CanFix = c.Fix?.Automatic == true && c.State != "ok" && !readOnly;
         FixText = c.Fix?.Instruction ?? "";
         StateText = s[$"state_{c.State}"];
     }
@@ -75,4 +76,6 @@ public sealed class CheckItem : ObservableObject
     public string FixText { get; }
     public bool HasFixText => FixText.Length > 0;
     public string Glyph => State switch { "ok" => "\uE73E", "warn" => "\uE7BA", _ => "\uE783" };
+    /// <summary>What UI automation and screen readers call the row.</summary>
+    public override string ToString() => Title;
 }

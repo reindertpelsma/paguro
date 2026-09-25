@@ -169,4 +169,5 @@ public sealed class DistroItem
     public string Detail { get; }
     public bool IsImage => Kind == "image";
     public bool IsWsl => Kind == "wsl";
+    public override string ToString() => Name;
 }

@@ -148,6 +148,8 @@ public sealed class ChoiceItem : ObservableObject
     public string Badge { get; }
     bool isSelected;
     public bool IsSelected { get => isSelected; set => Set(ref isSelected, value); }
+    /// <summary>The list item's name for UI automation and screen readers.</summary>
+    public override string ToString() => Title;
 }
 
 static class KeyboardLayouts

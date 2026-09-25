@@ -21,8 +21,7 @@ public class FlowTests
         Assert.Equal("paguro", g.Window.Title);
         foreach (var p in Paguro.Gui.ViewModels.MainViewModel.PageKeys)
             Assert.Equal(g.S[$"page_{p}"], g.Find("nav_" + p).Name);
-        var fs = g.Find("fast_startup");
-        Assert.Equal(g.S["check_fast_startup"], fs.Name);
+        g.FindName(g.S["check_fast_startup"]);
         var summary = Retry.WhileEmpty(() => Text(g.Find("ChecksSummary")), TimeSpan.FromSeconds(10)).Result;
         Assert.Contains(summary, new[] { g.S["checks_ready"], g.S["checks_not_ready"] });
         g.Shot("checks");
@@ -34,9 +33,10 @@ public class FlowTests
     {
         using var g = new GuiApp();
         g.Click(g.Find("fix_fast_startup"));
-        var d = g.Dialog();
+        var yes = g.DialogPrimary();
+        Assert.Equal(g.S["fix_yes"], yes.Name);
         g.Shot("checks-fix-dialog");
-        g.Click(g.FindName(g.S["fix_yes"], d));
+        g.Click(yes);
         var call = g.Called("checks.fix");
         Assert.Equal("fast_startup", call.Params["id"]!.GetValue<string>());
     }
@@ -70,7 +70,7 @@ public class FlowTests
     {
         using var g = new GuiApp(setup: Protection);
         g.Go("protection");
-        g.Find("choice_tpm_pin");
+        g.FindName(g.S["choice_tpm_pin"]);
         // TPM-only is shown with the reason it is not offered (Windows uses TPM + PIN).
         g.FindName(g.S["choice_tpm_only_not_offered"]);
         Assert.Equal("0000040C", g.Called("protection.options").Params["klid"]!.GetValue<string>());
@@ -90,9 +90,9 @@ public class FlowTests
         Retry.WhileTrue(() => Text(g.Find("Refused")).Length > 0, TimeSpan.FromSeconds(10));
         Retry.WhileFalse(() => g.Find("Apply").IsEnabled, TimeSpan.FromSeconds(10));
         g.Click(g.Find("Apply"));
-        var d = g.Dialog();
+        var apply = g.DialogPrimary();
         g.Shot("protection-confirm");
-        g.Click(g.FindName(g.S["protection_apply"], d));
+        g.Click(apply);
         var set = g.Called("protection.set");
         Assert.Equal("tpm_pin", set.Params["choice"]!.GetValue<string>());
         Assert.Equal("4711", set.Params["pin"]!.GetValue<string>());
@@ -105,15 +105,15 @@ public class FlowTests
     {
         using var g = new GuiApp();
         g.Go("restart");
-        g.Find("Summary");
         g.FindName(g.S.F("restart_boots_default", ("entry", "debian")));
         g.Shot("restart");
         Retry.WhileFalse(() => g.Find("Restart").IsEnabled, TimeSpan.FromSeconds(10));
         g.Click(g.Find("Restart"));
-        var d = g.Dialog();
+        var now = g.DialogPrimary();
+        Assert.Equal(g.S["restart_now"], now.Name);
         g.Shot("restart-dialog");
         g.Server.ClearCalls();
-        g.Click(g.FindName(g.S["restart_now"], d));
+        g.Click(now);
         var call = g.Called("restart-linux");
         Assert.True(call.Params["yes"]!.GetValue<bool>());
         Assert.False(call.Params.ContainsKey("dry_run"));
@@ -126,7 +126,8 @@ public class FlowTests
         var banner = g.Find("Banner");
         g.FindName(g.S["banner_read_only"]);
         g.Shot("read-only");
-        Assert.False(g.Find("fix_fast_startup").IsEnabled);
+        g.FindName(g.S["check_fast_startup"]);
+        Assert.Null(g.Window.FindFirstDescendant(cf => cf.ByAutomationId("fix_fast_startup")));
         _ = banner;
     }
 
@@ -144,7 +145,7 @@ public class FlowTests
         g.Go("uninstall");
         g.FindName(g.S["untouched_windows"]);
         g.Go("secureboot");
-        g.Find("MokExplanation");
+        g.FindName(g.S["mok_title"]);
     }
 
     [Theory]
@@ -156,10 +157,10 @@ public class FlowTests
     {
         using var g = new GuiApp(lang, Protection);
         Assert.Equal(g.S["page_checks"], g.Find("nav_checks").Name);
-        g.Find("fast_startup");
+        g.FindName(g.S["check_fast_startup"]);
         g.Shot("checks");
         g.Go("protection");
-        g.Find("choice_tpm_pin");
+        g.FindName(g.S["choice_tpm_pin"]);
         g.Shot("protection");
     }
 }
