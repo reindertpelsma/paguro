@@ -533,6 +533,25 @@ zero-copy substitution above.
 to lift. Easy enough mechanically; the security work is ours (bind to the
 host-only link, credentials from the keyring per §4.7).
 
+**Licensing is where the shared installation differs most.** A WinBoat-style
+VM is a *second* Windows installation, so it needs its own licence beyond the
+evaluation period. A laptop's OEM key in the firmware (`/sys/firmware/acpi/
+tables/MSDM`) can activate such a VM only if the native installation is not also
+in use — the licence covers one instance per device. paguro's VM is **the same
+installation on the same device**, never running at the same time as the native
+boot, which is what the Windows licence terms describe ("one instance … on one
+device, whether that device is physical or virtual"). No second licence, and
+the same for self-built desktops, whose digital licence is tied to the hardware
+rather than stored in firmware. (Our reading of the licence terms; to be
+confirmed against the current Windows 11 text before release.)
+
+**Activation still has to survive the move between hardware and VM.** Windows
+ties its activation to a hardware hash; a VM that looks like different hardware
+can show *not activated* while it runs. The VM therefore presents the host's own
+identity where QEMU can: the firmware's SMBIOS tables (`-smbios` from the host's
+values), the OEM licence table (`-acpitable file=…/MSDM`), the system disk's
+serial number and the network adapter's MAC address (§11 Q32).
+
 **Helios** is winboat-org's separate GPU effort (§The deciding property above).
 Note also that Venus's missing Vulkan Video means it cannot help the RDP encode.
 
@@ -4647,6 +4666,11 @@ later question sits with the ones it belongs to rather than in numeric order.
     exposes to the initrd — for example a read-once `/dev/paguro-handoff` — is
     still to be decided. It must stay out of the enforcement module, which holds
     no key material.
+
+32. **Does Windows stay activated in the VM, and after returning to the metal?**
+    With the host's SMBIOS, MSDM table, disk serial and MAC passed through
+    (§1b, WinBoat), on OEM-key laptops and on digitally licensed desktops;
+    and whether a VM session ever changes the native boot's activation state.
 
 ---
 
