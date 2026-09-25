@@ -4018,11 +4018,20 @@ Note the native boot is unaffected in every tier — stock kernel, Secure Boot o
 nothing loaded. Only the VM session would report differently, and only where full
 EDR is deployed.
 
-### AV friction worth engineering for
+### Antivirus and EDR
 
-- **Defender exclusion for the image files** — a multi-GB file written continuously is
-  worst-case for on-access scanning
-- some AV blocks raw `\\.\PhysicalDrive` handles, which the verification step needs
+The storage path does not depend on antivirus behaving: the module's range test
+holds whatever runs in Windows. What antivirus can cause is noise, slowness, or
+a paguro binary being blocked — and the last one is the real risk.
+
+| Where | Risk | Answer |
+|---|---|---|
+| **paguro's own Windows binaries** | **high.** The service writes firmware variables and boot entries, queues MOK enrolments, and reads the BitLocker recovery password — the behaviour of a bootkit, or of ransomware that abuses BitLocker. EDR heuristics are built to flag exactly that | code-signed binaries (Azure Trusted Signing or an EV certificate) so reputation accrues; false-positive submissions to Microsoft and the major vendors before release; open source and reproducible builds so vendors can look; every sensitive action logged in plain words, and none taken silently |
+| native Windows, the image files | medium: on-access and scheduled scans of multi-GB files written by another OS — slow, and a lock held by a scanner at shutdown | a **Defender exclusion** for the image paths, added by the installer with the user's consent and shown in the UI; third-party AV gets the same instructions |
+| VM, the image files | low: the minifilter refuses the scanner's opens, so it logs *access denied* and moves on; no `EIO` reaches it | our altitude above antivirus filters (FSFilter Top), so the refusal comes before the scanner sees the file — a Microsoft-assigned altitude is required anyway |
+| the minifilter | medium: an unknown kernel driver, and while it is test-signed a guest booted with test signing, which EDR products treat as a risk signal | attestation signing (§12); until then test signing is confined to the VM's synthetic ESP, so the native boot never runs in test mode |
+| the ESP | low: firmware scanners (Defender's UEFI scanner, ESET) flag *known* bootkits; a distribution's shim is common, `paguro.efi` is new | the same code-signing and submission path; the machine-MOK signature and SBAT data are visible to any scanner |
+| raw disk access for verification | low: some products block `\\.\PhysicalDrive` handles | the service documents the exclusion it needs and degrades to a clear error |
 
 ---
 
