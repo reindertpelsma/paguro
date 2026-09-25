@@ -45,8 +45,11 @@ vm_modules() {
 }
 
 vm_module_dep() {
+    # local (dash, busybox sh, bash): the recursion below must not clobber
+    # the caller's file and name.
+    local md rel line file d name
     md=$1; rel=$2
-    line=$(grep -E "^$rel\.ko(\.zst|\.xz|\.gz)?:" "$md/modules.dep" 2>/dev/null | head -1)
+    line=$(grep -E "^$rel\.ko(\.zst|\.xz|\.gz)?:" "$md/modules.dep" 2>/dev/null | head -1) || true
     [ -n "$line" ] || return 0
     file=${line%%:*}
     for d in ${line#*:}; do vm_module_dep "$md" "${d%.ko*}"; done
