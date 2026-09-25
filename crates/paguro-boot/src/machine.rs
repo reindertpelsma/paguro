@@ -1426,7 +1426,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         // unsigned, self-validating: the FVEK's MAC is the check).
         if let Some(vmk) = self.v.bitlocker_password(self.p, user)? {
             if self.accept(vmk)? {
-                return Ok(Some(Rung::Passphrase));
+                return Ok(Some(Rung::BitLockerPassword));
             }
         }
         // tpm: the only rung that costs an attempt.

@@ -291,6 +291,15 @@ fn write_fuzz_seeds() {
     )
     .unwrap();
     put("handoff", "efi-file-only", &b[..n]);
+    let n = handoff::encode(
+        &handoff::Handoff {
+            rung: handoff::Rung::BitLockerPassword,
+            ..h
+        },
+        &mut b,
+    )
+    .unwrap();
+    put("handoff", "bitlocker-password", &b[..n]);
 
     // bootstrap
     let od = bootstrap::write_optional_data(&mock::VOLUME, &[1; 16], &[2; 32]);

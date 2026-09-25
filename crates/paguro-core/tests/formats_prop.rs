@@ -219,7 +219,7 @@ proptest! {
         root in proptest::option::of((any::<u64>(), any::<u16>())),
         efi in proptest::option::of((any::<bool>(), any::<u64>(), any::<u16>())),
         state in 0u32..16,
-        rung in 1u8..=8,
+        rung in 1u8..=9,
         prov in proptest::option::of((any::<[u8; 32]>(), any::<[u8; 16]>(), tpm2b(300), tpm2b(300))),
     ) {
         let pcrv = vec![0x5au8; mask.count_ones() as usize * 32];

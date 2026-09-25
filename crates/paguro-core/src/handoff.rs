@@ -58,9 +58,9 @@ pub mod state {
 
 /// Which protector produced the VMK (the `RUNG` record).
 ///
-/// Values 1–6 are INTERFACES.md §8. `ClearKey` (7) and `Unencrypted` (8) are
-/// paguro-boot additions: a clear-key volume unlocks without any rung, and an
-/// unencrypted volume has none to name.
+/// INTERFACES.md §8. `ClearKey` (7): a clear-key volume unlocks without
+/// any rung; `Unencrypted` (8): there is none to name; `BitLockerPassword`
+/// (9): the volume's own FVE password protector, typed on the password row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rung {
     Tpm = 1,
@@ -71,6 +71,7 @@ pub enum Rung {
     Bootstrap = 6,
     ClearKey = 7,
     Unencrypted = 8,
+    BitLockerPassword = 9,
 }
 
 impl Rung {
@@ -84,6 +85,7 @@ impl Rung {
             6 => Rung::Bootstrap,
             7 => Rung::ClearKey,
             8 => Rung::Unencrypted,
+            9 => Rung::BitLockerPassword,
             _ => return None,
         })
     }
@@ -693,7 +695,7 @@ mod tests {
         for v in 0..=255u8 {
             match Rung::from_u8(v) {
                 Some(r) => assert_eq!(r as u8, v),
-                None => assert!(v == 0 || v > 8),
+                None => assert!(v == 0 || v > 9),
             }
         }
     }
@@ -761,7 +763,7 @@ mod tests {
             Err(HandoffError::UnknownStateFlags)
         );
         assert_eq!(
-            with(&[10, 0, 1, 0, 0, 0, 9], 2),
+            with(&[10, 0, 1, 0, 0, 0, 10], 2),
             Err(HandoffError::BadValue(10))
         );
         assert_eq!(

@@ -1268,7 +1268,7 @@ pub fn bde_password(env: &Env) -> R<()> {
         vm.expect("Password or PIN:", 10)?;
         vm.send(BDE_PASSWORD)?;
         vm.send("\r")?;
-        bde_started(vm, &keys, "Passphrase")
+        bde_started(vm, &keys, "BitLockerPassword")
     })
 }
 

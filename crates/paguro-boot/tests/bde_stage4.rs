@@ -318,7 +318,12 @@ fn a_bitlocker_password_after_a_wrong_one() {
         .input(Input::Select(Row::PasswordOrPin))
         .secret("hunter2");
     let (out, fvek) = run(&mut m);
-    assert_eq!(out, Outcome::Started(Rung::Passphrase), "{:#?}", m.log);
+    assert_eq!(
+        out,
+        Outcome::Started(Rung::BitLockerPassword),
+        "{:#?}",
+        m.log
+    );
     check_started(&b, &m, &fvek);
     assert_eq!(fvek.unwrap().0, 0x8004);
 }
