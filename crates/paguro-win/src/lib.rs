@@ -9,7 +9,8 @@
 //! - Formats are never implemented here: `paguro.ini`, seals, load options,
 //!   signature lists, SMBIOS, the TCG log, BitLocker metadata and the TPM
 //!   client all come from `paguro-core`, `paguro-crypto` and `paguro-boot`.
-#![forbid(unsafe_code)]
+// `unsafe` is confined to `real` (Win32 calls); everything else is safe Rust.
+#![deny(unsafe_code)]
 
 pub mod api;
 pub mod bootent;
@@ -24,4 +25,6 @@ pub mod keys;
 pub mod mock;
 pub mod out;
 pub mod preflight;
+#[cfg(windows)]
+pub mod real;
 pub mod tpmwin;

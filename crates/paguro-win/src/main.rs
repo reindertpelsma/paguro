@@ -5,7 +5,7 @@ use std::io::Write;
 
 fn main() {
     #[cfg(windows)]
-    let api = paguro_win_real::RealApi::new();
+    let api = paguro_win::real::RealApi::new();
     #[cfg(not(windows))]
     let api = paguro_win::mock::MockApi::standard();
     #[cfg(not(windows))]
