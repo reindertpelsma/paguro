@@ -22,6 +22,7 @@
 use paguro_core::bootstrap::{
     self, DP_MEDIA, DP_MEDIA_FILE_PATH, HardDrive, LOAD_OPTION_ACTIVE, MAX_LOAD_OPTION,
 };
+use paguro_core::disk::SECTOR;
 use paguro_core::guid::EFI_GLOBAL_VARIABLE;
 use serde::Serialize;
 
@@ -33,6 +34,8 @@ pub const BOOTSTRAP_DESCRIPTION: &str = "paguro setup";
 /// Highest `Boot####` number probed when listing (entries beyond it are
 /// still found through `BootOrder`).
 pub const PROBE_MAX: u16 = 0x00ff;
+/// `Boot####`: the number is four hex digits.
+const NUMBER_DIGITS: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BootEntry {
@@ -170,8 +173,8 @@ pub fn esp_node(esp: &Volume) -> Result<HardDrive, CmdError> {
         .ok_or_else(|| CmdError::refused("the ESP is not on a GPT disk"))?;
     Ok(HardDrive {
         partition_number: loc.partition_number,
-        start_lba: loc.offset / 512,
-        size_lba: loc.length / 512,
+        start_lba: loc.offset / SECTOR,
+        size_lba: loc.length / SECTOR,
         partition_guid: guid,
     })
 }
@@ -305,7 +308,7 @@ pub fn parse_number(s: &str) -> Result<u16, CmdError> {
         .strip_prefix("Boot")
         .or_else(|| s.strip_prefix("boot"))
         .unwrap_or(s);
-    if s.is_empty() || s.len() > 4 {
+    if s.is_empty() || s.len() > NUMBER_DIGITS {
         return Err(CmdError::new(
             crate::out::Exit::Usage,
             format!("not a boot entry number: {s:?}"),

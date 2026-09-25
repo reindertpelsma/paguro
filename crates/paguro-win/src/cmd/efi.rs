@@ -13,6 +13,11 @@ use crate::bootent;
 use crate::ctx::Ctx;
 use crate::out::{At, CmdError, CmdResult, Exit, Report, from_hex, to_hex};
 
+/// `PaguroB` and `PaguroSetup` hold 256-bit secrets.
+const SECRET_LEN: usize = 32;
+/// `PaguroConfigHash` is a SHA-256 digest.
+pub const DIGEST_LEN: usize = 32;
+
 pub struct VarSpec {
     pub name: &'static str,
     pub size: usize,
@@ -26,21 +31,21 @@ pub struct VarSpec {
 pub const VARS: [VarSpec; 6] = [
     VarSpec {
         name: "PaguroB",
-        size: 32,
+        size: SECRET_LEN,
         public: false,
         settable: false,
         note: "boot-services only: never visible to an OS",
     },
     VarSpec {
         name: "PaguroConfigHash",
-        size: 32,
+        size: DIGEST_LEN,
         public: true,
         settable: true,
         note: "SHA-256 of paguro.ini",
     },
     VarSpec {
         name: "PaguroSetup",
-        size: 32,
+        size: SECRET_LEN,
         public: false,
         settable: false,
         note: "S, one-shot setupTPM secret: written by `paguro stage-setup` only",

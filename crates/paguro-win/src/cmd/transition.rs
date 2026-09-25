@@ -26,6 +26,9 @@ use crate::out::{At, CmdError, CmdResult, Exit, Report, guid_text, to_hex};
 use crate::preflight::{self, Action, Reason};
 use crate::tpmwin;
 
+/// The setup secret S `env_setup` binds (INTERFACES.md §8.1): 256 bits.
+const SETUP_SECRET_LEN: usize = 32;
+
 pub const SETUP_VAR: &str = "PaguroSetup";
 pub const BROKEN_VAR: &str = "PaguroTpmBroken";
 
@@ -469,8 +472,8 @@ pub fn stage(
         return Ok(plan);
     }
     let pass = ctx.passphrase("Linux passphrase")?;
-    let mut s = Zeroizing::new([0u8; 32]);
-    let mut salt = [0u8; 16];
+    let mut s = Zeroizing::new([0u8; SETUP_SECRET_LEN]);
+    let mut salt = [0u8; seal::SALT_LEN];
     ctx.api.random(&mut s[..])?;
     ctx.api.random(&mut salt)?;
     let ph = keys::pass_hash(&pass, &salt);

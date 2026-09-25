@@ -34,7 +34,7 @@ impl MockFile {
     pub fn new(data: &[u8]) -> Self {
         let mut f = MockFile {
             len: data.len() as u64,
-            attributes: 0x20,
+            attributes: fattr::ARCHIVE,
             ..MockFile::default()
         };
         if !data.is_empty() {
@@ -46,7 +46,7 @@ impl MockFile {
     pub fn zeros(len: u64) -> Self {
         MockFile {
             len,
-            attributes: 0x20,
+            attributes: fattr::ARCHIVE,
             ..MockFile::default()
         }
     }
@@ -129,6 +129,8 @@ pub const ESP_PATH: &str = "\\\\?\\Volume{aaaaaaaa-0000-0000-0000-000000000001}\
 pub const C_VOLUME_PATH: &str = "\\\\?\\Volume{aaaaaaaa-0000-0000-0000-000000000002}\\";
 /// Byte offset of C: on disk 0.
 pub const C_OFFSET: u64 = 0x1000_0000;
+/// The mock NTFS volume's cluster size.
+const CLUSTER: u64 = 4096;
 
 impl MockApi {
     pub fn empty() -> Self {
@@ -538,7 +540,7 @@ impl WinApi for MockApi {
                 allocated: if sparse {
                     0
                 } else {
-                    f.len.div_ceil(4096) * 4096
+                    f.len.div_ceil(CLUSTER) * CLUSTER
                 },
                 attributes: f.attributes,
                 file_id: f.file_id,
@@ -555,7 +557,7 @@ impl WinApi for MockApi {
         if let Some(e) = &f.extents {
             return Ok(e.clone());
         }
-        let clusters = f.len.div_ceil(4096);
+        let clusters = f.len.div_ceil(CLUSTER);
         let extents = if clusters == 0 {
             vec![]
         } else if f.attributes & fattr::SPARSE != 0 {
@@ -572,7 +574,7 @@ impl WinApi for MockApi {
             }]
         };
         Ok(Extents {
-            cluster_size: 4096,
+            cluster_size: CLUSTER as u32,
             extents,
         })
     }
@@ -588,7 +590,7 @@ impl WinApi for MockApi {
             return Err(ApiError::not_found("CreateVirtualDisk", "path not found"));
         }
         self.mutated(format!("vhd_create {} {size}", key(path)));
-        let mut f = MockFile::zeros(size + 512);
+        let mut f = MockFile::zeros(size + paguro_core::vhd::FOOTER_LEN);
         f.write_at(size, &fixed_vhd_footer(size));
         self.files.borrow_mut().insert(key(path), f);
         Ok(())

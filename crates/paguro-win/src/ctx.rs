@@ -66,7 +66,7 @@ impl<'a> Ctx<'a> {
     /// oracle by design (DESIGN.md §6) — so interactive entry asks twice.
     pub fn passphrase(&self, what: &str) -> Result<Zeroizing<String>, CmdError> {
         let s = if self.passphrase_stdin {
-            let raw = self.api.read_stdin(MAX_PASSPHRASE + 2)?;
+            let raw = self.api.read_stdin(MAX_PASSPHRASE + "\r\n".len())?;
             let t = std::str::from_utf8(&raw)
                 .map_err(|_| CmdError::refused("the passphrase is not UTF-8"))?;
             Zeroizing::new(t.trim_end_matches(['\r', '\n']).to_string())

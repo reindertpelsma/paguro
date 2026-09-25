@@ -27,6 +27,8 @@ const NAMESPACE: &str = "ROOT\\CIMV2\\Security\\MicrosoftVolumeEncryption";
 const CLASS: &str = "Win32_EncryptableVolume";
 /// `GetKeyProtectors` type for numerical (recovery) passwords.
 const NUMERICAL_PASSWORD: i32 = 3;
+/// Most elements read from a WMI string array (protector IDs).
+const MAX_ARRAY_ELEMENTS: u32 = 256;
 
 fn connect() -> ApiResult<IWbemServices> {
     // SAFETY: COM initialisation for this thread; "already initialised in
@@ -108,7 +110,7 @@ fn get_strings(obj: &IWbemClassObject, name: &str) -> ApiResult<Vec<String>> {
     unsafe {
         let n = VariantGetElementCount(&v);
         let mut out = Vec::with_capacity(n as usize);
-        for i in 0..n.min(256) {
+        for i in 0..n.min(MAX_ARRAY_ELEMENTS) {
             let p = VariantGetStringElem(&v, i).map_err(|e| win_err("VariantGetStringElem", e))?;
             out.push(p.to_string().unwrap_or_default());
             windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const _));

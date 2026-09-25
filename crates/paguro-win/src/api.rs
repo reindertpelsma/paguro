@@ -88,9 +88,10 @@ pub struct FwVar {
     pub attributes: u32,
 }
 
-/// `FILE_ATTRIBUTE_*` bits the tool checks.
+/// `FILE_ATTRIBUTE_*` bits the tool checks (winnt.h).
 pub mod fattr {
     pub const READONLY: u32 = 0x1;
+    pub const ARCHIVE: u32 = 0x20;
     pub const HIDDEN: u32 = 0x2;
     pub const SYSTEM: u32 = 0x4;
     pub const DIRECTORY: u32 = 0x10;

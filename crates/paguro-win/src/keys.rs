@@ -44,7 +44,7 @@ impl std::fmt::Debug for VolumeKeys {
 /// The encrypted FVEK blob the root gate binds (DESIGN.md §6).
 pub fn fvek_blob(m: &Metadata<'_>) -> Vec<u8> {
     let f = m.fvek;
-    let mut b = Vec::with_capacity(28 + f.ciphertext.len());
+    let mut b = Vec::with_capacity(f.nonce.len() + f.tag.len() + f.ciphertext.len());
     b.extend_from_slice(&f.nonce);
     b.extend_from_slice(&f.tag);
     b.extend_from_slice(f.ciphertext);
@@ -56,7 +56,10 @@ fn bde_err(e: bde::BdeError) -> CmdError {
 }
 
 /// A volume header and its three metadata regions.
-pub type RawMetadata = (bde::VolumeHeader, [Vec<u8>; 3]);
+pub type RawMetadata = (bde::VolumeHeader, [Vec<u8>; METADATA_COPIES]);
+
+/// A BitLocker volume keeps three copies of its FVE metadata.
+pub const METADATA_COPIES: usize = 3;
 
 /// Read the three FVE metadata copies of the partition at `offset` on
 /// `disk`, below BitLocker. `Ok(None)`: the partition is not BitLocker.
@@ -65,14 +68,14 @@ pub fn read_metadata(
     disk: u32,
     offset: u64,
 ) -> Result<Option<RawMetadata>, CmdError> {
-    let first = api.read_disk(disk, offset, 512)?;
+    let first = api.read_disk(disk, offset, paguro_core::disk::SECTOR as usize)?;
     let hdr = match bde::parse_volume_header(&first) {
         Ok(h) => h,
         Err(bde::BdeError::NotBitLocker) => return Ok(None),
         Err(e) => return Err(bde_err(e)),
     };
     let region = bde::REGION_SIZE as usize;
-    let mut copies: [Vec<u8>; 3] = Default::default();
+    let mut copies: [Vec<u8>; METADATA_COPIES] = Default::default();
     for (c, o) in copies.iter_mut().zip(hdr.metadata_offsets) {
         let at = offset
             .checked_add(o)

@@ -33,6 +33,20 @@ pub const MAX_CERT: usize = 16 * 1024;
 /// (firmware consoles differ): no a/q/w/z/y/m, and nothing ambiguous.
 const ALPHABET: &[u8] = b"bcdefghjknprstuvx";
 pub const PASSWORD_LEN: usize = 10;
+/// MokManager's password length range, in UTF-16 units (shim `MokAuth`).
+const MOK_PASSWORD_UNITS: core::ops::RangeInclusive<usize> = 1..=256;
+/// Most bytes read for `--password-stdin`.
+const MAX_PASSWORD_STDIN: usize = 1024;
+/// Values of one random byte (rejection sampling range).
+const BYTE_VALUES: usize = 256;
+
+// DER (X.690 §8.1.2–8.1.3): the SEQUENCE tag, and the length octet's
+// long-form flag with its count of length bytes in the low bits.
+const DER_SEQUENCE: u8 = 0x30;
+const DER_LEN_LONG: u8 = 0x80;
+const DER_LEN_COUNT_MASK: u8 = 0x7f;
+/// Most length bytes accepted (certificates are far below 16 MiB).
+const DER_MAX_LEN_BYTES: usize = 3;
 
 /// `MokAuth` in its SHA-256 form.
 pub fn mok_auth(mok_new: &[u8], password: &str) -> [u8; 32] {
@@ -53,14 +67,14 @@ pub fn check_der(der: &[u8]) -> Result<(), CmdError> {
     };
     let (&tag, rest) = der.split_first().ok_or_else(bad)?;
     let (&l0, rest) = rest.split_first().ok_or_else(bad)?;
-    if tag != 0x30 {
+    if tag != DER_SEQUENCE {
         return Err(bad());
     }
-    let (len, body) = if l0 < 0x80 {
+    let (len, body) = if l0 < DER_LEN_LONG {
         (usize::from(l0), rest)
     } else {
-        let n = usize::from(l0 & 0x7f);
-        if n == 0 || n > 3 {
+        let n = usize::from(l0 & DER_LEN_COUNT_MASK);
+        if n == 0 || n > DER_MAX_LEN_BYTES {
             return Err(bad());
         }
         let (lb, body) = rest.split_at_checked(n).ok_or_else(bad)?;
@@ -81,7 +95,7 @@ pub fn generate_password(api: &dyn WinApi) -> Result<Zeroizing<String>, CmdError
     while s.len() < PASSWORD_LEN {
         api.random(&mut b)?;
         // Rejection sampling keeps every letter equally likely.
-        let lim = 256 - 256 % ALPHABET.len();
+        let lim = BYTE_VALUES - BYTE_VALUES % ALPHABET.len();
         if usize::from(b[0]) < lim {
             if let Some(&c) = ALPHABET.get(usize::from(b[0]) % ALPHABET.len()) {
                 s.push(char::from(c));
@@ -177,7 +191,7 @@ pub fn enroll(ctx: &Ctx<'_>, cert: &str, password_stdin: bool) -> CmdResult {
         );
     }
     let (password, generated) = if password_stdin {
-        let raw = ctx.api.read_stdin(1024)?;
+        let raw = ctx.api.read_stdin(MAX_PASSWORD_STDIN)?;
         let s = std::str::from_utf8(&raw)
             .map_err(|_| CmdError::refused("the password is not UTF-8"))?;
         (
@@ -188,7 +202,7 @@ pub fn enroll(ctx: &Ctx<'_>, cert: &str, password_stdin: bool) -> CmdResult {
         (generate_password(ctx.api)?, true)
     };
     let units = password.encode_utf16().count();
-    if !(1..=256).contains(&units) {
+    if !MOK_PASSWORD_UNITS.contains(&units) {
         return Err(CmdError::refused("MokManager accepts 1 to 256 characters"));
     }
     let mut data = json!({

@@ -26,6 +26,10 @@ use crate::out::{CmdError, Exit, guid_text, to_hex};
 
 /// Largest ESP file the tool reads (shim and the loader are a few MiB).
 pub const MAX_ESP_FILE: usize = 64 << 20;
+/// Largest `manifest.json` read.
+const MAX_MANIFEST: usize = 1 << 20;
+/// The DOS header's `e_magic` a PE image starts with (PE/COFF spec §3).
+const PE_DOS_MAGIC: &[u8] = b"MZ";
 pub const DIR: &str = "EFI\\paguro";
 pub const INI: &str = "paguro.ini";
 pub const LOADER: &str = "paguro.efi";
@@ -134,7 +138,7 @@ pub fn store_dir(api: &dyn WinApi) -> String {
 
 pub fn read_manifest(api: &dyn WinApi) -> Result<Option<Manifest>, CmdError> {
     let p = join(&store_dir(api), "manifest.json");
-    let Some(b) = api.read_file(&p, 1 << 20)? else {
+    let Some(b) = api.read_file(&p, MAX_MANIFEST)? else {
         return Ok(None);
     };
     let m: Manifest = serde_json::from_slice(&b)
@@ -156,7 +160,7 @@ pub struct Inputs {
 }
 
 fn looks_like_pe(b: &[u8]) -> bool {
-    b.get(..2) == Some(b"MZ")
+    b.get(..PE_DOS_MAGIC.len()) == Some(PE_DOS_MAGIC)
 }
 
 /// Install or refresh the ESP files and the saved copies.

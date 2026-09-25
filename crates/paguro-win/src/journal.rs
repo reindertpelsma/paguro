@@ -21,6 +21,8 @@ use crate::esp::write_atomic;
 use crate::out::CmdError;
 
 pub const VERSION: u32 = 1;
+/// Largest journal file read.
+const MAX_JOURNAL: usize = 1 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,7 +87,7 @@ impl Journal {
     /// The saved journal, or `None` when this operation has not started.
     pub fn load(api: &dyn WinApi, operation: &str, key: &str) -> Result<Option<Self>, CmdError> {
         let p = path(api, operation, key);
-        let Some(b) = api.read_file(&p, 1 << 20)? else {
+        let Some(b) = api.read_file(&p, MAX_JOURNAL)? else {
             return Ok(None);
         };
         let j: Journal =

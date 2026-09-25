@@ -17,6 +17,27 @@ use crate::out::CmdError;
 
 pub const VERSION: u32 = 1;
 
+/// CPUID leaves read: 0 (vendor string, highest leaf), 1 (family/model/stepping).
+const CPUID_VENDOR: u32 = 0;
+const CPUID_SIGNATURE: u32 = 1;
+
+// CPUID leaf 1 EAX fields (Intel SDM Vol. 2A, CPUID, Figure 3-6).
+const EAX_STEPPING_SHIFT: u32 = 0;
+const EAX_MODEL_SHIFT: u32 = 4;
+const EAX_FAMILY_SHIFT: u32 = 8;
+const EAX_EXT_MODEL_SHIFT: u32 = 16;
+const EAX_EXT_FAMILY_SHIFT: u32 = 20;
+const EAX_NIBBLE: u32 = 0xf;
+const EAX_EXT_FAMILY_MASK: u32 = 0xff;
+/// Family 0xF adds the extended family.
+const FAMILY_USES_EXT: u32 = 0xf;
+/// Family 6 and up add the extended model (Linux `x86_model`).
+const FAMILY_EXT_MODEL_MIN: u32 = 6;
+/// The vendor string: EBX, EDX, ECX of leaf 0, 12 ASCII bytes.
+const VENDOR_LEN: usize = 12;
+/// Longest modalias built (hwid's hardware-ID length cap).
+const MODALIAS_BUF: usize = paguro_core::hwid::MAX_ID;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cpu {
     pub vendor: String,
@@ -81,8 +102,8 @@ pub struct Collected {
 
 pub fn collect(api: &dyn WinApi) -> Result<Collected, CmdError> {
     Ok(Collected {
-        cpuid0: api.cpuid(0, 0),
-        cpuid1: api.cpuid(1, 0),
+        cpuid0: api.cpuid(CPUID_VENDOR, 0),
+        cpuid1: api.cpuid(CPUID_SIGNATURE, 0),
         // A machine without SMBIOS still exports its devices.
         smbios: api.smbios().ok(),
         devices: api.pnp_devices()?,
@@ -93,20 +114,20 @@ pub fn collect(api: &dyn WinApi) -> Result<Collected, CmdError> {
 /// CPUID leaf 1 EAX → (family, model, stepping) as Linux reports them in
 /// `/proc/cpuinfo` (`x86_family`, `x86_model` in arch/x86/lib/cpu.c).
 pub fn fms(eax: u32) -> (u32, u32, u32) {
-    let mut family = (eax >> 8) & 0xf;
-    if family == 0xf {
-        family += (eax >> 20) & 0xff;
+    let mut family = (eax >> EAX_FAMILY_SHIFT) & EAX_NIBBLE;
+    if family == FAMILY_USES_EXT {
+        family += (eax >> EAX_EXT_FAMILY_SHIFT) & EAX_EXT_FAMILY_MASK;
     }
-    let mut model = (eax >> 4) & 0xf;
-    if family >= 6 {
-        model += ((eax >> 16) & 0xf) << 4;
+    let mut model = (eax >> EAX_MODEL_SHIFT) & EAX_NIBBLE;
+    if family >= FAMILY_EXT_MODEL_MIN {
+        model += ((eax >> EAX_EXT_MODEL_SHIFT) & EAX_NIBBLE) << EAX_MODEL_SHIFT;
     }
-    (family, model, eax & 0xf)
+    (family, model, (eax >> EAX_STEPPING_SHIFT) & EAX_NIBBLE)
 }
 
 fn vendor_string(leaf0: [u32; 4]) -> String {
     let [_, b, c, d] = leaf0;
-    let mut v = Vec::with_capacity(12);
+    let mut v = Vec::with_capacity(VENDOR_LEN);
     for r in [b, d, c] {
         v.extend_from_slice(&r.to_le_bytes());
     }
@@ -212,7 +233,7 @@ fn h16(s: &str) -> u16 {
 /// export carries only vendor, product and class.
 pub fn modaliases(h: &HostHardware) -> Vec<String> {
     let mut out = Vec::new();
-    let mut buf = [0u8; 256];
+    let mut buf = [0u8; MODALIAS_BUF];
     let mut push = |r: Result<usize, paguro_core::bytes::Full>, buf: &[u8]| {
         if let Ok(n) = r {
             out.push(String::from_utf8_lossy(buf.get(..n).unwrap_or(&[])).into_owned());

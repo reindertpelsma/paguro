@@ -34,7 +34,9 @@ pub fn validate(ctx: &Ctx<'_>) -> CmdResult {
         None => {
             problems.push("PaguroConfigHash is absent (NVRAM cleared, or never written)".into())
         }
-        Some(v) if v.len() != 32 => problems.push("PaguroConfigHash has the wrong size".into()),
+        Some(v) if v.len() != crate::cmd::efi::DIGEST_LEN => {
+            problems.push("PaguroConfigHash has the wrong size".into())
+        }
         Some(_) if !f.hash_matches() => {
             problems.push("PaguroConfigHash does not match the file".into())
         }

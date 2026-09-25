@@ -6,6 +6,9 @@ use crate::ctx::Ctx;
 use crate::hw::{self, HostHardware};
 use crate::out::{CmdError, CmdResult, Report};
 
+/// Largest hardware export read.
+const MAX_EXPORT: usize = 16 << 20;
+
 pub fn export(ctx: &Ctx<'_>, output: Option<&str>) -> CmdResult {
     let c = hw::collect(ctx.api)?;
     let h = hw::convert(&c);
@@ -40,7 +43,7 @@ pub fn export(ctx: &Ctx<'_>, output: Option<&str>) -> CmdResult {
 pub fn modalias(ctx: &Ctx<'_>, input: &str) -> CmdResult {
     let b = ctx
         .api
-        .read_file(input, 16 << 20)?
+        .read_file(input, MAX_EXPORT)?
         .ok_or_else(|| CmdError::not_found(format!("{input}: no such file")))?;
     let h: HostHardware =
         serde_json::from_slice(&b).map_err(|e| CmdError::refused(format!("{input}: {e}")))?;

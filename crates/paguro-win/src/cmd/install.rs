@@ -104,7 +104,7 @@ pub fn write_bootstrap(
         return Ok(plan);
     }
     let pass = ctx.passphrase("Choose the Linux passphrase")?;
-    let mut salt = [0u8; 16];
+    let mut salt = [0u8; paguro_core::seal::SALT_LEN];
     ctx.api.random(&mut salt)?;
     let ph = keys::pass_hash(&pass, &salt);
     let wrapped = keys::wrap_bootstrap(&keys.vmk, &salt, &ph);

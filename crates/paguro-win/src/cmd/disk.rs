@@ -16,6 +16,19 @@ use crate::out::{At, CmdError, CmdResult, Exit, Report};
 
 pub const MIN_SIZE: u64 = 64 << 20;
 pub const ALIGN: u64 = 1 << 20;
+/// Free space `disk create` leaves on the host volume beyond the image.
+pub const HEADROOM: u64 = 1 << 30;
+/// Binary size-unit multipliers `parse_size` accepts.
+const KIB: u64 = 1 << 10;
+const MIB: u64 = 1 << 20;
+const GIB: u64 = 1 << 30;
+const TIB: u64 = 1 << 40;
+/// The VHD footer, as `vhd`/`disk::detect` take it.
+const FOOTER: usize = vhd::FOOTER_LEN as usize;
+/// NTFS FILE_ID_128: the MFT record number in bytes 0..6, its sequence
+/// number in 6..8, the rest zero.
+const FILE_ID_RECORD: core::ops::Range<usize> = 0..6;
+const FILE_ID_SEQUENCE: usize = 6;
 
 /// `20G`, `20GiB`, `512M`, `1T`, or bytes. Binary units.
 pub fn parse_size(s: &str) -> Result<u64, CmdError> {
@@ -27,10 +40,10 @@ pub fn parse_size(s: &str) -> Result<u64, CmdError> {
         .map_err(|_| CmdError::new(Exit::Usage, format!("not a size: {s:?}")))?;
     let mul: u64 = match unit.trim().to_ascii_uppercase().as_str() {
         "" | "B" => 1,
-        "K" | "KB" | "KIB" => 1 << 10,
-        "M" | "MB" | "MIB" => 1 << 20,
-        "G" | "GB" | "GIB" => 1 << 30,
-        "T" | "TB" | "TIB" => 1 << 40,
+        "K" | "KB" | "KIB" => KIB,
+        "M" | "MB" | "MIB" => MIB,
+        "G" | "GB" | "GIB" => GIB,
+        "T" | "TB" | "TIB" => TIB,
         _ => {
             return Err(CmdError::new(
                 Exit::Usage,
@@ -68,8 +81,11 @@ pub fn extent_summary(e: &Extents) -> (usize, usize, u64) {
 /// in the handoff's `IMAGE` record (INTERFACES.md §8).
 pub fn mft_identity(id: &[u8; 16]) -> (u64, u16) {
     let mut rec = [0u8; 8];
-    rec[..6].copy_from_slice(&id[..6]);
-    (u64::from_le_bytes(rec), u16::from_le_bytes([id[6], id[7]]))
+    rec[FILE_ID_RECORD].copy_from_slice(&id[FILE_ID_RECORD]);
+    (
+        u64::from_le_bytes(rec),
+        u16::from_le_bytes([id[FILE_ID_SEQUENCE], id[FILE_ID_SEQUENCE + 1]]),
+    )
 }
 
 pub struct Inspection {
@@ -95,9 +111,9 @@ pub fn inspect_path(api: &dyn WinApi, path: &str) -> Result<Inspection, CmdError
         problems.push("fewer clusters than the file's length".into());
     }
     let (format, payload, footer_error) = if facts.len >= vhd::FOOTER_LEN {
-        let tail = api.read_file_at(path, facts.len - vhd::FOOTER_LEN, 512)?;
-        let mut t = [0u8; 512];
-        t.copy_from_slice(tail.get(..512).unwrap_or(&[0; 512]));
+        let tail = api.read_file_at(path, facts.len - vhd::FOOTER_LEN, FOOTER)?;
+        let mut t = [0u8; FOOTER];
+        t.copy_from_slice(tail.get(..FOOTER).unwrap_or(&[0; FOOTER]));
         let p = disk::detect(facts.len, &t);
         let err = match vhd::fixed_payload_len(&t, facts.len) {
             Ok(_) => None,
@@ -112,7 +128,7 @@ pub fn inspect_path(api: &dyn WinApi, path: &str) -> Result<Inspection, CmdError
         )
     };
     let head_len = usize::try_from(payload.min(disk::HEAD_LEN as u64)).unwrap_or(0);
-    let efi = if head_len >= 512 {
+    let efi = if head_len >= disk::SECTOR as usize {
         let head = api.read_file_at(path, 0, head_len)?;
         match disk::classify(payload, &head) {
             Ok(fs) => {
@@ -212,7 +228,7 @@ pub fn create(ctx: &Ctx<'_>, path: &str, size_arg: &str) -> CmdResult {
             vol.filesystem
         )));
     }
-    if vol.free < size + (1 << 30) {
+    if vol.free < size + HEADROOM {
         return Err(CmdError::refused(format!(
             "not enough free space on {} ({} bytes free, {} needed plus 1 GiB headroom)",
             vol.guid_path, vol.free, size

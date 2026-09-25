@@ -21,6 +21,8 @@ use crate::api::WinApi;
 /// How long a PIN-bypass seal stays usable: long enough for a slow firmware
 /// POST, short enough that a copy is inert soon after (DESIGN.md §6).
 pub const BYPASS_VALIDITY_MS: u64 = 10 * 60 * 1000;
+/// The bypass object's authValue: all zeros, i.e. empty (see its use).
+const EMPTY_AUTH: [u8; 32] = [0; 32];
 
 pub struct TbsPlatform<'a> {
     pub api: &'a dyn WinApi,
@@ -151,7 +153,7 @@ pub fn create_pin_bypass(
     let deadline = clock.clock.saturating_add(validity_ms);
     let pcrs = loader_pcrs(rec, ini);
     let policy = policy_digest(seal::PCR_MASK_V1, &pcrs, Some(deadline));
-    let mut d = Zeroizing::new([0u8; 32]);
+    let mut d = Zeroizing::new([0u8; seal::VMK_LEN]);
     api.random(&mut d[..])
         .map_err(|e| TpmError::Tpm(e.to_string()))?;
     let mut created = Box::new(CreatedObject::new());
@@ -161,11 +163,11 @@ pub fn create_pin_bypass(
         // zeros wherever an authValue is used (Part 1 §19.6.4.3), and the
         // loader unseals the bypass with an empty authorisation.
         Tpm::new(&mut p)
-            .create_sealed(&[0; 32], &d, &policy, &mut created)
+            .create_sealed(&EMPTY_AUTH, &d, &policy, &mut created)
             .map_err(tpm_err)?;
     }
     let mut wrapped = paguro_crypto::xor32(vmk, &d);
-    let mut salt = [0u8; 16];
+    let mut salt = [0u8; seal::SALT_LEN];
     api.random(&mut salt)
         .map_err(|e| TpmError::Tpm(e.to_string()))?;
     let s = Seal {

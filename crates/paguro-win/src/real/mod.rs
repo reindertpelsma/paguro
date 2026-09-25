@@ -21,8 +21,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use paguro_core::guid::Guid;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ENVVAR_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA,
-    ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GetLastError, HANDLE, LUID, WIN32_ERROR,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_CALL_NOT_IMPLEMENTED, ERROR_ENVVAR_NOT_FOUND,
+    ERROR_FILE_NOT_FOUND, ERROR_HANDLE_EOF, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_FUNCTION,
+    ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND,
+    ERROR_PRIVILEGE_NOT_HELD, ERROR_SUCCESS, GetLastError, HANDLE, LUID, MAX_PATH, WIN32_ERROR,
 };
 use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
 use windows::Win32::Security::{
@@ -30,11 +32,14 @@ use windows::Win32::Security::{
     TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenElevation,
 };
 use windows::Win32::Storage::FileSystem::{
-    FILE_ID_INFO, FILE_STANDARD_INFO, FileIdInfo, FileStandardInfo, FindFirstVolumeW,
+    BusTypeAta, BusTypeFileBackedVirtual, BusTypeMmc, BusTypeNvme, BusTypeRAID, BusTypeSCM,
+    BusTypeSas, BusTypeSata, BusTypeScsi, BusTypeSd, BusTypeSpaces, BusTypeUfs, BusTypeUsb,
+    BusTypeVirtual, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileIdInfo, FileStandardInfo, FindFirstVolumeW,
     FindNextVolumeW, FindVolumeClose, GetDiskFreeSpaceExW, GetDiskFreeSpaceW,
     GetFileInformationByHandleEx, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
     GetVolumePathNameW, GetVolumePathNamesForVolumeNameW, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, STORAGE_BUS_TYPE,
 };
 use windows::Win32::Storage::Vhd::{
     ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER, ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME,
@@ -58,8 +63,7 @@ use windows::Win32::System::Shutdown::{
     InitiateSystemShutdownExW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER,
 };
 use windows::Win32::System::SystemInformation::{
-    FIRMWARE_TABLE_PROVIDER, FIRMWARE_TYPE, FirmwareTypeUefi, GetFirmwareType,
-    GetSystemFirmwareTable,
+    FIRMWARE_TYPE, FirmwareTypeUefi, GetFirmwareType, GetSystemFirmwareTable, RSMB,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::TpmBaseServices::{
@@ -78,6 +82,38 @@ use crate::api::*;
 
 /// Largest firmware variable read (a big `db` is tens of KiB).
 const MAX_VAR: usize = 1 << 20;
+/// First buffer tried for a firmware variable; grown ×`VAR_GROWTH` on
+/// ERROR_INSUFFICIENT_BUFFER up to `MAX_VAR`.
+const VAR_FIRST_BUF: usize = 4096;
+const VAR_GROWTH: usize = 4;
+
+/// A path buffer with room for MAX_PATH characters and the NUL.
+const PATH_BUF: usize = MAX_PATH as usize + 1;
+/// A long path buffer (volume roots, the mount-point multi-string).
+const LONG_PATH_BUF: usize = 1024;
+/// `\\?\Volume{GUID}\` is 49 characters; the buffer rounds up.
+const VOLUME_NAME_BUF: usize = 64;
+
+/// `\\.\PhysicalDriveN` numbers probed by `disks`.
+const MAX_PHYSICAL_DRIVES: u32 = 64;
+/// IOCTL_STORAGE_QUERY_PROPERTY output: the descriptor and its strings.
+const DEVICE_DESCRIPTOR_BUF: usize = 1024;
+/// Raw disk reads go through this alignment (covers 512e and 4Kn).
+const RAW_READ_ALIGN: u64 = 4096;
+/// Tbsip_Submit_Command response buffer (a TPM response fits in 4 KiB).
+const TPM_RESPONSE_BUF: usize = 4096;
+/// Sector size of a VHD `vhd_create_fixed` makes.
+const VHD_SECTOR: u32 = 512;
+
+/// FSCTL_GET_RETRIEVAL_POINTERS output as u64 words: ExtentCount (u32,
+/// padded) and StartingVcn, then { NextVcn, Lcn } per extent.
+const RP_HEADER_WORDS: usize = 2;
+const RP_WORDS_PER_EXTENT: usize = 2;
+/// Extents fetched per call.
+const RP_EXTENTS_PER_CALL: usize = 512;
+
+/// TBS_CONTEXT_PARAMS2 bitfield: bit 2 is `includeTpm20` (tbs.h).
+const TBS_INCLUDE_TPM20: u32 = 1 << 2;
 
 fn wide(s: &str) -> HSTRING {
     HSTRING::from(s)
@@ -93,12 +129,20 @@ fn last_error() -> WIN32_ERROR {
     unsafe { GetLastError() }
 }
 
+/// The Win32 error code in an HRESULT's low 16 bits (HRESULT_CODE).
+fn win32_code(e: &windows::core::Error) -> WIN32_ERROR {
+    const HRESULT_CODE_MASK: u32 = 0xffff;
+    WIN32_ERROR((e.code().0 as u32) & HRESULT_CODE_MASK)
+}
+
 fn win_err(op: &'static str, e: windows::core::Error) -> ApiError {
     let code = e.code().0 as i64;
-    let kind = match (e.code().0 as u32) & 0xffff {
-        2 | 3 | 203 => ErrorKind::NotFound,
-        5 | 1314 => ErrorKind::AccessDenied,
-        50 | 120 | 1 => ErrorKind::Unsupported,
+    let kind = match win32_code(&e) {
+        ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_ENVVAR_NOT_FOUND => ErrorKind::NotFound,
+        ERROR_ACCESS_DENIED | ERROR_PRIVILEGE_NOT_HELD => ErrorKind::AccessDenied,
+        ERROR_NOT_SUPPORTED | ERROR_CALL_NOT_IMPLEMENTED | ERROR_INVALID_FUNCTION => {
+            ErrorKind::Unsupported
+        }
         _ => ErrorKind::Other,
     };
     ApiError::new(kind, op, e.message()).with_code(code)
@@ -217,10 +261,13 @@ fn token_elevated() -> bool {
     r.is_ok() && e.TokenIsElevated != 0
 }
 
+/// FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE.
+const SHARE_ALL: u32 = FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0;
+
 fn open_device(path: &str) -> Result<fs::File, ApiError> {
     fs::OpenOptions::new()
         .read(true)
-        .share_mode(3) // FILE_SHARE_READ | FILE_SHARE_WRITE
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
         .open(path)
         .map_err(|e| io_err("CreateFileW", path, e))
 }
@@ -229,7 +276,7 @@ fn open_device(path: &str) -> Result<fs::File, ApiError> {
 fn open_query(path: &str) -> Result<fs::File, ApiError> {
     fs::OpenOptions::new()
         .access_mode(0)
-        .share_mode(7)
+        .share_mode(SHARE_ALL)
         .open(path)
         .map_err(|e| io_err("CreateFileW", path, e))
 }
@@ -257,28 +304,30 @@ fn ioctl<I, O: Default>(f: &fs::File, code: u32, input: Option<&I>) -> Result<O,
     }
 }
 
-fn bus_name(t: i32) -> &'static str {
+// The `windows` crate keeps the SDK's CamelCase enum-constant names.
+#[allow(non_upper_case_globals)]
+fn bus_name(t: STORAGE_BUS_TYPE) -> &'static str {
     match t {
-        1 => "scsi",
-        3 => "ata",
-        7 => "usb",
-        8 => "raid",
-        10 => "sas",
-        11 => "sata",
-        12 => "sd",
-        13 => "mmc",
-        14 | 15 => "virtual",
-        16 => "spaces",
-        17 => "nvme",
-        18 => "scm",
-        19 => "ufs",
+        BusTypeScsi => "scsi",
+        BusTypeAta => "ata",
+        BusTypeUsb => "usb",
+        BusTypeRAID => "raid",
+        BusTypeSas => "sas",
+        BusTypeSata => "sata",
+        BusTypeSd => "sd",
+        BusTypeMmc => "mmc",
+        BusTypeVirtual | BusTypeFileBackedVirtual => "virtual",
+        BusTypeSpaces => "spaces",
+        BusTypeNvme => "nvme",
+        BusTypeSCM => "scm",
+        BusTypeUfs => "ufs",
         _ => "other",
     }
 }
 
 impl RealApi {
     fn volume(&self, guid_path: &str) -> Volume {
-        let mut names = vec![0u16; 1024];
+        let mut names = vec![0u16; LONG_PATH_BUF];
         let mut len = 0u32;
         // SAFETY: `names` is a writable buffer of the length passed.
         let mounts = match unsafe {
@@ -291,8 +340,8 @@ impl RealApi {
                 .collect(),
             Err(_) => Vec::new(),
         };
-        let mut label = [0u16; 261];
-        let mut fsname = [0u16; 261];
+        let mut label = [0u16; PATH_BUF];
+        let mut fsname = [0u16; PATH_BUF];
         // SAFETY: both buffers are writable and sized.
         let _ = unsafe {
             GetVolumeInformationW(
@@ -407,7 +456,7 @@ impl WinApi for RealApi {
     }
 
     fn fw_get(&self, name: &str, vendor: &Guid) -> ApiResult<Option<FwVar>> {
-        let mut buf = vec![0u8; 4096];
+        let mut buf = vec![0u8; VAR_FIRST_BUF];
         loop {
             let mut attrs = 0u32;
             // SAFETY: `buf` is writable for the length passed.
@@ -429,7 +478,9 @@ impl WinApi for RealApi {
             }
             match last_error() {
                 ERROR_ENVVAR_NOT_FOUND => return Ok(None),
-                ERROR_INSUFFICIENT_BUFFER if buf.len() < MAX_VAR => buf.resize(buf.len() * 4, 0),
+                ERROR_INSUFFICIENT_BUFFER if buf.len() < MAX_VAR => {
+                    buf.resize(buf.len() * VAR_GROWTH, 0)
+                }
                 e => return Err(w32("GetFirmwareEnvironmentVariableExW", e)),
             }
         }
@@ -462,7 +513,7 @@ impl WinApi for RealApi {
             SetFirmwareEnvironmentVariableExW(&wide(name), &guid_braced(vendor), None, 0, 0)
         } {
             Ok(()) => Ok(()),
-            Err(e) if (e.code().0 as u32) & 0xffff == 203 => Ok(()),
+            Err(e) if win32_code(&e) == ERROR_ENVVAR_NOT_FOUND => Ok(()),
             Err(e) => Err(win_err("SetFirmwareEnvironmentVariableExW", e)),
         }
     }
@@ -560,8 +611,8 @@ impl WinApi for RealApi {
 
     fn file_facts(&self, path: &str) -> ApiResult<Option<FileFacts>> {
         let f = match fs::OpenOptions::new()
-            .access_mode(0x80)
-            .share_mode(7)
+            .access_mode(FILE_READ_ATTRIBUTES.0)
+            .share_mode(SHARE_ALL)
             .open(path)
         {
             Ok(f) => f,
@@ -602,11 +653,11 @@ impl WinApi for RealApi {
 
     fn retrieval_pointers(&self, path: &str) -> ApiResult<Extents> {
         let f = fs::OpenOptions::new()
-            .access_mode(0x80) // FILE_READ_ATTRIBUTES
-            .share_mode(7)
+            .access_mode(FILE_READ_ATTRIBUTES.0)
+            .share_mode(SHARE_ALL)
             .open(path)
             .map_err(|e| io_err("CreateFileW", path, e))?;
-        let mut root = [0u16; 261];
+        let mut root = [0u16; PATH_BUF];
         // SAFETY: `root` is writable for its length.
         unsafe { GetVolumePathNameW(&wide(path), &mut root) }
             .map_err(|e| win_err("GetVolumePathNameW", e))?;
@@ -626,7 +677,7 @@ impl WinApi for RealApi {
         let mut next_vcn = 0i64;
         // RETRIEVAL_POINTERS_BUFFER: count u32, pad, StartingVcn i64, then
         // { NextVcn i64, Lcn i64 } × count. Read into a u64-aligned buffer.
-        let mut buf = vec![0u64; 2 + 2 * 512];
+        let mut buf = vec![0u64; RP_HEADER_WORDS + RP_WORDS_PER_EXTENT * RP_EXTENTS_PER_CALL];
         loop {
             let input = STARTING_VCN_INPUT_BUFFER {
                 StartingVcn: next_vcn,
@@ -640,7 +691,7 @@ impl WinApi for RealApi {
                     Some(&input as *const _ as *const c_void),
                     std::mem::size_of::<STARTING_VCN_INPUT_BUFFER>() as u32,
                     Some(buf.as_mut_ptr() as *mut c_void),
-                    (buf.len() * 8) as u32,
+                    (buf.len() * size_of::<u64>()) as u32,
                     Some(&mut ret),
                     None,
                 )
@@ -650,16 +701,17 @@ impl WinApi for RealApi {
                 Err(_) => match last_error() {
                     ERROR_MORE_DATA => true,
                     // An empty (resident or zero-length) file has no extents.
-                    e if e.0 == 38 => break, // ERROR_HANDLE_EOF
+                    ERROR_HANDLE_EOF => break,
                     e => return Err(w32("FSCTL_GET_RETRIEVAL_POINTERS", e)),
                 },
             };
             let at = |i: usize| buf.get(i).copied().unwrap_or(0);
-            let count = (at(0) & 0xffff_ffff) as usize;
+            // Word 0: ExtentCount in its low 32 bits; word 1: StartingVcn.
+            let count = (at(0) & u64::from(u32::MAX)) as usize;
             let mut vcn = at(1) as i64;
-            for i in 0..count.min(512) {
-                let nv = at(2 + 2 * i) as i64;
-                let lcn = at(3 + 2 * i) as i64;
+            for i in 0..count.min(RP_EXTENTS_PER_CALL) {
+                let nv = at(RP_HEADER_WORDS + RP_WORDS_PER_EXTENT * i) as i64;
+                let lcn = at(RP_HEADER_WORDS + RP_WORDS_PER_EXTENT * i + 1) as i64;
                 extents.push(Extent {
                     vcn: vcn as u64,
                     lcn: (lcn >= 0).then_some(lcn as u64),
@@ -686,7 +738,7 @@ impl WinApi for RealApi {
         };
         p.Anonymous.Version1.MaximumSize = size;
         p.Anonymous.Version1.BlockSizeInBytes = 0;
-        p.Anonymous.Version1.SectorSizeInBytes = 512;
+        p.Anonymous.Version1.SectorSizeInBytes = VHD_SECTOR;
         let mut h = HANDLE::default();
         // SAFETY: all pointers are to live locals; synchronous (no OVERLAPPED).
         let r = unsafe {
@@ -725,8 +777,8 @@ impl WinApi for RealApi {
         if r != ERROR_SUCCESS {
             return Err(w32("AttachVirtualDisk", r));
         }
-        let mut buf = [0u16; 260];
-        let mut len = (buf.len() * 2) as u32;
+        let mut buf = [0u16; MAX_PATH as usize];
+        let mut len = (buf.len() * size_of::<u16>()) as u32;
         // SAFETY: `buf` is writable for `len` bytes.
         let r = unsafe { GetVirtualDiskPhysicalPath(h.0, &mut len, PWSTR(buf.as_mut_ptr())) };
         if r != ERROR_SUCCESS {
@@ -746,7 +798,7 @@ impl WinApi for RealApi {
     }
 
     fn volumes(&self) -> ApiResult<Vec<Volume>> {
-        let mut name = [0u16; 64];
+        let mut name = [0u16; VOLUME_NAME_BUF];
         // SAFETY: `name` is writable for its length.
         let find =
             unsafe { FindFirstVolumeW(&mut name) }.map_err(|e| win_err("FindFirstVolumeW", e))?;
@@ -765,11 +817,11 @@ impl WinApi for RealApi {
     }
 
     fn volume_for_path(&self, path: &str) -> ApiResult<Volume> {
-        let mut root = [0u16; 1024];
+        let mut root = [0u16; LONG_PATH_BUF];
         // SAFETY: `root` is writable for its length.
         unsafe { GetVolumePathNameW(&wide(path), &mut root) }
             .map_err(|e| win_err("GetVolumePathNameW", e))?;
-        let mut name = [0u16; 64];
+        let mut name = [0u16; VOLUME_NAME_BUF];
         // SAFETY: `name` is writable for its length.
         unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(root.as_ptr()), &mut name) }
             .map_err(|e| win_err("GetVolumeNameForVolumeMountPointW", e))?;
@@ -780,7 +832,7 @@ impl WinApi for RealApi {
         let path = format!("\\\\.\\PhysicalDrive{disk_number}");
         let f = open_device(&path)?;
         // Raw disk reads must be sector-aligned: read the covering span.
-        const S: u64 = 4096;
+        const S: u64 = RAW_READ_ALIGN;
         let start = offset / S * S;
         let end = (offset + len as u64).div_ceil(S) * S;
         let mut v = vec![0u8; (end - start) as usize];
@@ -811,15 +863,16 @@ impl WinApi for RealApi {
     }
 
     fn smbios(&self) -> ApiResult<Vec<u8>> {
-        let rsmb = FIRMWARE_TABLE_PROVIDER(u32::from_be_bytes(*b"RSMB"));
+        // The raw SMBIOS provider has one table, ID 0.
+        const RSMB_TABLE_ID: u32 = 0;
         // SAFETY: a size query with no buffer.
-        let n = unsafe { GetSystemFirmwareTable(rsmb, 0, None) };
+        let n = unsafe { GetSystemFirmwareTable(RSMB, RSMB_TABLE_ID, None) };
         if n == 0 {
             return Err(w32("GetSystemFirmwareTable", last_error()));
         }
         let mut b = vec![0u8; n as usize];
         // SAFETY: `b` is writable for its length.
-        let m = unsafe { GetSystemFirmwareTable(rsmb, 0, Some(&mut b)) };
+        let m = unsafe { GetSystemFirmwareTable(RSMB, RSMB_TABLE_ID, Some(&mut b)) };
         if m == 0 || m > n {
             return Err(w32("GetSystemFirmwareTable", last_error()));
         }
@@ -849,7 +902,7 @@ impl WinApi for RealApi {
 
     fn disks(&self) -> ApiResult<Vec<DiskDevice>> {
         let mut out = Vec::new();
-        for n in 0..64u32 {
+        for n in 0..MAX_PHYSICAL_DRIVES {
             let Ok(f) = open_query(&format!("\\\\.\\PhysicalDrive{n}")) else {
                 continue;
             };
@@ -858,7 +911,7 @@ impl WinApi for RealApi {
                 QueryType: PropertyStandardQuery,
                 ..Default::default()
             };
-            let mut buf = vec![0u8; 1024];
+            let mut buf = vec![0u8; DEVICE_DESCRIPTOR_BUF];
             let mut ret = 0u32;
             // SAFETY: `q` and `buf` are live and sized as passed.
             let ok = unsafe {
@@ -902,7 +955,7 @@ impl WinApi for RealApi {
                 .unwrap_or(0);
             out.push(DiskDevice {
                 number: n,
-                bus: bus_name(d.BusType.0).into(),
+                bus: bus_name(d.BusType).into(),
                 model,
                 size,
             });
@@ -924,7 +977,7 @@ impl WinApi for RealApi {
 
     fn tpm_submit(&self, cmd: &[u8]) -> ApiResult<Vec<u8>> {
         let ctx = Tbs::open()?;
-        let mut out = vec![0u8; 4096];
+        let mut out = vec![0u8; TPM_RESPONSE_BUF];
         let mut len = out.len() as u32;
         // SAFETY: `out` is writable for `len` bytes.
         let r = unsafe {
@@ -1070,7 +1123,7 @@ impl Tbs {
             version: TBS_CONTEXT_VERSION_TWO,
             ..Default::default()
         };
-        p.Anonymous.asUINT32 = 1 << 2; // includeTpm20
+        p.Anonymous.asUINT32 = TBS_INCLUDE_TPM20;
         let mut h: *mut c_void = std::ptr::null_mut();
         // SAFETY: `p` is a TBS_CONTEXT_PARAMS2, which TBS accepts through
         // the version-one pointer type; `h` receives the context.

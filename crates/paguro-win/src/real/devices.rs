@@ -13,6 +13,10 @@ use crate::api::{ApiResult, PnpDevice};
 
 /// Most devices enumerated (a desktop has a few hundred).
 const MAX_DEVICES: u32 = 8192;
+/// A REG_MULTI_SZ property buffer (hardware / compatible ID lists).
+const MULTI_SZ_BUF: usize = 4096;
+/// Device instance ID buffer (MAX_DEVICE_ID_LEN is 200; room to spare).
+const INSTANCE_ID_BUF: usize = 512;
 
 struct DevInfo(HDEVINFO);
 
@@ -25,7 +29,7 @@ impl Drop for DevInfo {
 
 /// A REG_MULTI_SZ property as strings; empty when absent.
 fn multi_sz(set: &DevInfo, d: &SP_DEVINFO_DATA, prop: SETUP_DI_REGISTRY_PROPERTY) -> Vec<String> {
-    let mut buf = vec![0u8; 4096];
+    let mut buf = vec![0u8; MULTI_SZ_BUF];
     let mut need = 0u32;
     // SAFETY: `buf` is writable for its length; `d` came from this set.
     if unsafe {
@@ -70,7 +74,7 @@ pub fn pnp_devices() -> ApiResult<Vec<PnpDevice>> {
         if unsafe { SetupDiEnumDeviceInfo(set.0, i, &mut d) }.is_err() {
             break;
         }
-        let mut id = [0u16; 512];
+        let mut id = [0u16; INSTANCE_ID_BUF];
         // SAFETY: `id` is writable for its length.
         let instance = match unsafe { SetupDiGetDeviceInstanceIdW(set.0, &d, Some(&mut id), None) }
         {
