@@ -104,7 +104,7 @@ addition to its own vendor key, **anything signed by a key in `MokList`**. So:
   reboot** (`manage-bde -protectors -disable C: -RebootCount 1`), so the next
   Windows boot does not ask for the recovery key and re-seals to the new
   PCR 7 by itself. Then it guides the firmware step.
- if that distribution's shim is
+- **What a shim revocation means for us:** if that distribution's shim is
   revoked by SBAT or `dbx`, paguro follows the distribution's replacement; the
   repair hook installs it. Nothing else changes, because our trust is the MOK
   key, not the shim vendor's.
@@ -337,8 +337,14 @@ Vendor GUID from §1.
 | `PaguroConfigHash` | 32 | NV \| BS \| RT | initrd, Windows tool | loader (Secure Boot only) |
 | `PaguroSetup` (`S`) | 32 | NV \| BS \| RT | Windows tool | loader, which deletes it before handoff |
 | `PaguroTpmBroken` | 1 | NV \| BS \| RT | loader | Windows tool |
+| `PaguroUninstall` | 1 | NV \| BS \| RT | Windows tool | loader, which deletes it |
 
 Plus the standard `BootNext` / `Boot####` (the bootstrap entry, §9).
+
+**Uninstall request.** `B` is boot-services-only, so no OS can delete it. The
+Windows tool sets `PaguroUninstall` (1 byte, NV | BS | RT); on the next boot the
+loader deletes `PaguroB`, its own variables and the request, then resets into
+Windows without unlocking anything (DESIGN §6b).
 
 **`PaguroTpmBroken` lifecycle.** It means "the standing TPM seal does not match
 this machine any more", and whoever makes it match again clears it:
@@ -409,7 +415,7 @@ record   type u16 | len u32 | value[len]        (no padding)
 | 7 | `CONFIG` | the verified `paguro.ini` bytes | 0–1 |
 | 8 | `IMAGE` | role u8 (1 = root, 2 = efi disk, 3 = efi file) \| name len u8 \| name \| mft_record u64 \| mft_seq u16 | 0–2: the chosen entry's `root`, and its `efi_disk` or `efi_file` when different from `root` |
 | 9 | `STATE` | flags u32: 1 = hibernation image, 2 = dirty bit, 4 = config unverified (also: Secure Boot off, first boot), 8 = recovery path | 1 |
-| 10 | `RUNG` | u8: 1 tpm, 2 setuptpm, 3 passphrase, 4 recovery, 5 pin bypass, 6 bootstrap, 7 clear key (BitLocker suspended), 8 unencrypted volume | 1 |
+| 10 | `RUNG` | u8: 1 tpm, 2 setuptpm, 3 passphrase, 4 recovery, 5 pin bypass, 6 bootstrap, 7 clear key (BitLocker suspended), 8 unencrypted volume, 9 BitLocker password protector | 1 |
 | 11 | `PROVISION` | sealed object, wrapped VMK, salt (as the tpm seal body), sealed against the load taint of the `CONFIG` the loader authored on this boot | 0–1 |
 
 Unknown type → refuse. Duplicate of a type that occurs at most once → refuse.
@@ -532,8 +538,9 @@ views B/C 0 <len> paguro-volume <volume_id> <b|c>
 ```
 
 - `paguro-image` maps the claim's gathered extents; length = VHD payload for
-  `format=vhd`. Before first use it asserts the payload's structure (GPT with a
-  FAT ESP, DESIGN §4.3).
+  `format=vhd`. Before first use it asserts the payload's structure by content
+  (GPT, bare ext4 or ISO 9660; anything else refused — §3.2), reading past the
+  first extent.
 - `paguro-volume` passes I/O through to the raw (B) or plaintext (C) device and
   returns `EIO` for any request intersecting any claim on that volume.
 - **B and C on one volume are mutually exclusive**; the module refuses the
@@ -589,12 +596,18 @@ component (DESIGN §4.4).
 
 | Command | Effect |
 |---|---|
-| `paguro install <distro>` | build the image through WSL2 (§11.4), write `.ini`, set `PaguroConfigHash`, create the bootstrap entry |
+| `paguro install <distro>` | build the image through WSL2 (§11.4), install the ESP files, queue the MOK, create the bootstrap entry; the loader writes the first `paguro.ini` on its first boot and the initrd stores it with its hash (§8.1) |
 | `paguro restart-linux` | pre-flight, write the PIN-bypass seal, `BootNext`, restart |
 | `paguro stage-setup` | stage `setupTPM` (`S` + `setuptpm_seal.bin`) |
 | `paguro repair` | re-install ESP files, re-stage if needed (DESIGN §7) |
 | `paguro uninstall` | DESIGN §6b |
 | `paguro config ...` | the only editor of `paguro.ini` |
+
+### 11.3 Guest agent (VM mode growth) — OPEN
+
+virtio-serial channel `org.paguro.agent.0`; length-prefixed messages; the host
+never trusts a reported extent without claiming it first and verifying it
+against the on-disk MFT after a guest volume flush.
 
 ### 11.4 Installing a distribution: the distribution's ISO, in a WSL2 container — DRAFT
 
@@ -623,14 +636,13 @@ paguro install <distro>              (Windows, admin)
        run the distribution's installer; the adapter makes it write a
          paguro-ready system itself (below), so there is no step after it
   5. wsl --unmount
-  6. write paguro.ini, PaguroConfigHash, the bootstrap Boot#### entry
+  6. install the ESP files, queue the MOK (§11.6), create the bootstrap
+     Boot#### entry; the first boot writes paguro.ini (§8.1)
 ```
 
 - The `paguro` package reaches the target like any package the installer
   copies, so the driver is in the image from its first boot — no injection
   problem.
-- The same path makes an existing WSL distribution bootable: its rootfs is the
-  source in step 4.
 - **Why the ISO and not a bootstrap tool.** The install is the distribution's
   own: its installer, its package selection and defaults, the bits it ships,
   offline if the ISO is local. The live system already contains every tool the
@@ -666,8 +678,8 @@ paguro install <distro>              (Windows, admin)
   (fallback: `squashfuse`, `bsdtar`), that partition nodes created by the
   installer appear inside the container, and that the GUI works over WSLg.
 - **The scripted path stays** as the fallback for distributions without an
-  adapter: debootstrap / `dnf --installroot` / pacstrap into the VHD, then the
-  same chroot step.
+  adapter: debootstrap / `dnf --installroot` / pacstrap into the VHD, with the
+  `paguro` package and the bootloader settings installed by the same tool.
 - The same flow makes an existing WSL distribution bootable: its rootfs is the
   source instead of an installer.
 
@@ -795,11 +807,85 @@ distribution's own shim (§3.2).
 - The repair hook (DESIGN §7) restores the **already signed** `paguro.efi`
   from a copy kept on the ESP; it needs no key.
 
-### 11.3 Guest agent (VM mode growth) — OPEN
+## 12. Testing contract
 
-virtio-serial channel `org.paguro.agent.0`; length-prefixed messages; the host
-never trusts a reported extent without claiming it first and verifying it
-against the on-disk MFT after a guest volume flush.
+Each interface ships with:
+
+| Level | What | Where | CI |
+|---|---|---|---|
+| unit | every error variant has a test | crate / C test | yes |
+| property | parse(serialize(x)) = x; model vs implementation | proptest, harness | yes |
+| fuzz | every parser of external data | `fuzz/` (cargo-fuzz, libFuzzer on the C core) | 60 s per target per push; longer nightly |
+| differential | C core vs Rust reference on the same inputs, incl. fuzz corpora | `paguro-harness` | yes |
+| mock boot | the loader's stage machine over an in-memory platform | `paguro-boot` tests | yes |
+| QEMU | loader under OVMF (+ Secure Boot vars) + swtpm, real NTFS images from `mkntfs` | `test/qemu/` | yes |
+| kernel VM | module in a throwaway VM, real I/O | `kernel/dm-paguro/test/` | yes |
+| Windows, hosted | minifilter build + static analysis, test-signed load with `fltmc` on hosted `windows-2022/2025` (runner images ship with `TESTSIGNING ON`) | `windows/` | yes |
+| Windows, WinPE VM | WinPE built with the ADK on a Windows runner, booted by QEMU/KVM on a Linux runner over the module's views: reboot, bugcheck and end-to-end (EIO + minifilter) tests | `test/winpe/` | yes (private artifacts only) |
+
+### 12.1 Power loss after every write — the release bar
+
+Every write sequence we can produce (ntfs3 growth, WinPE/Windows guest I/O
+through view B, the module's own table changes) is recorded with
+`dm-log-writes` under the volume, then replayed:
+
+| Replay | Models |
+|---|---|
+| every prefix, one write at a time | power cut after write *n* |
+| every flush/FUA point | power cut at a durability boundary |
+| random subsets of writes since the last flush | the drive cache reordering or dropping unflushed writes |
+| 4 KiB writes with only some 512-byte sectors landed (512e) | torn writes |
+
+After each replayed state, the loader's parser, the module's C core and the
+initrd path run against it. **Invariant: they return the image's correct extents
+— the pre- or post-operation map, bit-exact — or a typed refusal
+(dirty / hibernation / structural error). Never a different map.** Decrypting
+the image's flushed sectors must give the bytes that were written.
+
+### 12.2 Encryption conformance — Windows' sectors are the main risk
+
+The guest writes ciphertext through view B; Linux reads the same sectors as
+plaintext through dm-crypt. Any disagreement about data-unit size, tweak or
+region boundaries silently corrupts data, so these are tested per commit:
+
+- **Test vectors:** IEEE 1619 / NIST XTS-AES-128 and -256 vectors against the
+  loader's XTS and against dm-crypt.
+- **Three implementations agree:** the loader's decrypt, dm-crypt built from the
+  handoff `FVE_LAYOUT`, and an oracle (libbde/dislocker) on the same volume.
+- **Data unit and tweak:** 512-byte and 4 KiB (4Kn) volumes; tweak = data-unit
+  index from the volume start. Views report `logical_block_size` = the data unit,
+  and a misaligned direct I/O is refused (`EINVAL`), never a read-modify-write.
+- **Sector numbering is 1:1.** The plaintext view has the same size and LBAs
+  as the ciphertext; nothing is skipped. The non-data regions are *remapped*
+  (boot sector ← its relocated copy) or *hidden* (metadata regions, which NTFS
+  sees as allocated to hidden system files). A test on real fixtures asserts
+  this, and asserts what Windows returns for those regions, so our plaintext
+  view matches it byte for byte.
+- **A protected file over a non-data region is refused.** On a consistent
+  volume NTFS never gives those clusters to a user file. A crafted or corrupted
+  runlist can, and then the file's "data" there is not its data in either view.
+  Fixtures: a runlist extent overlapping each metadata region, the relocated
+  boot sector, and sectors `[0, reloc_len)`; the loader and the module must both
+  refuse, and neither view is created.
+- **A protected file straddling `encrypted_size`** on a partly encrypted volume
+  is legitimate (conversion in progress). Its bytes must read correctly through
+  view A, and view B/C must refuse its extents on both sides of the boundary.
+- **Boundaries:** writes that touch or straddle the relocated boot sector, each
+  FVE metadata region, and `encrypted_size` on a partly encrypted volume
+  (sectors past it are plaintext).
+- **Round trips both ways:** write through view C (ntfs3), read the raw
+  ciphertext, decrypt independently; write ciphertext as the guest would (our XTS
+  in userspace, and WinPE through view B), read through dm-crypt.
+- **Used-space-only encryption** (Windows' default for new volumes) is refused
+  until DESIGN §11 Q25 is answered: sectors never written since encryption hold
+  no ciphertext, so the plaintext view cannot tell them apart.
+- **Real BitLocker fixtures:** VHDs encrypted by Windows (hosted runner or
+  WinPE) with a known password and recovery key, XTS-128 and XTS-256, 512e and
+  4Kn. Unsupported ciphers (legacy AES-CBC, diffuser) are refused with a clear
+  error.
+
+Parsers of external data in scope: `ini`, `seal`, `fve`, `ntfs`, `gpt`, `fat`
+(when written), `vhd`, `handoff`, `bootstrap`, TPM response parsing.
 
 ## 13. Loader UI and theme — DRAFT
 
@@ -990,80 +1076,3 @@ the passphrase was set in Windows with the real layout, so unlocking fails.
   `\` or `/`; a leading drive letter (`C:`, `D:`) is ignored with a note, since
   the loader cannot know Windows' drive letters.
 - **Later, not now:** an on-screen keyboard for pointer and touch input.
-
-## 12. Testing contract
-
-Each interface ships with:
-
-| Level | What | Where | CI |
-|---|---|---|---|
-| unit | every error variant has a test | crate / C test | yes |
-| property | parse(serialize(x)) = x; model vs implementation | proptest, harness | yes |
-| fuzz | every parser of external data | `fuzz/` (cargo-fuzz, libFuzzer on the C core) | 60 s per target per push; longer nightly |
-| differential | C core vs Rust reference on the same inputs, incl. fuzz corpora | `paguro-harness` | yes |
-| mock boot | the loader's stage machine over an in-memory platform | `paguro-boot` tests | yes |
-| QEMU | loader under OVMF (+ Secure Boot vars) + swtpm, real NTFS images from `mkntfs` | `test/qemu/` | yes |
-| kernel VM | module in a throwaway VM, real I/O | `kernel/dm-paguro/test/` | yes |
-| Windows, hosted | minifilter build + static analysis, test-signed load with `fltmc` on hosted `windows-2022/2025` (runner images ship with `TESTSIGNING ON`) | `windows/` | yes |
-| Windows, WinPE VM | WinPE built with the ADK on a Windows runner, booted by QEMU/KVM on a Linux runner over the module's views: reboot, bugcheck and end-to-end (EIO + minifilter) tests | `test/winpe/` | yes (private artifacts only) |
-
-### 12.1 Power loss after every write — the release bar
-
-Every write sequence we can produce (ntfs3 growth, WinPE/Windows guest I/O
-through view B, the module's own table changes) is recorded with
-`dm-log-writes` under the volume, then replayed:
-
-| Replay | Models |
-|---|---|
-| every prefix, one write at a time | power cut after write *n* |
-| every flush/FUA point | power cut at a durability boundary |
-| random subsets of writes since the last flush | the drive cache reordering or dropping unflushed writes |
-| 4 KiB writes with only some 512-byte sectors landed (512e) | torn writes |
-
-After each replayed state, the loader's parser, the module's C core and the
-initrd path run against it. **Invariant: they return the image's correct extents
-— the pre- or post-operation map, bit-exact — or a typed refusal
-(dirty / hibernation / structural error). Never a different map.** Decrypting
-the image's flushed sectors must give the bytes that were written.
-
-### 12.2 Encryption conformance — Windows' sectors are the main risk
-
-The guest writes ciphertext through view B; Linux reads the same sectors as
-plaintext through dm-crypt. Any disagreement about data-unit size, tweak or
-region boundaries silently corrupts data, so these are tested per commit:
-
-- **Test vectors:** IEEE 1619 / NIST XTS-AES-128 and -256 vectors against the
-  loader's XTS and against dm-crypt.
-- **Three implementations agree:** the loader's decrypt, dm-crypt built from the
-  handoff `FVE_LAYOUT`, and an oracle (libbde/dislocker) on the same volume.
-- **Data unit and tweak:** 512-byte and 4 KiB (4Kn) volumes; tweak = data-unit
-  index from the volume start. Views report `logical_block_size` = the data unit,
-  and a misaligned direct I/O is refused (`EINVAL`), never a read-modify-write.
-- **Sector numbering is 1:1.** The plaintext view has the same size and LBAs
-  as the ciphertext; nothing is skipped. The non-data regions are *remapped*
-  (boot sector ← its relocated copy) or *hidden* (metadata regions, which NTFS
-  sees as allocated to hidden system files). A test on real fixtures asserts
-  this, and asserts what Windows returns for those regions, so our plaintext
-  view matches it byte for byte.
-- **A protected file over a non-data region is refused.** On a consistent
-  volume NTFS never gives those clusters to a user file. A crafted or corrupted
-  runlist can, and then the file's "data" there is not its data in either view.
-  Fixtures: a runlist extent overlapping each metadata region, the relocated
-  boot sector, and sectors `[0, reloc_len)`; the loader and the module must both
-  refuse, and neither view is created.
-- **A protected file straddling `encrypted_size`** on a partly encrypted volume
-  is legitimate (conversion in progress). Its bytes must read correctly through
-  view A, and view B/C must refuse its extents on both sides of the boundary.
-- **Boundaries:** writes that touch or straddle the relocated boot sector, each
-  FVE metadata region, and `encrypted_size` on a partly encrypted volume
-  (sectors past it are plaintext).
-- **Round trips both ways:** write through view C (ntfs3), read the raw
-  ciphertext, decrypt independently; write ciphertext as the guest would (our XTS
-  in userspace, and WinPE through view B), read through dm-crypt.
-- **Real BitLocker fixtures:** VHDs encrypted by Windows (hosted runner or
-  WinPE) with a known password and recovery key, XTS-128 and XTS-256, 512e and
-  4Kn. Unsupported ciphers (legacy AES-CBC, diffuser) are refused with a clear
-  error.
-
-Parsers of external data in scope: `ini`, `seal`, `fve`, `ntfs`, `gpt`, `fat`
-(when written), `vhd`, `handoff`, `bootstrap`, TPM response parsing.
