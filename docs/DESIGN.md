@@ -6,19 +6,41 @@ design's two hard invariants, and it names the failure mode being guarded
 against.*
 
 
-Design captured 2026-09-21, revised 2026-09-24. Status: **design only, nothing built** —
-*architecturally mature, experimentally unproven.* The next increase in confidence
-comes from trying hard to destroy a sacrificial NTFS volume and failing (§11).
+Design captured 2026-09-21, revised 2026-09-25. This document argues the design;
+[`INTERFACES.md`](INTERFACES.md) fixes the exact formats and contracts. Status:
+**being built against INTERFACES.md** — the loader runs all four stages, BitLocker
+included, under OVMF and AAVMF with a software TPM in CI, and the kernel module's
+core runs in a throwaway VM; none of it has yet met real firmware or a real
+Windows guest. *Architecturally mature, experimentally unproven.* The next
+increase in confidence comes from trying hard to destroy a sacrificial NTFS
+volume and failing (§11).
 
 > **Your existing Windows, both ways.** Install Linux like an application, use
 > the Windows you already have from inside it as a VM, and keep a completely
 > ordinary native Windows boot for whatever needs bare metal — with nothing
 > repartitioned and nothing reinstalled.
 
+What that gives, in the order it matters to people:
+
+- **Space shared with Windows, not carved from it.** Linux lives in image files
+  on the Windows volume and draws from the same free space: no partition sized up
+  front, no starving one side to feed the other, and an image grows when it needs
+  to (§2, §5.6).
+- **As many distributions as you like**, each a file: trying one is creating a
+  file, removing it is deleting one (§2).
+- **Your Windows, both ways** — the same installation boots natively and runs as
+  a VM on the Linux desktop (§1b, §5b).
+- **Windows can reach Linux, even on a single-disk laptop**: the image is a file
+  WSL2 mounts, which a Linux partition on the Windows disk never is (§1).
+- **Your WSL2 distributions on the metal**, as they are (§8b).
+- **BitLocker keeps working** without recovery-key prompts, because Windows' boot
+  path is never touched (§6).
+
 What install adds, all of it additive and all of it removed by a supported
-uninstall (§6b): files on the ESP, three firmware variables and a boot entry, the
-Linux image file(s) on C:, a Windows minifilter, and a transition app. The
-partition table and Windows' BitLocker configuration are never touched.
+uninstall (§6b): files in `\EFI\paguro\` on the ESP, paguro's firmware variables,
+a boot entry and one enrolled MOK certificate, the Linux image file(s) on C:, a
+Windows minifilter, and a transition app. The partition table and Windows'
+BitLocker configuration are never touched.
 
 ---
 
@@ -43,9 +65,12 @@ Windows' shrink being blocked by unmovable files — MFT extents, pagefile,
 hiberfil, VSS shadow copies — is real, and is step six. The other six are where
 curious people bounce off. This is what Wubi was popular for.
 
-**And the reservation is dynamic, not fixed** (§5.6): ~15 GB that grows, rather
-than 200 GB committed forever. For someone who only *sometimes* wants Linux, that
-is the difference between trying it and not.
+**One pool of space, and as many distributions as it holds.** The reservation is
+dynamic, not fixed (§5.6): ~15 GB that grows, drawn from the same free space
+Windows uses, rather than 200 GB committed forever to one side of a partition
+boundary. For someone who only *sometimes* wants Linux, that is the difference
+between trying it and not — and a second or third distribution is another file,
+not another round with a partitioner (§2).
 
 What it sells is **predictability and reversibility**. It does not sell
 invisibility: a machine carrying a driver, an EFI binary and a boot entry is not
@@ -76,15 +101,16 @@ A partition is the technically robust answer — an LBA range neither filesystem
 can touch — and for a user who wants nothing else it is simpler. paguro chooses
 an image file for what a partition cannot give:
 
-- **installability and reversibility** (above): nothing repartitioned, and
-  uninstall is deleting files;
+- **one pool of space** shared with Windows, and as many distributions as it
+  holds without carving the disk up (§2);
 - **Windows can reach Linux.** On a single-disk laptop — most laptops — a Linux
   partition is invisible to Windows: Windows has no ext4 driver, Hyper-V passes
   through whole disks but not partitions, and `wsl --mount` attaches whole disks,
   so it cannot take the disk Windows is running from. An image file on C: is just
-  a file, which WSL2 mounts (§8b);
-- **one pool of space** shared with Windows, and more than one distribution
-  without carving the disk up (§2).
+  a file, which WSL2 mounts (§8b) — and the same holds the other way, so a WSL2
+  distribution runs on the metal as it is;
+- **installability and reversibility** (above): nothing repartitioned, and
+  uninstall is deleting files.
 
 ### The storage path, and what killed Wubi
 
@@ -227,7 +253,7 @@ sample, not a statistic.
 | **Partitioning risk — "a mistake deletes your Windows partition"** | no repartitioning at all |
 | Rebooting is friction; Linux ends up unused | **not solved by the storage half** — §1b is the answer, and it is the unproven one |
 | **Fast Startup locks NTFS; Windows partition won't mount** | *restart* performs a full shutdown, so the transition path never produces a hybrid-hibernated volume (§4.6). The universal advice — "disable Fast Startup" — becomes unnecessary rather than mandatory |
-| **Secure Boot / SBAT breakage** | GRUB was the August 2024 revocation's target and paguro doesn't use it. The shim ecosystem is still shared — but §4.6's pre-flight **detects the change before the reboot and stages the fix automatically**, so the cost is a PIN prompt in Windows instead of a machine that won't start. The residual is that we ship an update, which is ordinary maintenance |
+| **Secure Boot / SBAT breakage** | GRUB was the August 2024 revocation's target; paguro's own chain has no GRUB, and a stock image's GRUB is its distribution's to update. The shim ecosystem is still shared — but §4.6's pre-flight **detects the change before the reboot and stages the fix automatically**, so the cost is a PIN prompt in Windows instead of a machine that won't start. The residual is that we ship an update, which is ordinary maintenance |
 | **BitLocker demands its recovery key** | Microsoft's boot path is untouched, so PCR 4 and 7 do not move and **Windows never prompts.** §6 |
 | Storage split is permanent, resizing later is risky | §5.6 — the image grows on demand |
 | Clock skew (UTC vs local time) | **solved at install.** Linux copies Windows' timezone and uses a local-time RTC, so the two agree and Windows is not modified. NTP still runs, which also covers a DST change while the machine is off |
@@ -542,17 +568,19 @@ it inherits BitLocker protection for free. The image is a **fixed VHD** — raw
 payload plus a 512-byte footer — so the same file is a bare-metal root for paguro
 and a disk WSL2 can mount (§8b). This document calls the default one `linux.vhd`.
 
-**Anywhere on the volume, and more than one.** §4.3 watches no NTFS metadata at
-runtime, so nothing ties the image to a particular directory, and `paguro.ini`
-can list **several**.
+**One pool of space, as many distributions as it holds.** §4.3 watches no NTFS
+metadata at runtime, so nothing ties an image to a particular directory, and
+`paguro.ini` can list **several** `[Boot.*]` entries, even on different NTFS
+volumes and disks.
 
-That turns into a capability a partition layout cannot offer at all:
+That is the headline capability, and a partition layout cannot offer it at all:
 
 | | Partitioned dual boot | paguro |
 |---|---|---|
-| second distro | another partition, carved from somewhere | another image file, listed in the `.ini` |
-| space between them | fixed at creation, each starving the other | **fungible** — all draw from NTFS free space |
+| space, Windows vs Linux | fixed at creation, each starving the other | **one pool** — every image draws from NTFS free space and grows on demand |
+| second distro | another partition, carved from somewhere | another image file, another `[Boot.*]` entry |
 | trying one out | repartition, then repartition back | create a file, delete a file |
+| Windows reaching Linux | not on the disk Windows runs from | the image is a file WSL2 mounts |
 
 Several distributions contending for one pool of free space is awkward enough
 with partitions that most people keep exactly one. Here it is a file each.
@@ -566,8 +594,8 @@ cooperates.
 **File requirements for images paguro boots** — the paguro host and stock
 distribution images (verified at setup and at every boot). WSL2 distribution
 disks are dynamic VHDX and follow different rules (§8b):
-- **fixed VHD** — not dynamic, whose block allocation table raw mapping cannot
-  follow
+- a **fixed VHD** or a **raw** disk file, detected by content — never a dynamic
+  VHD/VHDX, whose block allocation table raw mapping cannot follow
 - fully allocated, **not sparse** (`FILE_ATTRIBUTE_SPARSE_FILE` clear)
 - **not NTFS-compressed** (`FILE_ATTRIBUTE_COMPRESSED` clear)
 
@@ -577,20 +605,30 @@ Fragmentation is not a requirement: the extent list only feeds a range table
 
 ### Inside an image
 
+Each `[Boot.*]` entry in `paguro.ini` names two things (INTERFACES §3.2): the
+**root**, a disk file the kernel module claims and hands to Linux, and the **next
+UEFI image**, either on the FAT32 of a disk file (`efi_disk`, by default the root)
+or as a plain `.efi` file on NTFS (`efi_file`). Two shapes cover the cases:
+
 ```text
-GPT (nested -- Windows never looks inside the file)
-  p1  FAT32  2 GB  -> /efi, holds the signed UKI
-      type C12A7328-F81F-11D2-BA4B-00A0C93EC93B
-  p2  ext4         -> Linux root
+stock distribution image              the paguro host
+GPT (nested -- Windows never          root:  fixed VHD, one bare ext4,
+     looks inside the file)                  no partition table
+  p1  FAT32 ESP -> its own shim +     next:  a UKI as an efi_file
+      GRUB, systemd-boot or a UKI            on NTFS
+  p2  ext4 / btrfs / LVM / LUKS
 ```
 
-A full distribution image is an ordinary GPT disk — §4.3 already presents the
-file as one. The boot partition is **FAT32 so that no filesystem parser has to be
-written at all** (§4.2). Size it generously: the image grows on demand, so the
-"/boot is full" problem of 512 MB partitions cannot arise.
+A distribution image is an ordinary GPT disk — §4.3 already presents the file as
+one — and its ESP is found by partition type (`C12A7328-…`); a disk that is one
+bare FAT32 ("superfloppy") works too. The loader reads **only FAT32, and only
+through the firmware's own driver** (§4.2); everything beyond the ESP is read by
+the next image with its own filesystem code. Size the ESP generously: the image
+grows on demand, so the "/boot is full" problem of 512 MB partitions cannot
+arise.
 
-The nested ESP is optional: `paguro.efi` can also load a UKI straight off the
-decrypted NTFS volume, since it parses NTFS anyway (§4.2).
+**The root is a hint the loader never opens**: it resolves the file's identity
+and forwards it, and whatever filesystem is on it is Linux's to mount.
 
 ---
 
@@ -632,18 +670,24 @@ NATIVE WINDOWS BOOT -- completely ordinary
   paguro absent
 
 LINUX BOOT
-  paguro.efi on the real ESP, own Boot#### entry,
-  never writes to disk; reaches Windows only by
-  BootNext + reset, never by chainloading
-    stage 1  read paguro.ini, SHA-256,
-             compare to paguro-config-hash
+  own Boot#### entry -> a distribution's signed
+  shim (redistributed) -> paguro.efi, signed with
+  the machine MOK key, enrolled once at install.
+  paguro.efi never writes to disk; reaches Windows
+  only by BootNext + reset, never by chainloading
+    stage 1  read paguro.ini, SHA-256, compare to
+             PaguroConfigHash (Secure Boot on)
     stage 2  parse; LOAD TAINT: PCR 12 <- H(whole .ini)
     stage 3  FVE parse, rungs, obtain VMK;
              BOOT TAINT: PCR 12 <- sentinel
-    stage 4  NTFS, locate the image named in the
-             .ini, load the UKI (nested ESP or NTFS)
-  -> hands the initrd: VMK, FVEK + layout, B,
-    PCR values, verified .ini bytes
+    stage 4  NTFS; the chosen [Boot.*] entry's
+             disks; gates; publish efi_disk as a
+             READ-ONLY BlockIo, firmware FAT binds;
+             LoadImage the next image: UKI,
+             systemd-boot, or shim + GRUB as shipped
+  -> hands the initrd (TLV table): volume, VMK,
+    FVEK + layout, B, PCR values, verified .ini,
+    image identities, gate state, rung
 
 KEYS (sec.6)
   every standing rung needs the passphrase;
@@ -653,10 +697,12 @@ KEYS (sec.6)
   PIN bypass: TPM-clock-bound, written by a
     logged-in Windows on "Restart into Linux"
   .ini ratcheted whole into PCR 12; crypto
-    material lives in *_seal.bin files
+    material and PCR selection live in the
+    per-volume *_seal.bin files
 
 LINUX KERNEL MODULE -- the only component that
-can corrupt anything
+can corrupt anything. DKMS source in the image's
+paguro package, with the initramfs hook
   NTFS parsed by the module at load, and again at
   each growth event -- same parser, same bounds.
     nothing in userspace can supply the map.
@@ -665,6 +711,9 @@ can corrupt anything
   asserts before r/w: dirty bit, hibernation,
     unreplayed journal, allocated == sum(extents).
     any failure -> READ-ONLY
+  view A's content asserted before anything
+    mounts (GPT / bare ext4 / ISO 9660), reading
+    past the first extent: fail -> no view A
   runtime enforcement is A RANGE TEST, nothing else:
     read  in the set -> EIO    this is what stops
     write in the set -> EIO    defrag -- no copy,
@@ -702,6 +751,9 @@ GROWTH  append-only, through whichever side holds C:
         (the VM driver, or ntfs3 natively);
         module re-derives and verifies itself
 SHRINK  offline, two phases, narrow before truncate
+INSTALL  from Windows, through WSL2: the distribution's
+         own installer in a container, writing a
+         fixed VHD; never against the real disk
 UNINSTALL  additive install => six deletions,
            one reboot
 ```
@@ -712,12 +764,35 @@ UNINSTALL  additive install => six deletions,
 
 ### 4.1 Custom UEFI bootloader (`paguro.efi`)
 
-Signed with a key enrolled via **shim + MOK** (not `db` — that requires firmware
-setup, which many machines make hard or impossible).
+**Signed with this machine's own key, trusted through shim.** paguro needs no
+Microsoft signature and has no project certificate (INTERFACES §2.1, §11.6):
 
-Sits on the ESP **alongside** Windows Boot Manager. **Does not replace
-`bootx64.efi`. Does not install a boot menu by default. Windows remains the
-default.**
+- **The first image is a distribution's Microsoft-signed shim, redistributed
+  unchanged** with its MokManager. Every such shim trusts, besides its vendor's
+  key, anything signed by a key in `MokList`. Our `Boot####` entry points at the
+  shim, and the shim's second stage is `paguro.efi`. `paguro.efi` carries the
+  `.sbat` section shim requires, and its generation is bumped when a security fix
+  must revoke older builds. The installer picks the shim build whose signing CA
+  is in this machine's `db` (the 2011 UEFI CA or its 2023 successor).
+- **One MOK key per machine**, generated by `paguro install`. It signs
+  `paguro.efi`, every DKMS build of the kernel module, and locally built UKIs.
+  The Windows tool queues it for enrolment by writing shim's `MokNew`/`MokAuth`
+  variables, so the next boot shows MokManager **once**; no later install,
+  distribution or kernel update asks again.
+- **`db` is the fallback**, for machines that ship with the third-party UEFI CA
+  disabled (Secured-core PCs), where no distribution shim loads: enable that CA
+  in firmware setup, or enrol our certificate in `db` directly. Both need
+  firmware setup and both move Windows' PCR 7, so the Windows tool first
+  suspends BitLocker for exactly one reboot and Windows re-seals by itself.
+
+Our trust is the machine key, not the shim vendor's: when SBAT or `dbx` revokes a
+shim, the repair hook installs the distribution's replacement and nothing else
+changes (§7). Where the private key lives, and what guards it, is §6 (The machine
+MOK key).
+
+Sits in `\EFI\paguro\` on the ESP, **alongside** Windows Boot Manager. **Does
+not replace `bootx64.efi`. Does not install a boot menu by default. Windows
+remains the default.**
 
 **It never writes to the disk.** Every file it needs written — the configuration,
 the seal files — is written by the initrd from values the loader forwards. That
@@ -725,11 +800,13 @@ is what keeps the loader's bugs confined to confidentiality and bootability rath
 than letting them reach the disk.
 
 It does write **firmware variables**, all small and deliberate, none on a block
-device: deleting the bootstrap `Boot####` entry, creating `B` on the first boot,
-clearing the one-shot `S`, setting `paguro-tpm-broken`, and setting `BootNext`
-to reach Windows (§6). Stated as firmware operations so the disk rule stays
-absolute rather than approximate. It also calls `TPM2_Create` on a provisioning
-boot, because only it stands at the right PCR values (§6 Bootstrap).
+device (INTERFACES §5): deleting the bootstrap `Boot####` entry, creating
+`PaguroB` on the first boot (and deleting it on an uninstall boot, §6b),
+deleting the one-shot `PaguroSetup`, setting and clearing `PaguroTpmBroken`, and
+setting `BootNext` to reach Windows (§6). Stated
+as firmware operations so the disk rule stays absolute rather than approximate.
+It also calls `TPM2_Create` on a provisioning boot, because only it stands at
+the right PCR values (§6 Bootstrap).
 
 #### The execution contract: four stages
 
@@ -740,10 +817,12 @@ There are **two taints**, and they mark different boundaries.
 
 ```text
 -- STAGE 1 - must be correct; nothing protects it --
-   read paguro.ini and paguro-config-hash (64 KB cap)
+   read paguro.ini and PaguroConfigHash (64 KB cap)
    SHA-256 over the whole file
-   compare against paguro-config-hash
+   Secure Boot on: compare against PaguroConfigHash
      (a firmware variable; no key involved)
+   Secure Boot off: no comparison; the handoff
+     marks the configuration unverified
 
 -- STAGE 2 - behind stage 1; small --
    parse the file
@@ -759,11 +838,16 @@ There are **two taints**, and they mark different boundaries.
 
 -- STAGE 4 - the TPM will not re-authorise;
              the VMK is still in memory --
-   parse NTFS, locate the image,
-     read and validate its extent map
-   refuse on hibernation / dirty bit
-   expose the image as a synthetic block device,
-     then chainload
+   parse NTFS through the decrypted view
+   read the gates: hibernation, dirty bit
+     (forwarded; Linux degrades to read-only)
+   resolve the entry's root to its identity
+     (never opened), and efi_disk or efi_file
+   efi_disk: detect fixed VHD or raw, validate
+     the extent map, find its FAT32; publish the
+     disk as a READ-ONLY BlockIo, ConnectController,
+     LoadImage the next image by device path
+   efi_file: read it whole, LoadImage(SourceBuffer)
 ```
 
 > **What the boot taint does and does not do.** Extending a PCR prevents a
@@ -778,7 +862,7 @@ There are **two taints**, and they mark different boundaries.
 | Taint | When | Prevents |
 |---|---|---|
 | **Load** | after parsing, before any protector is tried | a modified configuration ever yielding the key |
-| **Boot** | the moment the VMK is obtained | anything later in this boot — the UKI, Linux userspace, an exploited parser — obtaining it again |
+| **Boot** | the moment the VMK is obtained | anything later in this boot — the next image, Linux userspace, an exploited parser — obtaining it again |
 
 **Where review goes first:** stage 3, where an exploit runs while the VMK is still
 obtainable. Every parser is hardened (§6), but these three come first:
@@ -788,8 +872,11 @@ obtainable. Every parser is hardened (§6), but these three come first:
 - **recovery-key handling** — the protector entry it consumes is FVE-sourced
 
 With the theme compiled in (§Theme) and the configuration behind its hash,
-BitLocker's formats are the only attacker-authored data the loader parses before
-a key exists.
+BitLocker's formats are the only substantial attacker-authored data the loader
+parses before a key exists. The rest is small and bounded, each with a fuzz
+target: the physical disk's GPT (primary header only), the seal files and the
+bootstrap payload (fixed layouts), a display's 128-byte EDID block, and escape
+sequences from a serial console.
 
 **The boot taint lands on a natural boundary rather than an arbitrary one.**
 Reading NTFS *requires* the key, so NTFS necessarily follows it — which puts the
@@ -806,16 +893,22 @@ for the rest of the boot.
 covers the *whole* file, so there is nothing to locate and nothing to tokenise
 before verification. Read, hash, compare.
 
+**The comparison runs only under Secure Boot.** With Secure Boot off the loader
+itself can be substituted, so a check inside it would protect nothing; the load
+taint still binds the TPM rung either way, and the handoff marks the
+configuration unverified so every prompt says so (INTERFACES §3.3).
+
 That is the strongest form this stage can take: with no key involved there is no
 signature format to parse, no ASN.1, and no verification code that could be made
 to return the wrong answer. The one thing stage 1 must get right is a bounded read
 and a constant-time-irrelevant memcmp.
 
-**And there is no embedded public key**, because nothing in `paguro.efi` verifies
-a signature. The theme is compiled into the binary (§Theme), and PE verification
-of the UKI is shim's job through `SHIM_LOCK_PROTOCOL->Verify()`.
-The binary carries SHA-256, AES-XTS, AES-CCM (the FVEK unwrap)
-and HMAC — no asymmetric implementation at all.
+**And there is no embedded public key**, because nothing in `paguro.efi`
+verifies a signature. The theme is compiled into the binary (§Theme), and PE
+verification of the next image belongs to the platform: `LoadImage` runs Secure
+Boot verification against `db`, and shim's `MokList` is reached through shim's
+own hooks (§4.2, Verifying the next image). The binary carries SHA-256, AES-XTS,
+AES-CCM (the FVEK unwrap) and HMAC — no asymmetric implementation at all.
 
 **Stage 2's parser is second line, not first**, and should still be small:
 when the first line is three primitives, a soft second line behind them is how
@@ -874,14 +967,15 @@ else; it is not excluded by a gate.
 
 **Load-bearing, not incidental.** The unseal happens before any further image is
 loaded, so PCR 4 at that moment covers shim + `paguro.efi` and nothing else.
-**Kernel updates therefore cannot break the seal** — the UKI is measured after
-the key is already in hand. Deferring the unseal until after the kernel is loaded
-would make every `kernel-install` a seal-invalidating event, with §7's repair
-hook papering over a self-inflicted wound on every update.
+**Kernel updates therefore cannot break the seal** — the next image is measured
+after the key is already in hand. Deferring the unseal until after the kernel is
+loaded would make every `kernel-install` a seal-invalidating event, with §7's
+repair hook papering over a self-inflicted wound on every update.
 
 #### Recovery — a path that does not read the configuration
 
-When the hash does not match, the configuration is unusable: it cannot be
+When the hash does not match — or, under Secure Boot, the hash variable is
+missing — the configuration is unusable: it cannot be
 repaired in place, because the loader never writes to the disk. An **in-loader
 editor cannot solve this** — editing changes the file, and proceeding on a
 mismatch means parsing attacker-authorable bytes in stage 2, which is exactly
@@ -893,8 +987,8 @@ So recovery works around the configuration instead of through it:
 ```text
 Recover Linux
   > cap PCR 12 immediately     (see below)
-    unlock the volume
-    find the image, boot it
+    choose and unlock the volume
+    browse to the disk or UEFI image, boot it
   then: Linux repairs it -- it can write both
         the file and the firmware variable
 ```
@@ -906,11 +1000,13 @@ where the load taint was computed correctly and the TPM would otherwise still be
 able to unseal. The general rule: **any path that parses unverified input caps
 first.**
 
-**Recovery never parses `paguro.ini`.** Paths and volume identity come from
-enumeration and compiled-in defaults; keys come from the `.bin` protector files
-and the volume's own FVE metadata, all self-validating. A malicious configuration
-therefore cannot steer where recovery looks or what it loads, and the prompt
-**states that it is unattested**.
+**Recovery never parses `paguro.ini`.** Volumes come from enumeration, paths
+from an on-screen browser over the unlocked NTFS and the chosen disk's FAT32
+(INTERFACES §13.4), and display and keyboard settings from compiled-in defaults
+(dark, auto, US layout, each changeable on screen); keys come from the `.bin`
+protector files and the volume's own FVE metadata, all self-validating. A
+malicious configuration therefore cannot steer where recovery looks or what it
+loads, and the prompt **states that it is unattested**.
 
 **Recovery behaves identically whether Secure Boot is on or off.** Every major
 distribution ships a shim-signed live image, so an attacker reaches the same
@@ -956,17 +1052,23 @@ Design rules first, because they determine the set:
    an attributed one is not.
 4. **Error codes live behind `D`**, never in the message. The message says what
    to do.
-5. Font scales by integer factor to ~1/40 of screen height, or 4K makes an 8×16
-   font unreadable.
+5. **Scale follows the framebuffer height**, checked to fit from 800×600 to
+   3840×2160, or 4K makes an 8×16 font unreadable.
 6. **Any prompt shown while the configuration is unverified** — recovery mode, or
    a missing configuration hash — **states that it is unattested.**
+7. **Every screen works on every console** (INTERFACES §13.2a): graphics on each
+   display at its own preferred mode, never one canvas spread across two; the
+   same screens as text on serial consoles and where there is no GOP; input from
+   keyboard, serial and pointer at once, with nothing requiring the pointer. F2
+   cycles the light, dark and high-contrast variants, F3 toggles text and
+   graphics, F4 and F5 choose the keyboard layout and language for this boot.
 
 Sixteen screens in total, but **five primitives**:
 
 | Primitive | Used by |
 |---|---|
 | progress bar | progress |
-| **list** | unlock options · picker · volume selection · image browser · partition browser · target browser |
+| **list** | unlock options · picker · volume selection · NTFS browser · FAT32 browser · keyboard layout · language |
 | secret entry | password/PIN · recovery key grid |
 | message + actions | the whole failure family — nine texts, one frame |
 | detail table | details |
@@ -1096,45 +1198,32 @@ offer another TPM attempt, and must not read as a dead end.
 Reached when recovery ran and located no image. `Enter` opens the browser below
 rather than ending there.
 
-**Locating an image by hand: three lists, not three text fields.** A bootloader
-has no keyboard-layout certainty and NTFS paths are long enough that a typo
-becomes a support call. Each step is **skipped silently when exactly one
-candidate qualifies**, so most users see none of them.
-
-```text
-   Select the Linux image
-
-   C:\
-
- > linux.vhd              214 GB   [ok] contains a GPT
-   pagefile.sys           16 GB
-   Users                           <directory>
-   Windows                         <directory>
-
-   ^ v select   Enter open   <- up   Esc back
-```
-
-Candidates are **validated while listing** — a file that contains a GPT is marked
-— so the right one is obvious rather than guessed at.
-
-```text
-   Select the boot partition inside linux.vhd
-
- > Partition 1       2.0 GB    FAT32, EFI System
-   Partition 2     212.0 GB    Linux filesystem
-```
+**Locating what to boot by hand: a browser, not a text field.** NTFS paths are
+long enough that a typo becomes a support call, and a firmware keyboard types
+with a US layout whatever is printed on the keys (§Theme). A lone candidate is
+**taken silently**, so most users see none of this.
 
 ```text
    Select what to start
 
-   \EFI\
+   \paguro\
 
- > Linux\linux-6.11.4.efi                        112 MB
-   Linux\linux-6.11.2.efi                        112 MB
-   BOOT\BOOTX64.EFI                              112 MB
+   old\                                   folder
+ > debian.vhd                    214 GB   disk
+   rescue.efi                    112 MB   UEFI image
+
+   ^ v select   Enter open   <- up   Esc back
 ```
 
-All three reuse the list primitive. The chosen image still goes through
+It starts at `\paguro\` and lists folders first, then disks (`.vhd`, `.vhdx`, `.img`, `.raw`)
+and UEFI images. A **disk** becomes the root and the `efi_disk`: the loader finds
+its FAT32 by content (the GPT's one ESP, or a superfloppy) and offers its default
+`\EFI\BOOT\BOOT<arch>.EFI`, or a second browser over that FAT32 to pick
+systemd-boot, a specific UKI or the distribution's shim. A **UEFI image** becomes
+the `efi_file`, and the root hint is the only disk in `\paguro\`, a choice among
+several, or none — Linux then asks. A typed path is the fallback on both levels.
+
+Both browsers reuse the list primitive. The chosen image still goes through
 `LoadImage`, so Secure Boot verifies it exactly as on the normal path — browsing
 changes what you point at, never what is allowed to run.
 
@@ -1174,8 +1263,8 @@ about not appearing every boot, not about never existing:
 ```text
    Choose what to start
 
- > Linux 6.11.4                          default
-   Linux 6.11.2                         previous
+ > Debian                                default
+   Rescue
    Linux (recovery)
    ----------------------------------------------
    Windows Boot Manager
@@ -1189,10 +1278,11 @@ about not appearing every boot, not about never existing:
 The last entry sets `OsIndications` and resets — the only portable way to reach
 firmware UI from an EFI application.
 
-Entries under "Linux" come **only from inside the encrypted volume** — the nested
-ESP or a UKI on NTFS — so the configuration cannot redirect the chain target to
+The "Linux" rows are the `[Boot.*]` entries of `paguro.ini`, and nothing else:
+several kernels, boot counting and rollback are systemd-boot's job behind an
+entry (§4.2). Every entry's disks and UEFI image live **inside its NTFS volume**,
+read through the unlock — so the configuration cannot redirect the next image to
 unencrypted media.
-Locked variant shows `Linux (locked — enter password to list entries)`.
 
 Making paguro the **default** boot entry is opt-in and carries a warning: today a
 paguro bug costs Linux, as default it costs booting at all. It also requires Fast
@@ -1231,70 +1321,89 @@ to send — a QR the user photographs solves it with no rule broken and no
 transcription errors. It is the difference between a usable bug report and a
 blurry photograph of a screen.
 
-### 4.2 Unified Kernel Image (UKI)
+### 4.2 The next image — a UKI, systemd-boot, or the distribution's own shim + GRUB
 
-Kernel + initrd + command line in one PE binary.
-
-**The practical reason, which is the real one:** GRUB cannot read a kernel out of
-this layout without new filesystem code. The path to the kernel runs ext4 inside
-FAT inside a file inside NTFS inside BitLocker — GRUB would need modules for the
-BitLocker layer and the extent indirection, written and maintained by us. A UKI
-sidesteps the whole problem: it is a single PE that `paguro.efi` hands to
-`LoadImage()`, and everything else it needs is already inside it.
-
-So this is an engineering-effort decision before it is a security one, and it
-happens to land on the more modern of the two designs anyway.
-
-*Security footnote, for anyone weighing TPM and Secure Boot:* because the command
-line is part of the signed PE, it cannot be requested at boot. That closes
-`init=/bin/sh` and `rd.break` — see §6, which also covers the failure path a UKI
-does **not** close, and why the PIN is what closes it.
-
-#### Where it lives — a nested FAT32 ESP, or directly on NTFS
-
-For a full distribution image, the UKI lives on the image's nested FAT32 ESP,
-where that distribution's tooling expects it. `paguro.efi` can equally load a UKI
-stored as a plain file on the decrypted NTFS volume — it parses NTFS at stage 4
-anyway, so this costs no new code. The question worth arguing is FAT32 versus the
-image's ext4 root.
-
-Both are possible. BitLocker is already unlocked at stage 3, so the UKI sits
-inside the decrypted volume either way and there is no chicken-and-egg problem
-of the sort LUKS would create. **BitLocker is also neutral between the two
-options** — the synthetic `BlockIo` decrypts inside its own `ReadBlocks`
-callback, invisibly to whatever consumes it, and an ext4 parser would read
-through exactly the same layer. The decrypt path is not a cost the FAT32 choice
-introduces; NTFS already lives behind it. It is purely an engineering-cost decision, and it
-goes three ways for FAT32.
-
-**1. FAT32 may cost no filesystem code at all.** The bootloader already owns
-every layer beneath the question:
+After stage 3 the loader holds the key, and stage 4 turns a disk file inside NTFS
+inside BitLocker into the one thing every UEFI boot loader already reads: **a
+read-only disk.**
 
 ```text
 physical BlockIo -> BitLocker decrypt -> NTFS parse
-  -> the image's extent map -> ?
+  -> the disk file's extent map (VHD footer stripped)
+  -> EFI_BLOCK_IO_PROTOCOL, read-only, own device path
+  -> ConnectController: the firmware's own partition
+     and FAT drivers bind it
+  -> LoadImage(the next image) by device path
 ```
 
-At that last arrow, install a synthetic `EFI_BLOCK_IO_PROTOCOL` whose LBA reads
-resolve through the extent map and the decrypt layer, give it a device path, and
-call `ConnectController()`. The firmware's **own** Partition driver then parses
-the nested GPT and its **own** FAT driver binds the ESP, yielding a real
-`EFI_SIMPLE_FILE_SYSTEM_PROTOCOL` — and the UKI loads through the stock
-`LoadImage()` path. This is the pattern `EFI_RAM_DISK_PROTOCOL` uses, so firmware
-is expected to support it; that protocol is itself unusable here only because it
-wants the whole image resident in RAM.
+The next image is whatever the entry names (`efi`, by default the removable-media
+path `\EFI\BOOT\BOOT<arch>.EFI`):
 
-No firmware has an ext4 driver. That route means writing one, stacked on top of a
-BitLocker reader and an NTFS reader that are already the two largest components
-of the application.
+| Next image | Works because |
+|---|---|
+| a UKI | kernel, initrd and command line in one signed PE; it needs nothing but itself |
+| systemd-boot | it enumerates `/EFI/Linux` and `/loader/entries` off the `DeviceHandle` it inherits: several kernels, boot counting, rollback, `bootctl set-default`, invisible at `timeout 0` |
+| **the distribution's own shim + GRUB** | GRUB's `efidisk` driver uses every `BlockIo` handle, so the image is an ordinary disk to it, and its own ext4/btrfs/LVM/LUKS modules read `/boot` inside it. **No GRUB module of ours** |
+
+**That last row makes stock distribution images bootable unchanged at the
+boot-loader level.** Everything above the disk is maintained by the distribution;
+paguro supplies the storage and gets out of the way. What a stock image still
+needs is one package, `paguro` — the kernel module as DKMS source and the
+initramfs hook that reads the handoff and builds the views (§4.3) — because a stock
+initramfs cannot find a root inside a VHD inside NTFS on its own.
+
+**The disk is read-only for everyone.** `WriteBlocks` returns
+`EFI_WRITE_PROTECTED`, so the loader's never-writes rule holds whoever asks. GRUB's
+`save_env` and `recordfail` meet that error; that GRUB carries on regardless is
+to be confirmed per distribution (§11 Q27).
+
+*Security footnote, for anyone weighing TPM and Secure Boot:* a UKI's command line
+is part of the signed PE, so it cannot be requested at boot, which closes
+`init=/bin/sh` and `rd.break`. A GRUB whose menu edits the command line does not.
+Under TPM+PIN that costs nothing — whoever reaches the menu has already typed the
+PIN — and §6 covers the failure path a UKI does **not** close either. The opt-in
+TPM-only profile has no PIN in front, so it requires a UKI (§6).
+
+#### Where the next image lives — a FAT32 inside the disk, or directly on NTFS
+
+Each entry picks one (INTERFACES §3.2):
+
+- **`efi_disk`, the default:** the FAT32 of a disk file, found by content — the
+  GPT's one ESP, or a disk that is one bare FAT32. The next image gets a real
+  `DeviceHandle`, and the distribution updates its boot loader and kernels inside
+  the image whenever it likes.
+- **`efi_file`, the secondary mode:** a `.efi` stored as a plain file on NTFS,
+  read whole and started with `LoadImage(SourceBuffer)` — **never jumped to**:
+  `LoadImage` runs Secure Boot verification, and executing a buffer directly would
+  be a Secure Boot bypass. It gives up the `DeviceHandle` (no systemd-stub
+  credentials or add-ons, no systemd-boot behind it), and replacing the file needs
+  an NTFS write, which Linux makes through view C while the VM is off. Its use is
+  images Windows can manage without opening a VHD: the paguro host's UKI, a
+  rescue or installer UKI dropped onto C:.
+
+The question worth arguing is why the loader's own reading **stops at FAT32**
+rather than reaching the image's ext4 root. BitLocker is neutral between them —
+the synthetic `BlockIo` decrypts inside its own `ReadBlocks`, invisibly to whatever
+consumes it, and an ext4 parser would read through exactly the same layer. It is
+an engineering-cost decision, and it goes three ways for FAT32.
+
+**1. FAT32 costs no filesystem code at all.** The loader already owns every layer
+beneath the question, and at the last one it installs a `BlockIo` with a device
+path and calls `ConnectController()`. The firmware's **own** partition driver
+parses the nested GPT and its **own** FAT driver binds the ESP, yielding a real
+`EFI_SIMPLE_FILE_SYSTEM_PROTOCOL`, and the next image loads through the stock
+`LoadImage()` path. It is the pattern `EFI_RAM_DISK_PROTOCOL` uses — unusable here
+only because it wants the whole image resident in RAM. No firmware has an ext4
+driver; that route means writing one, on top of a BitLocker reader and an NTFS
+reader that are already the two largest components of the application. Where the
+image's own boot loader is GRUB, reading ext4 is GRUB's job, maintained by the
+distribution that ships it.
 
 **2. UKI tooling assumes a FAT ESP.** `ukify`, `kernel-install`, `bootctl`,
 `sbctl` and `dracut --uefi` check for vfat and for partition type GUID
 `C12A7328-…`; `bootctl` errors out otherwise. Give the nested GPT a
 correctly-typed ESP and all of it works unmodified. On ext4 it is path overrides
 and `SYSTEMD_RELAX_ESP_CHECKS=1` in perpetuity, re-fought at each distro upgrade.
-(This is about *UKI* tooling, not Ubuntu's defaults — Ubuntu still ships
-shim+GRUB with loose `vmlinuz`/`initrd`, so the UKI is hand-generated regardless.)
 
 **3. ext4 drift is an attested remote-brick failure mode.** ext4 keeps gaining
 INCOMPAT flags and read-only bootloader parsers keep dying on them: GRUB vs
@@ -1307,75 +1416,64 @@ gained no features since 1996.
 
 **What ext4 would buy, and why it is defusable:** one filesystem, no sync step
 between `/boot` and the root, no "/boot is full". That last pain comes from a
-512 MB partition nobody can resize — here the image grows on demand, so a 2 GB
-nested ESP removes it outright.
+512 MB partition nobody can resize — here the image grows on demand, so a
+generous ESP removes it outright.
 
-Note that *mounting FAT in UEFI* is not the uncertain part — a FAT driver is
-mandatory in the spec (the ESP must be FAT, and firmware must load
-`\EFI\BOOT\BOOTX64.EFI` from it), boot services are alive for our entire
-lifetime, and every boot this machine has ever done is a demonstration. The only
-open question is whether firmware will bind its drivers to a handle *we*
-installed rather than one it enumerated.
+A FAT driver is mandatory in the UEFI specification, so the one question was
+whether firmware binds its drivers to a handle *we* installed rather than one it
+enumerated. **OVMF and AAVMF do**: stage 4 publishes the disk and chains through
+the firmware's FAT on x86_64 and aarch64 in CI. Real firmware is §11 Q11.
 
 **Three tiers, and the design never depends on the top one:**
 
-| Tier | Cost | Yields |
-|---|---|---|
-| `ConnectController()` binds firmware's Partition + FAT drivers | no FS code | free FAT, real `DeviceHandle`, systemd-boot chainload possible |
-| own FAT32 reader + own `SimpleFileSystem` on top | ~500 lines | same, no firmware dependency |
-| own FAT32 reader + `LoadImage()` from a memory buffer | ~300 lines | boots; loses systemd-boot chainload and systemd-stub addons |
+| Tier | Cost | Yields | State |
+|---|---|---|---|
+| 1. `ConnectController()` binds the firmware's partition + FAT drivers | no FS code | real `DeviceHandle`, systemd-boot and shim + GRUB behind it | **built**; binds under OVMF and AAVMF |
+| 2. own FAT32 reader + own `SimpleFileSystem` on top | ~500 lines | the same, no firmware dependency | not built: a firmware that does not bind is a **clean refusal** with a *cannot start* screen. The read-only FAT32 directory reader it needs already exists, for the recovery browser |
+| 3. `LoadImage()` from a memory buffer | nothing beyond reading the file | boots; no `DeviceHandle` | **built**, as `efi_file` |
 
-The bottom tier removes the dependency entirely: `LoadImage()` accepts a
-`SourceBuffer`, not only a file path, and still verifies against Secure Boot —
-it invokes the Security Architectural Protocol regardless of source, which is how
-shim-chainloading works. Read-only FAT32 is boot sector → FAT → cluster chain:
-no journal, no extent trees, no checksums, no feature flags. Against a bootloader
-that already contains an NTFS reader and a BitLocker AES-XTS layer, it is a
-rounding error.
+`LoadImage()` accepts a `SourceBuffer`, not only a file path, and still verifies
+against Secure Boot — it invokes the Security Architectural Protocol regardless of
+source, which is how shim-chainloading works. Read-only FAT32 is boot sector →
+FAT → cluster chain: no journal, no extent trees, no checksums, no feature flags.
 
-**That asymmetry is the whole argument.** Firmware cooperation is an
-optimisation here, never a load-bearing assumption. ext4 has no equivalent
-bottom tier — there, the parser *is* the design.
+**That asymmetry is the whole argument.** Firmware cooperation is an optimisation,
+never a dependency of the design: an `efi_file` boots without it today, and tier 2
+removes it for `efi_disk`. ext4 has no equivalent bottom tier — there, the parser
+*is* the design.
 
-**But tier 3 is ruled out by what the UKI needs.** `LoadImage()` sets
-`EFI_LOADED_IMAGE_PROTOCOL.DeviceHandle` to the device an image was loaded
-*from* — systemd-stub uses exactly that to find `/loader/credentials/`,
-`/loader/addons/` and `<uki>.extra.d/`. Loading from a `SourceBuffer` leaves it
-unset. So the UKI inherits a usable filesystem **only if we load it by device
-path**, which means reaching a genuine `SimpleFileSystem` either from firmware
-or by publishing our own over a FAT32 reader. Tier 1 or tier 2, never tier 3 —
-which raises §11 Q11 from "free optimisation" to "decides whether we write ~500
-lines."
+#### Verifying the next image
 
-Everything past that point is Linux userspace in the initrd: nothing custom has
-to live inside the UKI itself.
-
-#### Verifying the chained image
-
-**No image hash in the configuration, and no accept-any-signer mode.** The chained
-UKI is loaded through `LoadImage` and verified against db/MOK like any other EFI
-image.
+**No image hash in the configuration, and no accept-any-signer mode.** The next
+image goes through `LoadImage` and is verified like any other EFI image.
 
 **An "accept any signer" mode is not implementable**, which is why none exists:
-under Secure Boot, loading a UKI signed by an unenrolled key means loading and
+under Secure Boot, loading an image signed by an unenrolled key means loading and
 relocating the PE ourselves — and a signed binary that loads unsigned code **is**
 a Secure Boot bypass, the pattern that gets bootloaders revoked through `dbx`.
-`SHIM_LOCK_PROTOCOL->Verify()` checks the same stores. **Self-built kernels enrol
-a MOK key** — one MokManager interaction, then everything verifies normally.
 
-**No image hash either**: the distribution rewrites its UKI on every
-`kernel-install`, so a pinned hash would force a reseal per kernel update.
-Pinning the *location* in the ratcheted `.ini` is what closes redirection, and
-the UKI lives inside the encrypted volume, where writing it already requires the
-VMK.
+**Which store verifies which image** (INTERFACES §2.1, §3.2):
 
-**Default chain target is `\EFI\BOOT\BOOTX64.EFI`** on the nested ESP — the UEFI
-removable-media default path — so the common case needs no key at all.
+| Next image | Verified by |
+|---|---|
+| the distribution's own shim, then its GRUB and kernel | firmware `LoadImage` against `db` (Microsoft's third-party UEFI CA), then that shim with the distribution's key. paguro, itself started by a shim, `LoadImage`s a second shim: it needs that CA in `db` and a shim that tolerates an existing `SHIM_LOCK` protocol (§11 Q28) |
+| a distribution-signed UKI or systemd-boot | the same chain |
+| a **locally built** UKI | the machine MOK key, which signs it on every kernel install — so no further enrolment. Firmware `LoadImage` checks `db` only, so `MokList` is reached through shim's `LoadImage` hook in recent shim, or `SHIM_LOCK->Verify()` before loading the PE ourselves (§11 Q29) |
 
-#### Theme — compiled in
+**No image hash either**: the distribution rewrites its boot files on every kernel
+update, so a pinned hash would force a reseal per update. Pinning the *location* in
+the ratcheted `.ini` is what closes redirection, and the image lives inside the
+encrypted volume, where writing it already requires the VMK.
 
-Colours, fonts, layout and every string are built into `paguro.efi`. There is no
-theme file, so the loader parses no data an attacker can author.
+#### Theme — compiled in, extensible at build time
+
+Colours, fonts, images, layout and every string are built into `paguro.efi`. A
+theme is a directory — `theme.toml` for colours, sizes and per-screen layout,
+PNG images, TTF fonts, one strings file per language — that the build validates
+and turns into pre-decoded pixels, pre-rasterised glyphs and a layout table
+(INTERFACES §13.1). A theme that fails validation fails the build. **The loader
+binary contains no PNG, TOML or font parser**, so it parses no display data an
+attacker can author.
 
 That matters more here than it would elsewhere: the TPM measures the bootloader
 *binary*, not the data it consumes, so a display-parser bug would be a
@@ -1383,33 +1481,42 @@ That matters more here than it would elsewhere: the TPM measures the bootloader
 attested, in a process about to receive the volume key. A boot screen is sixteen
 screens of text and a colour palette; it is not worth a parser in that position.
 
-**Localisation is a build decision.** Strings are cheap — sixteen screens across
-twenty languages is tens of kilobytes. Fonts are not: Latin with Cyrillic and Greek
-runs a few hundred KB, and CJK runs to megabytes. **Ship per-region builds**, which
-rides on a release matrix that already exists for distro flavour and embedded
-defaults.
+**Variants and modes are enums over compiled-in data.** Every build carries `dark`
+(the default), `light`, and a high-contrast version of each, cycled with F2;
+`paguro.ini`'s `[UI]` section may pick the starting variant and the mode — `auto`
+(graphics on every display, the same screens as text on each serial console),
+`graphics`, or `text`. Recovery reads no `.ini`, so it starts in `dark` / `auto`.
+
+**Languages:** `en`, `nl`, `de`, `fr` and `es`, all compiled into every build —
+Latin fonts are small — with the starting one chosen at install from Windows'
+display language and F5 changing it for one boot. The strings table is shared
+with the Windows app, so a language is added once for both. Scripts that need
+large fonts (CJK runs to megabytes) are what per-region builds are for.
+
+**Keyboard layout matters more than language.** Firmware keyboard drivers report
+keys as a US layout would, whatever is printed on them — BitLocker's own pre-boot
+PIN has the same limitation. A passphrase set in Windows on a German or French
+keyboard would not unlock. `[UI] keyboard` selects a compiled-in remap table from
+what the firmware reports (plus Shift and AltGr) to what the chosen layout
+produces; the installer takes the layout from Windows' active input language, and
+the passphrase screen names it. Dead keys are not supported at boot, so the
+Windows app refuses them when the passphrase is set. Recovery starts in `us`, and
+F4 changes it.
 
 **Changing the look means shipping a binary**, so PCR 4 moves and every machine
 reseals through the repair hook (§7). That is the right discipline rather than a
 cost: a cosmetic change to the one screen that asks for the user's passphrase
 should be a security-relevant update.
 
-**Accessibility variants** — high contrast, large text — are compiled-in
-alternates chosen by a keypress.
-
-**Optional: chainload `systemd-boot` rather than a hardcoded UKI path.** Once a
-real `SimpleFileSystem` exists, systemd-boot enumerates `/EFI/Linux` off its own
-`DeviceHandle`, bringing multi-kernel, rollback-on-failed-boot and
-`bootctl set-default` for free; at `timeout 0` with one entry it is invisible.
-It does not disturb the seal — it loads after the unseal. Available only on the
-FAT32 side, and it fits §4.1's philosophy of reusing stock components rather
-than shipping our own boot menu.
-
 ### 4.3 Linux kernel module — the single enforcement point
 
-Runs from the initrd inside the UKI. **It owns the protected views and the
-invariant**, and nothing else — which is what makes the invariant enforceable and
-the module small.
+Runs from the image's own initramfs. It ships in the image's `paguro` package as
+**DKMS source**, built on the machine against whatever kernel is installed and
+signed with the machine key; the initramfs hook refuses to build an initramfs
+without it, so a kernel it cannot build against fails its install loudly and the
+previous kernel stays the default (INTERFACES §11.6). **It owns the protected
+views and the invariant**, and nothing else — which is what makes the invariant
+enforceable and the module small.
 
 #### What the module exposes, and what it does not
 
@@ -1787,20 +1894,25 @@ segment table, which is the same place `cryptsetup bitlk` puts it.
 
 Prove it anyway:
 
-> **Mandatory post-construction assertion.** The nested ESP's FAT boot sector is a
-> fixed signature at a known offset inside the image. Read it immediately after
-> the stack is built, **before anything mounts.** A wrong origin, a wrong
-> relocation, or extents gathered in the wrong order all fail this read.
+> **Mandatory post-construction assertion.** The module checks view A's content
+> immediately after the stack is built, **before anything mounts**, and reads
+> **past the first extent**, because extents gathered in the wrong order must fail
+> too. What it checks follows the content (INTERFACES §3.2): for a GPT, the
+> primary header's CRC, the backup header at the last LBA and each partition's
+> first-sector signature where known; for a bare ext4, the superblock magic and
+> the backup superblock in block group 1 agreeing on UUID and block count; for
+> ISO 9660, the primary volume descriptor and a volume size equal to the payload.
+> A wrong origin, a wrong relocation or a wrong order all fail it.
 
 An assertion, not a unit test — a mis-derived map must not be able to reach a
 filesystem. Same posture as refusing on disagreement between the three FVE
 metadata copies rather than picking one.
 
-**And it is what makes re-deriving the map at every boot safe** (§3). A relocation
-performed by native Windows copied the data with it, so the signature is where it
-belongs and the fresh map is correct. A runlist that changed *without* the data
-moving fails the read, and Linux declines to start rather than mounting whatever
-is now there.
+**And it is what makes re-deriving the map at every boot safe** (§3). A
+relocation performed by native Windows copied the data with it, so the
+structures are where they belong and the fresh map is correct. A runlist that
+changed *without* the data moving fails the assertion, and Linux declines to
+start rather than mounting whatever is now there.
 
 ##### The module holds no key and runs no cipher
 
@@ -2061,12 +2173,15 @@ Before setting `BootNext`, the app verifies everything the next boot depends on,
 **repairs what it can and prompts for what it cannot**:
 
 ```text
-shim and paguro.efi on the ESP, hashes match install
+shim, MokManager and paguro.efi in \EFI\paguro\,
+  hashes match install; shim not revoked by SBAT/dbx
 Boot#### entry exists and is well-formed
-paguro.ini present; firmware hash matches it
-the image present, fixed VHD, not sparse/compressed
-MOK enrolled (self-signed deployments)
-B present in firmware
+paguro.ini present; PaguroConfigHash matches it
+  (its absence means NVRAM was cleared, and
+  PaguroB -- unreadable from any OS -- with it)
+the entry's disk files present, fixed VHD or raw,
+  not sparse/compressed
+the machine MOK key in MokList
 PCR 0/2/7 match the last Linux boot   <- see below
 ```
 
@@ -2135,13 +2250,21 @@ pre-flight and the boot, or a user who booted from the firmware menu — it sets
 runtime EFI variable and says so on screen:
 
 ```text
-paguro.efi   unseal failed -> set paguro-tpm-broken,
-             offer "Start Windows"
+paguro.efi   unseal fails its policy -> set
+             PaguroTpmBroken, offer "Start Windows"
 Windows app  sees the flag, explains what changed,
              prompts for the PIN, stages setupTPM,
              clears the flag, reboots
 next boot    comes up on setupTPM, re-seals, deletes it
 ```
+
+**The flag means "the standing seal no longer matches this machine"**, and
+whoever makes it match again clears it (INTERFACES §5): the Windows tool when it
+stages `setupTPM`; the initrd after a boot on another rung has re-sealed against
+this boot's PCR values; the loader when a TPM unlock succeeds **and its key opens
+the volume** — a successful unseal alone is not enough. A merely successful boot
+clears nothing, and a failed `setupTPM` boot sets it again. The loader reads it
+before writing, so an ordinary boot writes nothing to NVRAM.
 
 **Every other rung stays available throughout** — the optional passphrase
 protector and the volume's own recovery key are untouched by a TPM fault, so this
@@ -2397,7 +2520,8 @@ Both then converge:
          extents ITSELF
   module extends the exclusion set   <- first
   module extends view A's mapping    <- then
-  -> Linux grows the nested GPT, resize2fs online
+  -> Linux grows the nested GPT if there is one,
+     resize2fs online
 ```
 
 **Append-only is what makes either path safe.** Existing extents must be
@@ -2739,11 +2863,13 @@ C:.
 | **Secure Boot** | *integrity of execution* — unsigned code does not run | someone substituting the code you meant to run |
 
 > **Secure Boot does exactly one thing in this design: it prevents unsigned code
-> from executing** — `paguro.efi` at the firmware boundary, and the UKI through
-> shim. No parser, no protector and no recovery path is gated on it. Every major
-> distribution ships a shim-signed live image, so an attacker reaches a root shell
-> on this machine *with* Secure Boot on; conditioning anything on its state would
-> buy nothing.
+> from executing** — shim and `paguro.efi` at the firmware boundary, and the next
+> image after them. No parser, no protector and no recovery path is gated on it.
+> Every major distribution ships a shim-signed live image, so an attacker reaches
+> a root shell on this machine *with* Secure Boot on; conditioning anything on its
+> state would buy nothing. The one check that runs only under Secure Boot is the
+> configuration hash, because without Secure Boot the loader that compares it can
+> itself be replaced (§paguro.ini).
 >
 > **Secure Boot and the firmware-held config hash are evil-maid protection. The
 > TPM taints are the security.**
@@ -2805,7 +2931,7 @@ opt-in TPM-only profile (below).
 **And the requirement is arithmetic, not policy**: the passphrase is an operand
 of the key derivation, so it cannot decay into a setting someone defaults off.
 
-### Reading a BitLocker volume — the largest block of unwritten code
+### Reading a BitLocker volume — the largest block of new code
 
 Unsealing is the small part. *Reading* a BitLocker volume from the loader means:
 
@@ -2815,13 +2941,21 @@ Unsealing is the small part. *Reading* a BitLocker volume from the loader means:
   tell.
 - **Cipher variants.** AES-XTS-128/256 since Windows 10 1511; older volumes use
   AES-CBC with the Elephant diffuser, which is refused (§8b).
-- **Partially converted volumes.** Encryption in progress leaves some sectors
-  plaintext. Detect and refuse.
+- **Partially converted volumes.** A paused conversion leaves the sectors past
+  `encrypted_size` plaintext, and the reader serves them as such; a region caught
+  mid-conversion is refused.
 - **Used-space-only encryption** — Device Encryption's default — reports its own
-  conversion state and must be classified correctly rather than refused (§11).
+  conversion state. The reader identifies it and refuses it until it is classified
+  correctly (§11 Q25).
+- **Three metadata copies, compared, never outvoted**, and after unlock the
+  metadata's own VMK-wrapped hash checked, so nothing unauthenticated — the layout
+  included — is used.
 
 References exist in Linux userspace — `cryptsetup`'s `bitlk` (LGPL), `dislocker`
-(GPLv2), and libbde's format specification.
+(GPLv2), and libbde's format specification — and they are the test oracles: the
+loader's decryption equals dislocker's, libbde's and cryptsetup's on
+Windows-made volumes and on generated ones (512 and 4096-byte sectors,
+XTS-128/256, every supported protector, partly encrypted).
 
 ### The Linux-side seal
 
@@ -2906,8 +3040,10 @@ key  = HMAC(root_gate, "paguro/final"
 VMK  = key XOR wrapped_vmk       # no authentication tag
 ```
 
-`D` is the sealed payload, `B` a standing firmware secret, `S` the one-shot
-`setupTPM` secret, `salt` 16 random bytes stored beside each wrapped VMK.
+`D` is the sealed payload, `B` a standing firmware secret (the variable
+`PaguroB`), `S` the one-shot `setupTPM` secret (`PaguroSetup`), `salt` 16 random
+bytes stored beside each wrapped VMK. The labels are part of the interface, with
+test vectors (INTERFACES §7).
 
 **XOR, not a cipher.** HMAC-SHA256 yields 32 bytes and the VMK is 32 bytes, so
 this is a one-time pad; `salt` keeps it one-time across a BitLocker re-key.
@@ -2959,13 +3095,18 @@ permissions.
   `noDA` switches that off silently.
 - **HMAC session, not a password session**, so `auth` never crosses the bus in
   clear; response parameter encryption on top.
-- **A loadable object lives entirely outside the TPM.** Only the parent is worth
-  persisting (§11 Q12); the sealed object is a file.
+- **Nothing lives in the TPM.** The sealed object is a file, and its parent is
+  re-created from the TCG-standard storage-key template on each use, so Windows
+  and Linux reproduce the same parent without an NV handle (INTERFACES §4; §11
+  Q12 asks whether an existing persistent SRK may stand in).
 
 ##### Where `B` lives
 
-A **boot-services-only** UEFI variable — `NV | BOOTSERVICE_ACCESS`, no
-`RUNTIME_ACCESS` — so no operating system can read it at all. That matters
+`PaguroB`, a **boot-services-only** UEFI variable — `NV | BOOTSERVICE_ACCESS`, no
+`RUNTIME_ACCESS` — so no operating system can read it at all. That is the whole
+of what it protects against: operating systems. Someone with the machine in hand
+can read it (the factor table above), which is why the passphrase and `D` carry
+the physical case. That matters
 because Linux's `efivarfs` makes runtime variables world-readable (`0644`), while
 Windows gates them behind `SE_SYSTEM_ENVIRONMENT_NAME`.
 
@@ -3002,10 +3143,10 @@ Linux something for exactly one boot*, and three flows use it:
 usually notices *before* the reboot and stages it without the user meeting a
 failed unseal.
 
-| Firmware secret | Attributes | Lifetime | Written by |
-|---|---|---|---|
-| `B` | `NV \| BOOTSERVICE_ACCESS` | standing | `paguro.efi` |
-| `S` | `NV \| RUNTIME_ACCESS` | one boot — the loader clears it before handoff | Windows |
+| Firmware secret | Variable | Attributes | Lifetime | Written by |
+|---|---|---|---|---|
+| `B` | `PaguroB` | `NV \| BOOTSERVICE_ACCESS` | standing | `paguro.efi` |
+| `S` | `PaguroSetup` | `NV \| BOOTSERVICE_ACCESS \| RUNTIME_ACCESS` | one boot — the loader deletes it before handoff | Windows |
 
 `B` must be unreadable by any OS; `S` must be *writable* by Windows. One variable
 cannot be both.
@@ -3078,11 +3219,12 @@ Windows, on transition
     write tpm_pin_bypass_seal.bin
         deadline | wrapped VMK | sealed object
         sealed to PCR 0/2/4/7/12 with
-        PolicyCounterTimer(clock < deadline)
+        PolicyCounterTimer(clock < deadline),
+        empty authValue
     set BootNext, reboot
 
 paguro.efi
-    unseal -> unwrap VMK, no prompt
+    unseal D -> VMK = wrapped VMK XOR D, no prompt
 initrd
     delete the file
 ```
@@ -3112,30 +3254,41 @@ the secret on every configuration change for free.
 ### What lives where
 
 ```text
-ESP
+ESP  \EFI\paguro\
+  shim<arch>.efi, mm<arch>.efi   a distribution's signed
+                                 shim + MokManager, unchanged
   paguro.efi
   paguro.ini                configuration only
                             ratcheted WHOLE
-  tpm_seal.bin              wrapped VMK | salt | sealed obj
-  setuptpm_seal.bin         wrapped VMK | salt
-  passphrase_seal.bin       wrapped VMK | salt
-  tpm_pin_bypass_seal.bin   deadline | wrapped VMK
-                            | sealed obj
+  <volume-guid>\            one per NTFS volume unlocked
+    tpm_seal.bin            PCR selection | wrapped VMK
+                            | salt | sealed obj
+    setuptpm_seal.bin       wrapped VMK | salt
+    passphrase_seal.bin     wrapped VMK | salt
+    tpm_pin_bypass_seal.bin deadline | PCR selection
+                            | wrapped VMK | salt | sealed obj
 
 firmware
-  B                   32 bytes, NV | BOOTSERVICE_ACCESS
-  paguro-config-hash  32 bytes, SHA-256 of paguro.ini
-  S                   one-shot, runtime, Windows-written
+  PaguroB           32 bytes, NV | BOOTSERVICE_ACCESS
+  PaguroConfigHash  32 bytes, SHA-256 of paguro.ini
+  PaguroSetup       S: one-shot, runtime, Windows-written
+  PaguroTpmBroken   1 byte, runtime: the seal no longer
+                    matches (set by the loader)
 
 paguro.ini
-  [Paguro]      image paths, volume UUID,
-                chain target, PCR indices
-  [TPM]         non-crypto settings for that rung
-  [SetupTPM]
-  [Passphrase]
+  [Paguro]      version, the default entry
+  [Boot.<name>] volume; root; efi_disk + efi,
+                or efi_file
+  [UI]          variant, mode, keyboard layout
+  [TPM] [SetupTPM] [Passphrase]   enabled = 0 | 1
 ```
 
 > **One rule: the `.ini` is configuration; crypto material is in `.bin` files.**
+
+**The PCR selection is crypto material too**, so it lives in each seal file rather
+than in the `.ini`: a wrong value fails the policy digest instead of needing a
+parser to trust it. Seals sit in a directory per volume, so entries on different
+NTFS volumes, even on different disks, each unlock with their own.
 
 That rule is what makes the ratchet simple. PCR 12 is extended with
 `H(paguro.ini)` — the whole file, no exclusions — which is non-circular only
@@ -3154,14 +3307,15 @@ every Windows boot.
 ### `paguro.ini` and its hash in firmware
 
 One text file, **no signature**. Integrity is a SHA-256 of the whole file held in
-the runtime variable `paguro-config-hash`, which both Linux (root) and Windows
-(admin) can rewrite.
+the runtime variable `PaguroConfigHash`, which both Linux (root) and Windows
+(admin) can rewrite, and **compared only under Secure Boot**: with Secure Boot
+off the loader itself can be substituted, so the comparison would protect
+nothing, while the ratchet below binds the TPM rung either way.
 
 **Hashing the whole file keeps the parser out of stage 1**: read, hash, compare,
-then tokenise. And **no key is involved** — with a real shim the MOK private key
-is not on the machine, and a per-machine signing key would be a second PKI to
-protect. The firmware variable replaces a secret with a privilege the platform
-already enforces.
+then tokenise. And **no key is involved** — a signature would put a verifier in
+stage 1 and a private key in the hands of every writer of the file. The firmware
+variable replaces a secret with a privilege the platform already enforces.
 
 | | Blocked by the hash? |
 |---|---|
@@ -3178,13 +3332,15 @@ hardened for exactly that reason.
 nor the ratchet (an old file produces its own matching PCR 12). Only a
 **monotonic TPM NV counter** bound into the seal policy closes it (§11 Q12).
 
-**Hash variable absent** — NVRAM cleared — means `B` is gone too, so the TPM rung
-is dead regardless: offer only the rungs that do not need `B`, say the
-configuration is unverified, and point at §7's repair.
+**Hash variable absent under Secure Boot** — NVRAM cleared — means `B` is gone
+too, so the TPM rung is dead regardless: the loader goes straight to recovery,
+which offers exactly the rungs that do not need `B`, says the boot is unattested,
+and points at §7's repair.
 
-**Grammar**, frozen: `[section]`, `key=value`, `#comment`; no includes,
-continuations, escapes or interpolation. Capped at 64 KB, read into a buffer one
-byte larger so the last byte is a permanent NUL.
+**Grammar**, frozen (INTERFACES §3.1): `[section]`, `key=value`, `#comment`; no
+includes, continuations, escapes or interpolation. Capped at 64 KB, read into a
+buffer one byte larger so the last byte is a permanent NUL. Unknown keys in a
+known section and duplicate keys are errors, so typos are loud.
 
 **Writes**: write `paguro.ini.new`, update the hash, rename; keep `paguro.ini.bak`
 for the *writer's* rollback during a rename. **The loader never reads `.bak`** —
@@ -3250,29 +3406,32 @@ installer (Windows)
     obtain the VMK via Windows' own protector
     prompt for a passphrase -> pass_hash
     Boot#### OptionalData
-      <- salt || VMK XOR
+      <- volume GUID || salt || VMK XOR
          HMAC(pass_hash, "paguro/bootstrap" || salt)
     set BootNext, reboot
     -- no paguro.ini is written --
 
 first boot (paguro.efi)
     delete the Boot#### entry -- first action
-    no .ini -> compiled-in defaults
+    no .ini: unlock the payload's volume,
+      take \paguro\'s only disk or UEFI image
     prompt, unwrap the VMK
-    B <- EFI_RNG_PROTOCOL, store boot-services-only
+    B <- EFI_RNG_PROTOCOL, store as PaguroB
     D <- EFI_RNG_PROTOCOL
+    author the first paguro.ini
     TPM2_Create  sealed = D
-      policy PCR 0/2/4/7/12 AND AuthValue
+      policy PCR 0/2/4/7/12 AND AuthValue,
+        PCR 12 computed from that .ini's load taint
       auth   HMAC(pass_hash, "paguro/tpm-auth")
-    write nothing; forward the results
+    write nothing; forward the .ini and the seal
 
 first boot (initrd)
     write paguro.ini and tpm_seal.bin
-    record the hash in firmware
+    set PaguroConfigHash
 ```
 
-**The first boot never parses unverified bytes**: with no `.ini` the loader uses
-compiled-in defaults and stages 1–2 do not run. **The `OptionalData` wrapping is
+**The first boot never parses unverified bytes**: there is no `.ini` to read, and
+the one it forwards is the one it authored. **The `OptionalData` wrapping is
 single-factor, and that is sound only because there is no oracle** — `B` cannot
 come from Windows, residue may outlive deletion, and none of it can be tested
 against a guess.
@@ -3284,7 +3443,8 @@ work at install and **`pass_hash` never crosses into Linux**. PCR values are
 still forwarded, as on every boot, for later re-seals.
 
 **If the first boot never happens**, the Windows task tears the bootstrap down on
-its next start; `paguro.efi` deletes it on a successful one. Setup says plainly
+its next start; `paguro.efi` deletes it as its first action, found through
+`BootCurrent`, even when its payload is malformed. Setup says plainly
 that the install is not finished until Linux has booted once.
 
 **Fallback: the BitLocker recovery key**, which the loader can use unaided. Not the
@@ -3292,22 +3452,30 @@ default — hunting for it mid-install is enough friction to make people abandon
 
 #### What crosses the handoff
 
-| Always | Only on a provisioning boot |
-|---|---|
-| the VMK | the new sealed object, wrapped VMK, salt |
-| the FVEK, FVE region offsets, boot-sector relocation | |
-| `B` | |
-| the verified `paguro.ini` bytes | |
-| PCR 0/2/4/7 as the loader read them | |
+A header and typed records, each bounded; an unknown or duplicated record is
+refused (INTERFACES §8):
+
+| Record | Carries | Why Linux needs it |
+|---|---|---|
+| `VOLUME` | the NTFS partition: GUID, first LBA, length | which device to build the views over |
+| `VMK`, `FVEK`, `FVE_LAYOUT` | the keys, and the metadata regions, boot-sector relocation and `encrypted_size` (absent on an unencrypted volume) | the decrypted volume's segment table (§4.3) and the module's reserved ranges |
+| `B` | 32 bytes | re-sealing without a reboot |
+| `PCRS` | PCR 0/2/4/7 as the loader read them | the same |
+| `CONFIG` | the verified `paguro.ini` bytes | everything else Linux reads from the configuration |
+| `IMAGE` | the chosen entry's root, and its `efi_disk` or `efi_file`: role, name, MFT record and sequence number | the files to claim — identities, never locations; the module derives the extents itself |
+| `STATE` | hibernation, dirty bit, configuration unverified, recovery path | read-only views, and what the screens say |
+| `RUNG` | which rung unlocked | re-sealing after a non-TPM rung, clearing `PaguroTpmBroken` |
+| `PROVISION` | new sealed object, wrapped VMK, salt | only on a provisioning boot |
 
 The FVEK and layout build the decrypted volume (§4.3), so booting Linux needs no
 second FVE parse. (Authoring the VM's substituted metadata does need one; it runs
-in userspace, and a wrong result only stops the VM booting.) `B` and the PCR values let Linux re-seal on a PIN change without a
-reboot. `pass_hash` never crosses.
+in userspace, and a wrong result only stops the VM booting.) `pass_hash` never
+crosses.
 
 **Mechanism:** `EfiRuntimeServicesData` pages (never `EfiBootServicesData`, which
 the kernel reclaims), located through a configuration table, read once by a small
-handoff driver and zeroed. **Not** the enforcement module, which never holds key
+handoff driver and zeroed — how that driver reaches the initrd is still open
+(§11 Q31). **Not** the enforcement module, which never holds key
 material. **Never** on the kernel command line, in a persistent variable,
 in diagnostics or in a file.
 
@@ -3318,16 +3486,16 @@ in diagnostics or in a file.
 | **Linux** | trial session computes the policy digest from the PCR values the loader recorded; seal a fresh `D'` with the new `auth`; rewrite `tpm_seal.bin` | immediately |
 | **Windows** | stage a one-shot `setupTPM` | the next Linux boot |
 
-Linux never needs to read a PCR: by the time userspace runs PCR 4 carries the UKI
-and PCR 12 is capped, but sealing a *fresh* `D'` against the **recorded** digest
-sidesteps recovering anything. The initrd records the loader's PCR values **every
-boot**, so they are never stale; they are public, and tampering with them costs
-at most one failed unseal.
+Linux never needs to read a PCR: by the time userspace runs PCR 4 carries the
+next image and PCR 12 is capped, but sealing a *fresh* `D'` against the
+**recorded** digest sidesteps recovering anything. The initrd records the
+loader's PCR values **every boot**, so they are never stale; they are public,
+and tampering with them costs at most one failed unseal.
 
 **Firmware updates**: §4.6's pre-flight compares the firmware-extended PCRs and the
 `dbx` portion of the event log against the recorded values, and stages `setupTPM`
 before the reboot. If the change lands between pre-flight and boot, the loader
-sets `paguro-tpm-broken` and offers *Start Windows*; the Windows app picks the flag
+sets `PaguroTpmBroken` and offers *Start Windows*; the Windows app picks the flag
 up and stages the same thing.
 
 ### Unlocking: escalation, not selection
@@ -3400,6 +3568,7 @@ permissive path, so signature checking cannot distinguish it.
 
 | Obligation | Enforced by |
 |---|---|
+| a UKI as the next image, never an editable boot menu | the entry's `efi` or `efi_file` names a UKI |
 | `lockdown=confidentiality` | signed kernel command line |
 | SysRq disabled, no KDB/KGDB | kernel build config |
 | IOMMU forced, Thunderbolt security | signed kernel command line |
@@ -3428,7 +3597,7 @@ unencrypted C: it is also the only way to encrypt Linux at all.
 ```text
 image
   +-- nested ESP (FAT32, plaintext)
-  |     <- the loader finds the UKI here, unchanged
+  |     <- the loader finds the next image here, unchanged
   \-- LUKS container
         \-- ext4 root
 ```
@@ -3497,17 +3666,39 @@ Q24 is answered, that bound does not cover FVE metadata.
 management are unavailable in VM sessions; they were never going to work against
 a different TPM.
 
-### Keeping the MOK private key out of Windows' reach
+### The machine MOK key
 
-Self-built kernels need a MOK signing key on the machine. Stored plainly in the
-image, a compromised Windows reads it and signs its own UKI. **Seal it to PCR 11
-as extended by systemd-stub** (`systemd-creds encrypt --with-key=tpm2`), a value
-Windows never reproduces.
+One key pair per machine, generated at install, signs everything paguro-side that
+shim must accept: `paguro.efi`, every DKMS build of the kernel module, and locally
+built UKIs (§4.1). **It is needed on both sides** — by the Windows tool for every
+later `paguro install`, since a new distribution needs its module and UKI signed,
+and by each Linux image for its own kernel updates — so each holds a copy
+(INTERFACES §11.6):
 
-**The limit, stated at its strength:** PCR 11 covers the measured UKI, not the
-mutable root, so a compromised Windows can still modify Linux userspace inside the
-image. Privileged compromise of either OS is machine compromise (§8); the LUKS
-tier is the answer for anyone who needs otherwise.
+| Copy | Where | Opt-in protection |
+|---|---|---|
+| Windows | `C:\ProgramData\paguro\mok\`: admin-only, inside the BitLocker volume | wrapped by the boot passphrase, or TPM-sealed |
+| each Linux image | `/etc/paguro/mok/`: root-only, inside the image | wrapped by the boot passphrase, or sealed to PCR 11 as systemd-stub extends it, a value Windows never reproduces |
+| Linux at runtime | root's kernel keyring, written to a `0600` file on `tmpfs` only while `sign-file` or `sbsign` runs | — |
+
+**Never on the ESP.** A private key wrapped by the boot passphrase is an offline
+guessing oracle for that passphrase — it can always be checked against the public
+certificate — so it must only be readable by whoever can already read the
+encrypted volume. On the ESP any unprivileged Linux process could run the
+dictionary attack the root gate exists to prevent. For the same reason the wrap
+uses its own KDF, Argon2id with its own label (`paguro/mok-wrap`), which makes
+the oracle expensive rather than merely present.
+
+**What each option protects, stated at its strength.** The passphrase wrap
+protects the key at rest, and against a compromised Windows until the passphrase
+is typed into it — which installing another distribution asks for. The Windows
+TPM seal protects only against the disk being read elsewhere: any admin process
+in a running Windows can unseal it. The PCR 11 seal keeps the Linux copy from a
+Windows reading the image offline. None of them outranks the rest of the design:
+PCR 11 covers the measured UKI, not the mutable root, so a compromised Windows can
+still modify Linux userspace inside the image. Privileged compromise of either OS
+is machine compromise (§8); the LUKS tier is the answer for anyone who needs
+otherwise.
 
 ### A standing seal, not a one-shot one
 
@@ -3528,7 +3719,9 @@ acceptance test, not asserted.
 
 | Item | Added or modified |
 |---|---|
-| `paguro.efi`, `paguro.ini` and the `*_seal.bin` files on the ESP; `B`, `paguro-config-hash` and `S` in firmware | added |
+| `\EFI\paguro\` on the ESP: shim, MokManager, `paguro.efi`, `paguro.ini`, the `*_seal.bin` files | added |
+| `PaguroB`, `PaguroConfigHash`, `PaguroSetup`, `PaguroTpmBroken` in firmware | added |
+| the machine key's certificate in `MokList`; its private key on C: | added |
 | the image file(s) on C:, wherever `paguro.ini` names them | added |
 | the minifilter | added |
 | transition app, scheduled task | added |
@@ -3573,8 +3766,9 @@ Partial-state cases, most of which the additive property answers on its own:
               transition app
 2. firmware -- remove the Boot#### entry,
               restore BootOrder
-3. ESP      -- remove paguro.efi, paguro.ini, *_seal.bin;
-              delete paguro-config-hash and S
+3. ESP      -- remove \EFI\paguro\;
+              delete PaguroConfigHash, PaguroSetup,
+              PaguroTpmBroken and the MOK private key
 4. driver   -- mark for removal, reboot
 5. driver   -- remove from the DriverStore
 6. disk     -- delete the image file(s)
@@ -3584,11 +3778,14 @@ Step 4 is the only thing that cannot be done live, which makes uninstall a
 two-phase operation with one reboot — hence a resumable tool rather than a
 script.
 
-**`B` cannot be deleted from any operating system**, because it is boot-services-only
-(§6). Uninstall therefore offers one final boot of `paguro.efi` with a runtime
-`paguro-uninstall` flag set, in which the loader deletes `B` and resets straight
-back to Windows — before step 3 removes the loader. Skipped, `B` stays behind as
-32 inert bytes, and the uninstaller says so.
+**`PaguroB` cannot be deleted from any operating system**, because it is
+boot-services-only (§6), and **a `MokList` entry is removed only through
+MokManager.** Uninstall therefore offers one final boot through our shim, before
+step 3 removes it: the Windows tool queues the machine certificate in shim's
+`MokDel`, MokManager asks once to confirm, and `paguro.efi`, finding a one-shot
+runtime uninstall request, deletes `PaguroB` and resets straight back to Windows.
+Skipped, `PaguroB` stays behind as 32 inert bytes and the certificate as a trust
+anchor for a private key that no longer exists; the uninstaller says so.
 
 The surface is six deletions and a reboot, and the additive property means none of
 them can leave the machine in a state worse than "partly removed".
@@ -3615,14 +3812,14 @@ must be gone:
 | Surface | Checked |
 |---|---|
 | `Boot####` entries and `BootOrder` | ours removed, others untouched |
-| ESP contents | `paguro.efi`, `paguro.ini`, the `*_seal.bin` files |
+| ESP contents | `\EFI\paguro\` gone, nothing else changed |
 | DriverStore | the minifilter, and its service registration |
 | services and scheduled tasks | transition app, repair hook |
 | BitLocker protectors | **none added** under §6, so none to remove — assert that |
 | BCD | unmodified |
-| Secure Boot state, enrolled MOK | as found |
-| TPM objects | our persistent parent handle removed (sealed objects are files) |
-| firmware variables | `paguro-config-hash`, `S`, `paguro-tpm-broken` gone; `B` gone if the final uninstall boot ran, otherwise documented as 32 inert bytes |
+| Secure Boot state, `MokList` | as found: the machine certificate removed if the final boot ran |
+| TPM objects | **none persisted** — the parent is re-created each boot and sealed objects are files — assert that |
+| firmware variables | `PaguroConfigHash`, `PaguroSetup`, `PaguroTpmBroken` gone; `PaguroB` gone if the final uninstall boot ran, otherwise documented as 32 inert bytes |
 | image files | deleted, space returned |
 | registry | `MountedDevices` and anything else touched |
 
@@ -3639,21 +3836,23 @@ reconciles when they differ.
 
 | Drift | Cause |
 |---|---|
-| `paguro.efi` removed, ESP rewritten | feature updates run `bcdboot` |
+| `\EFI\paguro\` removed, ESP rewritten | feature updates run `bcdboot` |
+| **our shim revoked** | an SBAT or `dbx` update revokes that distribution's shim build. Install the distribution's replacement; our trust is the machine key, so nothing else changes |
 | a `*_seal.bin` removed from the ESP | same. **Convenience, not access**: the TPM rung is lost until repaired, but recovery and the other rungs still work |
 | boot order reset, entry demoted | same |
 | Fast Startup re-enabled | feature updates reset it |
 | TPM seal broken | firmware update changes PCR 0 |
 | **TPM seal broken, Secure Boot untouched** | a **`dbx` revocation update** — shipped through Windows Update, so a *routine* cause. PCR 7 moves; the pre-flight (§4.6) usually predicts it, the hook stages a one-shot `setupTPM`, and the next Linux boot re-seals |
-| **TPM seal broken after enrolling a MOK** | self-signed deployments (§12) enrol one at install and on key rotation; shim measures it into PCR 7 or 14 depending on version. Same handling |
-| **`B` missing from firmware** | NVRAM cleared — dead CMOS battery, board replacement, firmware recovery, or a supervisor-password reset. **The `tpm` rung is dead** and `paguro-config-hash` is gone with it; repair is one Windows boot re-running the bootstrap (below), and the hook should offer it unprompted |
+| **TPM seal broken after a MOK change** | the machine key is enrolled once, at install (§4.1); a rotation or another tool's key changes `MokList`, which shim measures into PCR 7 or 14 depending on version. Same handling |
+| **`PaguroB` missing from firmware** | NVRAM cleared — dead CMOS battery, board replacement, firmware recovery, or a supervisor-password reset. **The `tpm` rung is dead** and `PaguroConfigHash` is gone with it; repair is one Windows boot re-running the bootstrap (below), and the hook should offer it unprompted |
 | BitLocker state changed | user action or policy |
 | **clear key removed, protection activated** | the user signed in with a Microsoft or Entra account — **provision the seal now**, or boot silently becomes boot-with-a-prompt for no visible reason (§6) |
 | **Linux password changed without the seal following** | PAM hook failed — must be surfaced, not logged |
 | an image relocated | native defrag — harmless; the next Linux boot re-derives the map |
 
-**Auto-repair silently:** re-copy `paguro.efi`, re-create the UEFI boot entry,
-restore boot order — all byte-identical restorations from saved copies.
+**Auto-repair silently:** re-copy shim, MokManager and the already signed
+`paguro.efi`, re-create the UEFI boot entry, restore boot order — all
+byte-identical restorations from saved copies, needing no key.
 
 **Windows does not re-seal; it stages.** Sealing needs PCR values only the loader
 can read, and `TPM2_Create` may not be reachable from Windows user mode at all.
@@ -3661,15 +3860,17 @@ So the task stages a one-shot `setupTPM` and the next Linux boot re-seals. That
 boot unlocks through `setupTPM`, which is exactly its job.
 
 **The one exception is `B`, and the repair is to re-run the bootstrap.** When
-NVRAM has been cleared, `S` and `paguro-config-hash` are gone with `B`, so the
-cleanest repair is exactly what the installer does:
+NVRAM has been cleared, `PaguroSetup`, `PaguroConfigHash` and usually `MokList`
+are gone with `PaguroB`, so the cleanest repair is exactly what the installer
+does:
 
 ```text
 obtain the VMK via Windows' own BitLocker protector
     (unaffected -- PCR 7 did not move)
+MokList lost: queue the machine key in MokNew again
 prompt for the Linux passphrase -> pass_hash
 Boot#### OptionalData
-  <- salt || VMK XOR
+  <- volume GUID || salt || VMK XOR
      HMAC(pass_hash, "paguro/bootstrap" || salt)
 BootNext, reboot
 ```
@@ -3742,9 +3943,10 @@ is destroyed user data.** The supported configuration for a first release:
 | **edition** | **Pro or better for seamless windows.** Home installs and runs, but cannot host RemoteApp, so Windows applications appear in a full-desktop window rather than as individual ones (§5b) |
 | firmware | UEFI, Secure Boot on |
 | TPM | 2.0 present |
-| BitLocker | **off**, or XTS-AES fully or used-space-only encrypted — **not** CBC+Elephant, not mid-conversion (§6, §11 Q25) |
+| **WSL2** | **required** — the install runs there (below) |
+| BitLocker | **off**, or XTS-AES encrypted, fully or with a paused conversion — **not** CBC+Elephant, not a region mid-conversion; used-space-only once §11 Q25 is answered, refused until then (§6) |
 | disk | single, GPT, with `C:` on it |
-| distros | one or two, built by us (below) |
+| distros | one or two, each installed by its own installer through an adapter (below) |
 | GPU | whichever backend reaches its milestone first |
 | machines | personally owned (§8) |
 
@@ -3752,23 +3954,54 @@ Everything outside that is refused at install with a reason, not attempted and
 hoped for. Widening happens after the storage gate (§11) has survived, one axis
 at a time.
 
-### Bundled install, a few supported images
+### Install from Windows, through WSL2, with the distribution's own installer
 
-Setup writes the image itself, from a short supported list — so installing paguro
-does not mean installing a distribution. Self-configuration on an arbitrary distro
-stays possible, with the drivers and initrd hardening installed by hand and
-unsupported.
+`paguro install <distro>` runs in Windows, and **no distribution installer ever
+runs against the real disk, and no ISO is ever booted** (INTERFACES §11.4). A
+stock installer on bare metal would see the physical disk with Windows on it, and
+a stock live initramfs cannot find its media inside a VHD inside NTFS, or behind
+BitLocker. Inside WSL2 the only disk an installer can see is the one we attach:
 
-This is load-bearing for §6, not merely convenient: *"this initrd has no path
-that drops to a shell"* is an auditable claim only over initrds we build. It also
-bounds the shim + MOK signing permutations in §4.1.
+```text
+paguro install <distro>                  (Windows, admin)
+  export the host's hardware             PCI/USB/ACPI/DMI IDs
+  create a fixed VHD                     diskpart; works on Home
+  wsl --mount --vhd --bare               the only extra disk in WSL2
+  the distribution's ISO, verified       SHA256SUMS and its signature
+  its live system as a container         systemd-nspawn, the VHD its
+                                         only real disk, WSLg for the GUI
+  its own installer, writing a paguro-ready system
+  wsl --unmount; the bootstrap Boot#### entry (§6)
+```
+
+**The installer writes the right system itself; there is no step after it.** Its
+copy source is an overlay holding only paguro's own packages as real packages —
+`paguro` (the kernel module and the initramfs hook) and the Windows VM stack — so
+its own initramfs step picks the hook up; its boot loader is configured through
+the distribution's own settings never to write `Boot####` entries and to install
+to the removable-media path. **paguro picks no drivers and no firmware**: the
+hardware export becomes a synthetic sysfs, inside the installer's container only,
+so the installer's own detection (Ubuntu's third-party drivers, Debian's firmware
+checks) chooses them for the real machine rather than for Hyper-V's synthetic one.
+
+**What the supported list bounds is adapters, not builds**: per distribution,
+where its installer reads its source, its boot-loader settings, and a hook if the
+package list alone does not reach the initramfs step. A distribution without an
+adapter falls back to a scripted bootstrap (debootstrap, `dnf --installroot`,
+pacstrap) into the same VHD. Stock images mean stock initramfs code, which is why
+the default profile does not rely on *"this initrd has no path that drops to a
+shell"* (§6: the PIN is in front of it), and the opt-in TPM-only profile carries
+that obligation explicitly.
+
+**The loader has no ISO support.** ISOs are opened in WSL2 at install time; a
+Linux that wants one later mounts it from a claimed file with `isofs`.
 
 ### One mode: paguro boots distro images
 
 **There is one thing paguro boots — a full Linux install in an image file**, with
-its own GPT, ESP, kernel, drivers and firmware. That image is a normal
-distribution; paguro supplies the storage and the bootloader and gets out of the
-way.
+its own disk layout, boot loader, kernel, drivers and firmware. That image is a
+normal distribution plus one package; paguro supplies the storage and the first
+boot loader and gets out of the way.
 
 **paguro does not maintain an operating system.** A paguro-built host running
 rootfs images as containers, with our own driver layer and compositor, would put
@@ -3854,14 +4087,14 @@ one into shortcuts to a VM the host already runs.
 
 **It is replaceable.** A user who installs their own Ubuntu into an image gets the
 same machine; nothing above the block layer depends on which distribution is in
-it. Multi-image support (§2) means both can exist at once, and an ISO mounted from
-NTFS can install a third.
+it. Multi-image support (§2) means both can exist at once, and `paguro install`
+adds a third.
 
 > **A trade worth recording: the host is not immutable.** A read-only,
 > dm-verity host whose root hash sits in the signed UKI would make the OS as
 > trusted as the UKI. A Debian install is not that, and the design accepts the
 > loss in exchange for *"Debian maintains the OS"* — the measured boot path ends
-> at the UKI (§6, MOK key limits).
+> at the UKI (§6, The machine MOK key).
 
 ### WSL mode — the on-ramp, before any of this exists
 
@@ -3946,7 +4179,9 @@ the formats are, and it is the risk that survives every technical answer.
 | **A metadata watch in the module** | Re-decoding the runlist and `$Bitmap` on every write is unnecessary once reads of the image return `EIO` — a relocation cannot copy, so it never logs a runlist change (§4.3). |
 | **Zero-fill for protected reads** | Turns a rejected relocation into a destroyed filesystem after native log replay (§4.3). |
 | **One `dm-crypt` target per extent** | A full `crypt_config` each; thousands of extents means thousands of kthreads. Decrypt the volume once and gather instead (§4.3). |
-| **A signed `paguro.ini`** | Needs an on-machine private key; the whole-file hash in firmware plus the PCR 12 ratchet do the job without one (§6). |
+| **A signed `paguro.ini`** | Needs a verifier in stage 1 and a private key every writer holds; the whole-file hash in firmware plus the PCR 12 ratchet do the job without either (§6). |
+| **A project certificate, or a Microsoft-signed `paguro.efi`** | Unnecessary: every distribution's signed shim trusts `MokList`, so one machine key, enrolled once, signs everything paguro-side, and a revoked shim is replaced without touching our trust (§4.1). |
+| **ISO support in the loader** | A third on-disk format parsed with the key in memory, for images a stock live initramfs could not boot from NTFS anyway. ISOs are opened in WSL2 at install (§8b). |
 | **External theme files** | A parser of attacker-authored data in the loader; compiled in instead (§4.2). |
 | **A paguro-maintained host OS** | Puts kernel, drivers and hardware support on this project forever (§8b). |
 | **Disabling code integrity at runtime to load a driver** | The mechanism does not exist. `testsigning` is read by `winload.efi` at boot; there is no supported runtime toggle. Live relaxation means patching `g_CiOptions` via a vulnerable signed driver — BYOVD, the exact pattern EDR is built to detect. See §12. |
@@ -3956,7 +4191,7 @@ the formats are, and it is the risk that survives every technical answer.
 | **Secure Boot off to permit unsigned drivers** | Does not work. Kernel-mode code signing is **independent** of Secure Boot on x64. Only test-signing, F8, or a kernel debugger allow it. |
 | **One-shot seal as the *only* unlock** | Couples Linux's bootability to Windows working. The PIN bypass is one-shot, but it sits on top of a standing seal (§6). |
 | **Removing the initrd shell under TPM+PIN** | The shell sits behind the PIN, so it is the legitimate user's repair tool; hardening it away buys nothing (§6). |
-| **UKI on the ext4 root instead of a nested FAT32 ESP** | Requires an ext4 reader that FAT32 does not — firmware supplies FAT for free via a synthetic `BlockIo` + `ConnectController()`. Also fights every UKI tool's vfat/type-GUID check, and inherits ext4's record of new INCOMPAT flags bricking read-only bootloader parsers. See §4.2. |
+| **An ext4 reader in the loader, for a UKI on the root** | Requires filesystem code that FAT32 does not — firmware supplies FAT for free via a synthetic `BlockIo` + `ConnectController()`, and a distribution's GRUB behind it reads ext4 with its own modules. Also fights every UKI tool's vfat/type-GUID check, and inherits ext4's record of new INCOMPAT flags bricking read-only bootloader parsers. See §4.2. |
 | **Hosting the UKI on the real ESP (thin bootloader)** | Tempting — it would delete the NTFS and BitLocker readers from `paguro.efi`. Rejected: Windows ESPs are often exactly 100 MB and a UKI with a cryptsetup/dm/ntfs3 initrd is 50–150 MB, and **filling the ESP breaks Windows feature-update staging**. **Consequence: the bootloader keeps its NTFS and BitLocker readers.** |
 | **`ntfsfix` to clear the dirty bit and continue** | Not chkdsk. Clearing the flag suppresses the repair that would have caught real inconsistency, and resetting `$LogFile` discards uncommitted transactions. Refuse instead. |
 
@@ -3964,7 +4199,8 @@ the formats are, and it is the risk that survives every technical answer.
 
 ## 11. Open questions — verify before building
 
-Every entry maps to §3a. Ordered by what blocks what.
+Every entry maps to §3a. Ordered by what blocks what; numbers are stable, so a
+later question sits with the ones it belongs to rather than in numeric order.
 
 ### The storage gate — build the torture harness before anything else
 
@@ -4051,21 +4287,27 @@ Every entry maps to §3a. Ordered by what blocks what.
    the VM without an automatic unlock: the fallback is the recovery password typed
    at the guest's BitLocker prompt on every VM boot — workable, and bad enough that
    this is effectively a gate on the VM path.
-10. **Does the substituted VMK entry round-trip through libbde?** (§6) Build this
-   oracle first — synthesised metadata plus `.BEK` in, correct VMK out — so a
-   format change is a failing test rather than a field failure.
+10. **Does the substituted VMK entry round-trip through libbde?** (§6) The oracle
+   harness exists: generated BitLocker volumes with every supported protector,
+   startup key included, are decrypted by libbde and dislocker in CI, and the
+   loader already parses `.BEK` files. What remains is the substituted
+   ExternalKey entry itself — synthesised metadata plus `.BEK` in, correct VMK
+   out — so a format change is a failing test rather than a field failure.
 11. **Does `ConnectController()` bind firmware's Partition and FAT drivers to an
-   application-installed synthetic `BlockIo` handle?** (§4.2) Selects a tier —
-   zero versus ~500 lines of filesystem code. Also confirm the FAT driver's small
-   random-read pattern survives per-sector AES-XTS, or add a block cache.
-12. **Can Linux create and evict a TPM persistent handle for the parent key?**
-    (§6) The **parent**, not the sealed object: a loadable object lives entirely
-    outside the TPM, so persisting it would spend scarce TPM NV on something that
-    is happy in a file. Persisting the parent makes each boot a cheap `TPM2_Load`.
-    Windows may hold `ownerAuth` — the same class of question as `NV_DefineSpace`,
-    which turned out blocked. The same experiment should say whether Linux can
-    define a **monotonic NV counter**, the only construction that closes
-    configuration rollback (§6).
+   application-installed synthetic `BlockIo` handle?** (§4.2) **Answered for
+   OVMF and AAVMF: yes** — tier 1 binds, and stage 4 chains through it end to end
+   in CI on x86_64 and aarch64. Real firmware is still to test; one that does not
+   bind is a clean refusal until tier 2 (~500 lines) exists. Also confirm the FAT
+   driver's small random-read pattern survives per-sector AES-XTS on real
+   hardware, or add a block cache.
+12. **Can a persistent SRK stand in for the re-created parent?** (§6) The parent
+    is created from the TCG-standard template on each use and never persisted, so
+    Windows and Linux reproduce it without an NV handle (INTERFACES §4). Where a
+    persistent SRK already exists, loading under it is cheaper; whether both OSes
+    can rely on it, with Windows holding `ownerAuth`, is the same class of
+    question as `NV_DefineSpace`, which turned out blocked. The same experiment
+    should say whether Linux can define a **monotonic NV counter**, the only
+    construction that closes configuration rollback (§6).
 
 12b. **Can Windows create a sealed object with `TPM2_PolicyCounterTimer`?** (§6,
     the PIN bypass) Decides whether the TPM enforces the deadline directly or the
@@ -4073,7 +4315,7 @@ Every entry maps to §3a. Ordered by what blocks what.
     and `TPM2_ReadClock` reachability rides along with it — a no-auth read, so
     probably permitted, and answerable in the same afternoon as Q14.
 13. **Do boot-services-only UEFI variables behave as specified, on real
-    firmware?** (§6, `B`) Three things to confirm per machine: that the variable
+    firmware?** (§6, `PaguroB`) Three things to confirm per machine: that the variable
     **persists** across reboot; that it is genuinely **absent at runtime** in both
     Windows and Linux rather than merely undocumented; and that writing one from an
     EFI application does not require Setup Mode. A "no" on any of them drops `B`
@@ -4095,6 +4337,23 @@ Every entry maps to §3a. Ordered by what blocks what.
     The wrapped VMK there is unverifiable without an oracle, so residue is not
     load-bearing — but confirm that, rather than assume it, on firmware that
     compacts its variable store lazily.
+26. **Does the chosen shim start a MOK-signed second stage named in its load
+    options?** (§4.1) Shim builds differ; a build that ignores them gets
+    `paguro.efi` under its default second-stage name instead. Confirm per shim
+    the installer ships, x64 and aa64.
+27. **Does GRUB carry on when its writes fail?** (§4.2) `save_env` and
+    `recordfail` meet `EFI_WRITE_PROTECTED` on the published disk. Confirm per
+    supported distribution that GRUB boots regardless, rather than stopping at a
+    prompt.
+28. **Does a distribution's shim start from under ours?** (§4.2) paguro, itself
+    started by shim, `LoadImage`s the distribution's shim, which verifies GRUB and
+    the kernel with the distribution's key. It needs Microsoft's third-party UEFI
+    CA in `db` and a shim that tolerates an existing `SHIM_LOCK` protocol.
+29. **How are MOK-signed next images accepted after `paguro.efi`?** (§4.2)
+    Firmware `LoadImage` checks `db` only, so a locally signed UKI needs shim's
+    `LoadImage` hook (recent shim) or `SHIM_LOCK->Verify()` followed by loading the
+    PE ourselves — sound only because verification ran first. Decide which, per
+    shim version.
 
 ### Deploying the driver
 
@@ -4127,8 +4386,12 @@ Every entry maps to §3a. Ordered by what blocks what.
 
 23. **Does a fixed VHD satisfy both consumers?** (§8b) `wsl --mount --vhd`
     against one, and paguro's extent mapping against the same file. Confirm the
-    footer geometry, that growth by extend-and-rewrite-footer keeps both working,
-    and that WSL2 can be made to create instances fixed rather than dynamic.
+    footer geometry, and that growth by extend-and-rewrite-footer keeps both
+    working.
+30. **Can the WSL2 kernel host a distribution's installer?** (§8b) It must mount
+    ISO 9660 and squashfs (fallback: `squashfuse`, `bsdtar`); partition nodes the
+    installer creates on the VHD must appear inside its container; and the
+    installer's GUI must work over WSLg.
 
 ### Design gaps to close before building
 
@@ -4141,12 +4404,23 @@ Every entry maps to §3a. Ordered by what blocks what.
     intact" bound**, and it is a design decision rather than an experiment.
 
 25. **Used-space-only encryption.** Device Encryption's default. Those volumes
-    report a distinct conversion state the loader must classify correctly rather
-    than refuse — §8b's v1 matrix admits them on the strength of this answer.
+    report a distinct conversion state; the loader identifies it and refuses the
+    volume until the unused regions are classified correctly. §8b's v1 matrix
+    admits them on the strength of this answer.
+
+31. **How does Linux read the handoff?** (§6, INTERFACES §8.2) A small module or
+    early init code reads the configuration table once and zeroes it; what it
+    exposes to the initrd — for example a read-once `/dev/paguro-handoff` — is
+    still to be decided. It must stay out of the enforcement module, which holds
+    no key material.
 
 ---
 
 ## 12. Driver signing
+
+This section is about the Windows side. **The Linux side is settled by one key**:
+the kernel module is built by DKMS on the machine and signed with the machine MOK
+key, as are `paguro.efi` and locally built UKIs (§4.1, §6 The machine MOK key).
 
 §4.4's minifilter is mandatory, so this section is live: **attestation signing is
 the plan**, and the rest documents the fallback and what **not** to do.
