@@ -166,5 +166,29 @@ public class FlowTests
     }
 }
 
+/// <summary>Every screen against a real service (PAGURO_GUI_TOUR_PIPE, e.g.
+/// "paguro" in the local Windows VM): the real machine's checks, hardware,
+/// Secure Boot state. Read-only; nothing is changed.</summary>
+[Collection("gui")]
+public class TourTests
+{
+    [Fact]
+    public void Tour_of_a_real_service()
+    {
+        var pipe = Environment.GetEnvironmentVariable("PAGURO_GUI_TOUR_PIPE");
+        if (string.IsNullOrEmpty(pipe)) return;
+        using var g = new GuiApp(realPipe: pipe);
+        g.FindName(g.S["check_uefi"], seconds: 60);
+        g.Shot("real-checks");
+        foreach (var p in new[] { "distributions", "hardware", "protection", "secureboot", "restart", "uninstall" })
+        {
+            g.Go(p);
+            Assert.Equal(g.S[$"{p}_title"], g.Find("PageTitle").Name);
+            Thread.Sleep(2500);
+            g.Shot("real-" + p);
+        }
+    }
+}
+
 [CollectionDefinition("gui", DisableParallelization = true)]
 public class GuiCollection { }

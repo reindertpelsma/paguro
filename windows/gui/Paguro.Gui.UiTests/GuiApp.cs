@@ -34,7 +34,8 @@ public sealed class GuiApp : IDisposable
     public Strings S { get; }
     public string Lang { get; }
 
-    public GuiApp(string lang = "en", Action<FakeServer>? setup = null, string caller = """{"user":"PC\\me","admin":true,"elevated":false}""")
+    /// <summary>Against a real service on <paramref name="realPipe"/> (null: a fake one).</summary>
+    public GuiApp(string lang = "en", Action<FakeServer>? setup = null, string caller = """{"user":"PC\\me","admin":true,"elevated":false}""", string? realPipe = null)
     {
         Lang = lang;
         S = Strings.Load(lang);
@@ -43,7 +44,7 @@ public sealed class GuiApp : IDisposable
         Server.OnData("service.info", $$"""{"api_version":"1.0","service":true,"caller":{{caller}},"methods":[]}""");
         setup?.Invoke(Server);
         var psi = new ProcessStartInfo(Exe) { UseShellExecute = false };
-        psi.Environment["PAGURO_PIPE"] = Server.PipeName;
+        psi.Environment["PAGURO_PIPE"] = realPipe ?? Server.PipeName;
         psi.Environment["PAGURO_LANG"] = lang;
         psi.Environment["PAGURO_GUI_NO_RUN"] = "1";
         psi.Environment["PAGURO_KLID"] = "0000040C";
