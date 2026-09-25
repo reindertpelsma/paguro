@@ -2249,27 +2249,38 @@ The pieces, cheapest first:
 4. **The balloon** stays the last resort, and host memory limits (a cgroup for
    the VM) keep the worst case bounded.
 
-**Lending freed pages to Linux as cache only — the guarantee comes from the
-VM's cgroup.** The VM gets a memory cgroup with `memory.min = memory.max =` its
-size: a pool nothing else on the host can take. Inside it live the guest's RAM
-and the host page cache of the guest's own disk. When Windows drops cache and
-the pages are discarded (above), the host cache of that same disk fills the
-room — Windows' cache has moved out of Windows into Linux, still serving its
-reads. When Windows needs the memory back, reclaim inside the cgroup drops that
-cache, and it is always instantly droppable because the VM's disk runs
-write-through, so every cached page is clean. Host programs can never grow into
-the pool, so the guest can never be starved.
+**One pool for both systems: working memory is reserved, cache is shared.**
+The aim is WSL2's model in both directions — one machine's RAM, used by
+whichever side needs it, with only signalling between them. The invariant that
+makes it safe needs no per-page bookkeeping:
 
-What the stock kernel cannot guarantee is lending those pages to *arbitrary*
-host caches: cgroups limit anonymous and file memory together, so "may only be
-used as cache" is enforceable only for the pool's own cache. That would take
-kernel work — the retired cleancache interface had this shape.
+| | Reserved (never lent) | Shared |
+|---|---|---|
+| Windows | its working set, up to the VM's size | its standby cache |
+| Linux | its working memory, up to RAM − the VM's size | its page cache |
 
-A cleverer scheme — a guest driver keeping known-zero pages in Windows' cache
-and a KVM module trapping writes to them — was considered: (1) already provides
-the host half, and the guest half would fight Windows' memory manager (page
-combining, compaction, repurposing) through undocumented behaviour for a gain
-(3) mostly delivers.
+Anything beyond a side's working memory can only be cache, so whatever one side
+needs back can always be taken from cache — never from the other side's working
+memory:
+
+- **Linux needs memory**: its own page cache drops instantly; then Windows' cache
+  is reclaimed by the graded standby purge and the freed pages discarded
+  (above) — fast, but not instant, which is why Linux's working memory is
+  reserved rather than borrowed.
+- **Windows needs memory**: it touches its pages, and Linux supplies them by
+  dropping page cache — clean cache is freed without I/O; swap (16 GB here) is
+  the backstop, never an OOM kill.
+- **The barriers are only signals**: free-page reporting or KSM for what Windows
+  releases, the guest agent's purge for what Linux asks back, PSI to decide when.
+
+**Keeping Linux's working memory inside its reservation** is the one part the
+stock kernel does not do directly: cgroups limit anonymous and file memory
+together. A small host daemon watches anonymous usage (`memory.stat`) and
+applies `memory.high` to Linux's workloads before it would cross RAM − the VM's
+size, so the pressure lands on Linux's own processes (reclaim, then swap)
+instead of on the guest. The page cache stays free to fill everything else,
+including memory Windows has released. The kernel's retired cleancache interface
+was a per-page version of the same idea; the invariant makes it unnecessary.
 
 ### 4.6 Windows-side transition app
 
