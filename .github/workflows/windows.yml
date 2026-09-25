@@ -196,11 +196,13 @@ jobs:
           if ((fltmc filters) -match 'PaguroFlt') { throw 'inert driver registered a filter' }
           test\pgflt_test.exe inert
           if ($LASTEXITCODE) { throw 'pgflt_test inert' }
+          # Not registered with the filter manager, so fltmc cannot unload it
+          # (0x801f0013, filter not found); sc stop is its unload path.
           "fltmc unload on the inert driver (informational):"
           fltmc unload PaguroFlt; "exit $LASTEXITCODE"
           sc.exe stop PaguroFlt
           sc.exe query PaguroFlt
-          if ((sc.exe query PaguroFlt) -notmatch 'STOPPED') { throw 'inert driver did not stop' }
+          if (-not ((sc.exe query PaguroFlt | Out-String) -match 'STOPPED')) { throw 'inert driver did not stop' }
       - name: load ACTIVE (Debug build, Parameters\ForceVmMode=1) and run every deny path
         shell: pwsh
         working-directory: windows/minifilter
