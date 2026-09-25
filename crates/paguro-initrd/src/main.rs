@@ -7,7 +7,6 @@
 //!                                  the boot path (below); writes F
 //!                                  (default /run/paguro/root.env)
 //! paguro-initrd status             /dev/paguro's volumes and claims
-//! paguro-initrd plan-vmdisk        the VM disk sandwich (example)
 //! ```
 //!
 //! `setup` (DESIGN.md §4.3, §6; INTERFACES.md §5, §8, §10): reads the
@@ -26,14 +25,11 @@
 //! `PaguroConfigHash` and `tpm_seal.bin` on a provisioning boot.
 //!
 //! Everything that is pure — tables, layouts, root choice — lives in
-//! `plan` and is unit-tested; the rest is thin system-call glue.
+//! `plan` and is unit-tested; the rest is thin system-call glue. The
+//! modules are a library too: `paguro-vm` (the VM launcher) builds its
+//! device-mapper tables and talks to `/dev/paguro` through them.
 
-mod dm;
-mod esp;
-mod pg;
-mod plan;
-mod setup;
-mod sys;
+use paguro_initrd::setup;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -43,7 +39,7 @@ const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 
 fn usage() -> ! {
     eprintln!(
-        "usage: paguro-initrd systab | setup [--env FILE] [--handoff DEV] [--wait SECS] [--no-esp] | status | plan-vmdisk"
+        "usage: paguro-initrd systab | setup [--env FILE] [--handoff DEV] [--wait SECS] [--no-esp] | status"
     );
     std::process::exit(2);
 }
@@ -80,20 +76,6 @@ fn main() {
                 }
             }
             setup::run(&o)
-        }
-        Some("plan-vmdisk") => {
-            let t = plan::vm_disk_table(&plan::VmDisk {
-                gpt_head: "/dev/loop0",
-                esp: "/dev/loop1",
-                msr: "/dev/loop2",
-                volume: "/dev/mapper/paguro-b",
-                gpt_tail: "/dev/loop3",
-                esp_sectors: 409_600,
-                msr_sectors: 32_768,
-                volume_sectors: 1_000_000_000,
-            });
-            print!("{t}");
-            Ok(())
         }
         _ => usage(),
     };

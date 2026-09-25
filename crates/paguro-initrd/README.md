@@ -6,11 +6,12 @@ them to the kernel module, and writes/records the seal files and PCR values
 the loader reads on the next boot. Runs on Linux, in the initrd (standard
 `std`, not `no_std` — this is systemcall glue, not the pure-logic layer).
 
-Four subcommands: `systab` (the EFI system table's address, for `modprobe
+Three subcommands: `systab` (the EFI system table's address, for `modprobe
 paguro-handoff systab=`), `setup [--env F] [--handoff DEV] [--wait S]
 [--no-esp]` (the boot path below; writes F, default `/run/paguro/root.env`),
-`status` (`/dev/paguro`'s volumes and claims), `plan-vmdisk` (the VM disk
-sandwich, as an example).
+and `status` (`/dev/paguro`'s volumes and claims). The modules are also a
+library, which `paguro-vm` (the VM launcher) uses for its device-mapper
+tables and `/dev/paguro`.
 
 ## Its place in paguro
 
