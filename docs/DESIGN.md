@@ -4278,16 +4278,38 @@ Windows, sealed to the same PCRs as the standing TPM + PIN slot, refused when
 exist, and one-shot — the initrd removes it after use, and the Windows service
 removes any stale one at its next start.
 
-**The PCRs must cover the command line.** Getting a shell in a LUKS initrd
-before unlock is trivial (`init=/bin/sh` from the boot menu, the emergency
-shell), much as WinRE is on a Windows laptop — and Secure Boot does not stop it.
-Without a PIN such a shell must gain nothing. The standing TPM + PIN slot is
-safe regardless, because it needs the PIN and the TPM's lockout applies. The
-bypass has no PIN during its window, so it is sealed to the PCRs that measure
-the kernel command line and boot chain — PCR 8/9 under GRUB, PCR 11/12 under
-systemd-stub — together with PCR 7: an edited command line then cannot unseal
-it. After unlock, the volume key is measured into PCR 15 (`tpm2-measure-pcr`),
-so nothing later in the boot can unseal again.
+**No key ever enters the TPM.** A LUKS keyslot encrypts the volume key with a
+key derived from a passphrase; `systemd-cryptenroll` seals a random secret that
+*is* that passphrase, and the bypass seals `K` the same way — as paguro seals
+`D` and never the VMK. Unsealing yields a way to open one keyslot, not the key
+that encrypts the disk.
+
+**The ratchet has to be configured; LUKS supplies the parts.** Getting a shell
+in a LUKS initrd before unlock is trivial (`init=/bin/sh` from the boot menu,
+the emergency shell), much as WinRE is on a Windows laptop, and Secure Boot does
+not stop it. What makes such a shell worthless is the same pattern paguro's
+loader uses — seal against a PCR that is extended once the key exists, and
+extend it before any shell:
+
+| Part | Provided by | paguro's configuration |
+|---|---|---|
+| measure the volume key into PCR 15 after unlock | `systemd-cryptsetup`, `tpm2-measure-pcr=yes` in crypttab | set |
+| refuse unseal once PCR 15 moved | binding PCR 15 **to its zero value** at enrolment (`--tpm2-pcrs=7+15:sha256=00…0`) | set; not a distribution default |
+| cap before any shell | **not built in** | a unit ordered before `emergency`, `rescue` and `debug-shell` in the initrd (and initramfs-tools' panic hook) extends PCR 15 with a sentinel — WinRE's pattern, and paguro's "cap on entry" (§4.1) |
+| an edited command line cannot unseal | PCRs 8/9 (GRUB) or 11/12 (systemd-stub) | bound for the bypass slot, which has no PIN during its window |
+
+PCR 15 bound to zero also closes the published *fake volume* attack (swap in a
+LUKS volume with the same UUID whose `init` then asks the TPM): the fake
+volume's key moves PCR 15 before its `init` runs, so nothing unseals.
+
+**One limit of stock LUKS, stated plainly:** `systemd-cryptenroll`'s PIN is
+only the TPM `authValue`; the sealed secret is the keyslot passphrase itself.
+A TPM whose storage is compromised — the faulTPM attack on AMD fTPMs — releases
+the secret without the PIN, so there is no offline gate behind it. paguro's own
+seal mixes the stretched PIN into the final key for exactly that reason (§6);
+for the dedicated disk the stock mechanism is used as it is, and the gap is
+documented. (The token plugin could carry paguro's derivation for the standing
+slot too, if that trade is ever wanted.)
 
 **Booting it** stays one click from either side: *Restart into Linux* in
 Windows, or the entry in `paguro.efi`'s picker, sets `BootNext` to the Linux
