@@ -9,11 +9,25 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
+/// SHA-256 digest bytes: one KDF output block.
+const SHA256_LEN: usize = 32;
+/// The byte that ends the label in both KDFs (TPM 2.0 Part 1 §11.4.10).
+const LABEL_TERMINATOR: u8 = 0x00;
+/// `KDFe` produces its single block with counter 1.
+const KDFE_COUNTER: u32 = 1;
+/// AES-128: key bytes and block bytes (the CFB feedback register).
+const AES128_KEY_LEN: usize = 16;
+const AES_BLOCK_LEN: usize = 16;
+/// Output of [`cfb_key_iv`]: the AES-128 key, then the IV.
+pub const CFB_KEY_IV_LEN: usize = AES128_KEY_LEN + AES_BLOCK_LEN;
+/// The `KDFa` label for parameter encryption keys (Part 1 §21.3).
+const CFB_LABEL: &[u8] = b"CFB";
+
 /// `KDFa(SHA-256, key, label, contextU, contextV, 8·out.len())`: HMAC in
 /// counter mode, `counter || label || 0x00 || contextU || contextV || bits`.
 pub fn kdfa(key: &[u8], label: &[u8], context_u: &[u8], context_v: &[u8], out: &mut [u8]) {
-    let bits = u32::try_from(out.len().saturating_mul(8)).unwrap_or(u32::MAX);
-    for (i, chunk) in out.chunks_mut(32).enumerate() {
+    let bits = u32::try_from(out.len().saturating_mul(u8::BITS as usize)).unwrap_or(u32::MAX);
+    for (i, chunk) in out.chunks_mut(SHA256_LEN).enumerate() {
         let counter = u32::try_from(i + 1).unwrap_or(u32::MAX);
         // HMAC accepts keys of any length; this cannot fail.
         let Ok(mut m) = <Hmac<Sha256> as Mac>::new_from_slice(key) else {
@@ -21,11 +35,11 @@ pub fn kdfa(key: &[u8], label: &[u8], context_u: &[u8], context_v: &[u8], out: &
         };
         m.update(&counter.to_be_bytes());
         m.update(label);
-        m.update(&[0]);
+        m.update(&[LABEL_TERMINATOR]);
         m.update(context_u);
         m.update(context_v);
         m.update(&bits.to_be_bytes());
-        let mut block: [u8; 32] = m.finalize().into_bytes().into();
+        let mut block: [u8; SHA256_LEN] = m.finalize().into_bytes().into();
         let n = chunk.len();
         chunk.copy_from_slice(block.get(..n).unwrap_or(&[]));
         block.zeroize();
@@ -35,12 +49,12 @@ pub fn kdfa(key: &[u8], label: &[u8], context_u: &[u8], context_v: &[u8], out: &
 /// `KDFe(SHA-256, Z, label, partyUInfo, partyVInfo, 256)`: one SHA-256 block,
 /// `counter(1) || Z || label || 0x00 || partyUInfo || partyVInfo`. The salt of
 /// an ECC-salted session is `KDFe(Z, "SECRET", Qe.x, Qs.x)` (Annex C.6.1).
-pub fn kdfe(z: &[u8], label: &[u8], party_u: &[u8], party_v: &[u8]) -> [u8; 32] {
+pub fn kdfe(z: &[u8], label: &[u8], party_u: &[u8], party_v: &[u8]) -> [u8; SHA256_LEN] {
     let mut h = Sha256::new();
-    h.update(1u32.to_be_bytes());
+    h.update(KDFE_COUNTER.to_be_bytes());
     h.update(z);
     h.update(label);
-    h.update([0]);
+    h.update([LABEL_TERMINATOR]);
     h.update(party_u);
     h.update(party_v);
     h.finalize().into()
@@ -49,20 +63,24 @@ pub fn kdfe(z: &[u8], label: &[u8], party_u: &[u8], party_v: &[u8]) -> [u8; 32] 
 /// The AES-128 key and IV of one encrypted parameter:
 /// `KDFa(sessionValue, "CFB", nonceNewer, nonceOlder, 256)`, key first.
 /// `sessionValue` is the session key followed by the authValue in use.
-pub fn cfb_key_iv(session_value: &[u8], nonce_newer: &[u8], nonce_older: &[u8]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    kdfa(session_value, b"CFB", nonce_newer, nonce_older, &mut out);
+pub fn cfb_key_iv(
+    session_value: &[u8],
+    nonce_newer: &[u8],
+    nonce_older: &[u8],
+) -> [u8; CFB_KEY_IV_LEN] {
+    let mut out = [0u8; CFB_KEY_IV_LEN];
+    kdfa(session_value, CFB_LABEL, nonce_newer, nonce_older, &mut out);
     out
 }
 
-fn cfb(key_iv: &[u8; 32], data: &mut [u8], decrypt: bool) {
-    let (key, iv) = key_iv.split_at(16);
+fn cfb(key_iv: &[u8; CFB_KEY_IV_LEN], data: &mut [u8], decrypt: bool) {
+    let (key, iv) = key_iv.split_at(AES128_KEY_LEN);
     let Ok(aes) = Aes128::new_from_slice(key) else {
         return;
     };
     let mut reg = Block::default();
     reg.copy_from_slice(iv);
-    for chunk in data.chunks_mut(16) {
+    for chunk in data.chunks_mut(AES_BLOCK_LEN) {
         let mut ks = reg;
         aes.encrypt_block(&mut ks);
         let n = chunk.len();
@@ -86,11 +104,11 @@ fn cfb(key_iv: &[u8; 32], data: &mut [u8], decrypt: bool) {
 
 /// AES-128-CFB (full-block feedback, as TPM parameter encryption uses it)
 /// in place. A trailing partial block uses the leading keystream bytes.
-pub fn cfb_encrypt(key_iv: &[u8; 32], data: &mut [u8]) {
+pub fn cfb_encrypt(key_iv: &[u8; CFB_KEY_IV_LEN], data: &mut [u8]) {
     cfb(key_iv, data, false);
 }
 
-pub fn cfb_decrypt(key_iv: &[u8; 32], data: &mut [u8]) {
+pub fn cfb_decrypt(key_iv: &[u8; CFB_KEY_IV_LEN], data: &mut [u8]) {
     cfb(key_iv, data, true);
 }
 

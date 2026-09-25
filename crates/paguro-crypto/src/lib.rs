@@ -23,7 +23,11 @@ pub mod tpm;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
-pub type Key = [u8; 32];
+/// Bytes of every key in the chain: one SHA-256 / HMAC-SHA-256 output.
+pub const KEY_LEN: usize = 32;
+pub type Key = [u8; KEY_LEN];
+/// Bytes of the per-seal and stretch salts.
+pub const SALT_LEN: usize = 16;
 
 /// BitLocker's key-stretch iteration count (0x100000).
 pub const STRETCH_ITERATIONS: u64 = 0x10_0000;
@@ -52,8 +56,8 @@ pub fn user_password_hash(password: &str) -> Key {
 /// Each round hashes `{ last[32], initial[32], salt[16], counter u64 LE }`, per
 /// libbde's specification. Must be checked against libbde test vectors before
 /// any real volume is touched (§11 Q10).
-pub fn bitlocker_stretch(initial: &Key, salt: &[u8; 16], iterations: u64) -> Key {
-    let mut last = [0u8; 32];
+pub fn bitlocker_stretch(initial: &Key, salt: &[u8; SALT_LEN], iterations: u64) -> Key {
+    let mut last = [0u8; KEY_LEN];
     for i in 0..iterations {
         let mut h = Sha256::new();
         h.update(last);
@@ -90,7 +94,7 @@ pub fn env_passphrase() -> Key {
 }
 
 /// Folds in the encrypted FVEK blob: bytes that exist only on the raw volume.
-pub fn root_gate(env: &Key, salt: &[u8; 16], encrypted_fvek_blob: &[u8]) -> Key {
+pub fn root_gate(env: &Key, salt: &[u8; SALT_LEN], encrypted_fvek_blob: &[u8]) -> Key {
     hmac(env, &[b"paguro/rootgate", salt, encrypted_fvek_blob])
 }
 
@@ -101,14 +105,14 @@ pub fn final_key(root_gate: &Key, pass_hash: &Key) -> Key {
 }
 
 /// The install-time bootstrap wrapping carried in `Boot####` OptionalData.
-pub fn bootstrap_key(pass_hash: &Key, salt: &[u8; 16]) -> Key {
+pub fn bootstrap_key(pass_hash: &Key, salt: &[u8; SALT_LEN]) -> Key {
     hmac(pass_hash, &[b"paguro/bootstrap", salt])
 }
 
 /// VMK = key XOR wrapped. A one-time pad: both are 32 bytes, and the per-seal
 /// salt keeps it one-time across a BitLocker re-key.
 pub fn xor32(a: &Key, b: &Key) -> Key {
-    let mut out = [0u8; 32];
+    let mut out = [0u8; KEY_LEN];
     for ((o, x), y) in out.iter_mut().zip(a).zip(b) {
         *o = x ^ y;
     }

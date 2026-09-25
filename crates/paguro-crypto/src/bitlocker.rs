@@ -18,6 +18,20 @@ type Aes256Ccm = ccm::Ccm<Aes256, U16, U12>;
 
 pub const CCM_NONCE_LEN: usize = 12;
 pub const CCM_TAG_LEN: usize = 16;
+/// AES-256 key bytes: the CCM wrapping key.
+pub const CCM_KEY_LEN: usize = 32;
+
+/// AES block bytes, and so XTS's tweak and the unit of its data.
+const AES_BLOCK_LEN: usize = 16;
+/// XTS keys (IEEE 1619-2007 §5.1): K1 ‖ K2, each an AES-128 or AES-256 key.
+const AES128_KEY_LEN: usize = 16;
+const AES256_KEY_LEN: usize = 32;
+pub const XTS_128_KEY_LEN: usize = 2 * AES128_KEY_LEN;
+pub const XTS_256_KEY_LEN: usize = 2 * AES256_KEY_LEN;
+/// Multiplication by α in GF(2^128): the reduction byte for
+/// x^128 + x^7 + x^2 + x + 1 (IEEE 1619-2007 §5.2), and the bit shifted out.
+const GF128_REDUCTION: u8 = 0x87;
+const CARRY_SHIFT: u32 = 7;
 
 /// The CCM tag did not verify: wrong key, or the entry was altered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,7 +40,7 @@ pub struct MacError;
 /// Decrypt `data` in place and verify `tag`. On failure `data` is left
 /// unmodified-or-garbage and must not be used.
 pub fn ccm_unwrap(
-    key: &[u8; 32],
+    key: &[u8; CCM_KEY_LEN],
     nonce: &[u8; CCM_NONCE_LEN],
     tag: &[u8; CCM_TAG_LEN],
     data: &mut [u8],
@@ -43,7 +57,11 @@ pub fn ccm_unwrap(
 }
 
 /// Encrypt `data` in place and return the tag (the test writer's side).
-pub fn ccm_wrap(key: &[u8; 32], nonce: &[u8; CCM_NONCE_LEN], data: &mut [u8]) -> [u8; CCM_TAG_LEN] {
+pub fn ccm_wrap(
+    key: &[u8; CCM_KEY_LEN],
+    nonce: &[u8; CCM_NONCE_LEN],
+    data: &mut [u8],
+) -> [u8; CCM_TAG_LEN] {
     let c = Aes256Ccm::new(&Array::from(*key));
     match c.encrypt_inout_detached(&Array::from(*nonce), &[], data.into()) {
         Ok(t) => t.into(),
@@ -74,19 +92,19 @@ pub enum XtsError {
     DataLength,
 }
 
-fn mul_alpha(t: &mut [u8; 16]) {
+fn mul_alpha(t: &mut [u8; AES_BLOCK_LEN]) {
     let mut carry = 0u8;
     for b in t.iter_mut() {
-        let next = *b >> 7;
+        let next = *b >> CARRY_SHIFT;
         *b = (*b << 1) | carry;
         carry = next;
     }
     if let Some(b) = t.first_mut() {
-        *b ^= 0x87 & 0u8.wrapping_sub(carry);
+        *b ^= GF128_REDUCTION & 0u8.wrapping_sub(carry);
     }
 }
 
-fn xor_tweaks(first: [u8; 16], blocks: &mut [Block]) {
+fn xor_tweaks(first: [u8; AES_BLOCK_LEN], blocks: &mut [Block]) {
     let mut t = first;
     for b in blocks {
         for (x, y) in b.iter_mut().zip(t.iter()) {
@@ -101,15 +119,15 @@ impl Xts {
     /// FVEK and dm-crypt takes it.
     pub fn new(key: &[u8]) -> Result<Xts, XtsError> {
         let keys = match key.len() {
-            32 => {
-                let (a, b) = key.split_at(16);
+            XTS_128_KEY_LEN => {
+                let (a, b) = key.split_at(AES128_KEY_LEN);
                 Keys::X128(
                     Aes128::new_from_slice(a).map_err(|_| XtsError::KeyLength)?,
                     Aes128::new_from_slice(b).map_err(|_| XtsError::KeyLength)?,
                 )
             }
-            64 => {
-                let (a, b) = key.split_at(32);
+            XTS_256_KEY_LEN => {
+                let (a, b) = key.split_at(AES256_KEY_LEN);
                 Keys::X256(
                     Aes256::new_from_slice(a).map_err(|_| XtsError::KeyLength)?,
                     Aes256::new_from_slice(b).map_err(|_| XtsError::KeyLength)?,
@@ -123,12 +141,12 @@ impl Xts {
     /// Bits of key: 128 or 256.
     pub fn key_bits(&self) -> u32 {
         match self.keys {
-            Keys::X128(..) => 128,
-            Keys::X256(..) => 256,
+            Keys::X128(..) => (AES128_KEY_LEN * u8::BITS as usize) as u32,
+            Keys::X256(..) => (AES256_KEY_LEN * u8::BITS as usize) as u32,
         }
     }
 
-    fn first_tweak(&self, unit: u128) -> [u8; 16] {
+    fn first_tweak(&self, unit: u128) -> [u8; AES_BLOCK_LEN] {
         let mut t = Block::from(unit.to_le_bytes());
         match &self.keys {
             Keys::X128(_, k2) => k2.encrypt_block(&mut t),
