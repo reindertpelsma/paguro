@@ -26,6 +26,8 @@ struct Swtpm {
     retry_once: Option<u32>,
     /// Command codes as submitted by the client, in order.
     submitted: Vec<u32>,
+    /// Every command and response on the wire, as a bus interposer sees it.
+    wire: Vec<Vec<u8>>,
 }
 
 impl Drop for Swtpm {
@@ -82,6 +84,7 @@ fn start() -> Option<Swtpm> {
                 rng: 0,
                 retry_once: None,
                 submitted: Vec::new(),
+                wire: Vec::new(),
             });
         }
         if t0.elapsed() > Duration::from_secs(10) {
@@ -153,6 +156,8 @@ impl Platform for Swtpm {
             return Ok(10);
         }
         let r = self.raw(cmd);
+        self.wire.push(cmd.to_vec());
+        self.wire.push(r.clone());
         resp.get_mut(..r.len())
             .ok_or(PlatformError::TooLarge)?
             .copy_from_slice(&r);
@@ -409,4 +414,59 @@ fn every_transient_handle_is_flushed() {
         0,
         "transient objects leaked"
     );
+}
+
+fn on_wire(t: &Swtpm, needle: &[u8]) -> bool {
+    t.wire
+        .iter()
+        .any(|m| m.windows(needle.len()).any(|w| w == needle))
+}
+
+/// DESIGN.md §6: with a salted session and parameter encryption, neither
+/// `D` nor the authValue crosses the TPM bus in clear — not in the Create
+/// that seals them, not in the Unseal that returns `D`.
+#[test]
+fn secrets_never_cross_the_bus_in_clear() {
+    let Some(mut t) = start() else { return };
+    let auth = [0x3c; 32];
+    let d = [0xd0; 32];
+    t.wire.clear();
+    let obj = seal(&mut t, [0; 32], None, &auth, &d);
+    let mut out = [0u8; 32];
+    Tpm::new(&mut t)
+        .unseal(
+            obj.private(),
+            obj.public(),
+            seal::PCR_MASK_V1,
+            None,
+            &auth,
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(out, d, "the unseal returned D");
+    // The instrument sees the wire: the public area crosses in clear.
+    assert!(on_wire(&t, &obj.public()[2..34]));
+    assert!(t.wire.len() >= 20, "{} messages captured", t.wire.len());
+    // …and D and the authValue never do, whole or in part.
+    for part in [&d[..], &d[..16], &d[16..], &auth[..], &auth[..16]] {
+        assert!(!on_wire(&t, part), "a secret crossed the bus in clear");
+    }
+    // The PIN bypass (empty authValue): D still only encrypted.
+    let clock = Tpm::new(&mut t).read_clock().unwrap();
+    let bd = [0xbd; 32];
+    let deadline = clock.clock + 3_600_000;
+    t.wire.clear();
+    let live = seal(&mut t, [0; 32], Some(deadline), &[0; 32], &bd);
+    Tpm::new(&mut t)
+        .unseal(
+            live.private(),
+            live.public(),
+            seal::PCR_MASK_V1,
+            Some(deadline),
+            &[],
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(out, bd);
+    assert!(!on_wire(&t, &bd[..16]) && !on_wire(&t, &bd[16..]));
 }

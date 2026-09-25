@@ -2,28 +2,46 @@
 //! provisioning `TPM2_Create` (DESIGN.md §6, "The TPM object itself").
 //!
 //! Marshalling and response parsing are `paguro_core::tpm`; this module adds
-//! the hashing (names, cpHash/rpHash, session HMACs, policy digests) and the
-//! command sequences:
+//! the hashing (names, cpHash/rpHash, session HMACs, policy digests), the
+//! session salting and parameter encryption, and the command sequences:
 //!
 //! ```text
 //! unseal   CreatePrimary(owner, SRK template)      password session
 //!          Load(srk, private, public)              password session
-//!          StartAuthSession(policy, unsalted, unbound, SHA-256)
+//!          StartAuthSession(tpmKey = srk, policy, salted, AES-128-CFB)
+//!          FlushContext(srk)
 //!          PolicyPCR(sha256, mask)
 //!          [PolicyCounterTimer(Clock < deadline)]  PIN bypass only
 //!          PolicyAuthValue
-//!          Unseal(item)                            policy session, HMAC keyed by authValue
+//!          Unseal(item)                            policy session: HMAC keyed by
+//!                                                  sessionKey || authValue,
+//!                                                  response encrypted
 //!          FlushContext × n                        on every path
+//!
+//! create   CreatePrimary(owner, SRK template)      password session
+//!          StartAuthSession(tpmKey = srk, HMAC, salted, AES-128-CFB)
+//!          Create(srk, sensitive, template)        HMAC session, sensitive encrypted
+//!          FlushContext(srk)
 //! ```
 //!
-//! The session is an HMAC session, so `auth` never crosses the bus in clear;
-//! the response HMAC is verified too. Parameter encryption is not implemented
-//! yet (it needs AES-CFB in the loader) — the unsealed `D` is useless without
-//! `B` and the passphrase, which never cross.
+//! **Salting** (TPM 2.0 Part 1 §19.6.13, Annex C.6.1): an ephemeral P-256
+//! key agrees `Z` with the storage parent's public point (as `CreatePrimary`
+//! returned it: on the curve, and the name must hash its public area);
+//! `salt = KDFe(Z, "SECRET", Qe.x, Qs.x)` and
+//! `sessionKey = KDFa(salt, "ATH", nonceTPM, nonceCaller)`. So the session
+//! key never crosses the bus, and with it neither `D` (the Unseal response is
+//! encrypted) nor a new object's `authValue` and data (the Create sensitive
+//! is). A passive interposer learns nothing; an active one that substitutes
+//! the parent's public key is out of scope, as it is for the whole TPM
+//! (DESIGN.md §6). The response HMAC is verified before anything is
+//! decrypted.
 
 use hmac::{Hmac, Mac};
+use p256::elliptic_curve::point::AffineCoordinates;
+use p256::{AffinePoint, FieldBytes, NonZeroScalar, ProjectivePoint};
 use paguro_core::bytes::Writer;
-use paguro_core::tpm::{self as t, AuthCommand, TpmError};
+use paguro_core::tpm::{self as t, AuthCommand, EccPoint, TpmError, sa};
+use paguro_crypto::tpm as st;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -49,6 +67,10 @@ pub enum TpmFail {
     NameMismatch,
     /// Unsealed data is not 32 bytes.
     BadPayload,
+    /// The storage parent's public point is not on P-256.
+    BadParentKey,
+    /// The random source gave no usable ephemeral key.
+    Rng,
 }
 
 impl From<PlatformError> for TpmFail {
@@ -314,8 +336,10 @@ impl<'p, P: Platform> Tpm<'p, P> {
         Ok(t::parse_empty(r.params)?)
     }
 
-    /// The deterministic storage parent. Returns its transient handle.
-    pub fn create_primary_srk(&mut self) -> Result<u32, TpmFail> {
+    /// The deterministic storage parent: its transient handle, the public
+    /// point sessions are salted with, and its name (checked against the
+    /// public area it came with).
+    pub fn create_primary_srk(&mut self) -> Result<Srk, TpmFail> {
         let pn = t::params_create_primary_srk(&mut self.params)?;
         let len = self.run(
             t::cc::CREATE_PRIMARY,
@@ -324,8 +348,26 @@ impl<'p, P: Platform> Tpm<'p, P> {
             pn,
         )?;
         let r = t::response(self.resp(len), true, 1)?;
-        t::parse_create_primary(r.params)?;
-        r.handle.ok_or(TpmFail::Protocol(TpmError::Truncated))
+        let handle = r.handle.ok_or(TpmFail::Protocol(TpmError::Truncated))?;
+        let srk = t::parse_create_primary(r.params).and_then(|p| {
+            let name = object_name(p.public_area);
+            if p.name == name {
+                Ok(Srk {
+                    handle,
+                    point: p.point,
+                    name,
+                })
+            } else {
+                Err(TpmError::BadValue)
+            }
+        });
+        match srk {
+            Ok(s) => Ok(s),
+            Err(e) => {
+                let _ = self.flush(handle);
+                Err(TpmFail::from(e).name_mismatch_if_value())
+            }
+        }
     }
 
     pub fn load(&mut self, parent: u32, private: &[u8], public: &[u8]) -> Result<u32, TpmFail> {
@@ -340,30 +382,90 @@ impl<'p, P: Platform> Tpm<'p, P> {
         r.handle.ok_or(TpmFail::Protocol(TpmError::Truncated))
     }
 
-    /// Returns `(session handle, nonceTPM)`.
-    fn start_policy_session(
-        &mut self,
-        nonce_caller: &[u8; 32],
-    ) -> Result<(u32, [u8; 32], usize), TpmFail> {
-        let pn = t::params_start_policy_session(&mut self.params, nonce_caller)?;
-        let len = self.run(
+    /// `TPM2_StartAuthSession(tpmKey = srk, bind = NULL)`, salted by ECDH
+    /// with the parent's point, AES-128-CFB, SHA-256.
+    fn start_salted(&mut self, srk: &Srk, session_type: u8) -> Result<Session, TpmFail> {
+        let qs = AffinePoint::from_coordinates(
+            &FieldBytes::from(srk.point.x),
+            &FieldBytes::from(srk.point.y),
+        );
+        let qs: AffinePoint = Option::from(qs).ok_or(TpmFail::BadParentKey)?;
+        // An ephemeral scalar in [1, n): retried on the (2^-32) chance that
+        // 32 random bytes are not one.
+        let mut k = None;
+        for _ in 0..4 {
+            let mut raw = [0u8; 32];
+            self.p.random(&mut raw)?;
+            let s: Option<NonZeroScalar> = NonZeroScalar::from_repr(FieldBytes::from(raw)).into();
+            raw.zeroize();
+            if s.is_some() {
+                k = s;
+                break;
+            }
+        }
+        let mut k: NonZeroScalar = k.ok_or(TpmFail::Rng)?;
+        let qe = (ProjectivePoint::GENERATOR * *k).to_affine();
+        let mut shared = (ProjectivePoint::from(qs) * *k).to_affine();
+        k.zeroize();
+        let qe_point = EccPoint {
+            x: qe.x().into(),
+            y: qe.y().into(),
+        };
+        let mut z: [u8; 32] = shared.x().into();
+        shared.zeroize();
+        let mut salt = st::kdfe(&z, b"SECRET", &qe_point.x, &srk.point.x);
+        z.zeroize();
+
+        let mut nonce_caller = [0u8; 32];
+        self.p.random(&mut nonce_caller)?;
+        let pn = t::params_start_session(
+            &mut self.params,
+            &nonce_caller,
+            Some(&qe_point),
+            session_type,
+        )?;
+        let r = self.run(
             t::cc::START_AUTH_SESSION,
-            &[t::rh::NULL, t::rh::NULL],
+            &[srk.handle, t::rh::NULL],
             &[],
             pn,
-        )?;
-        let r = t::response(self.resp(len), true, 0)?;
-        let nonce = t::parse_start_auth_session(r.params)?;
-        let mut out = [0u8; 32];
-        let n = nonce.len().min(32);
-        out.get_mut(..n)
+        );
+        let len = match r {
+            Ok(l) => l,
+            Err(e) => {
+                salt.zeroize();
+                return Err(e);
+            }
+        };
+        let parsed = t::response(self.resp(len), true, 0).and_then(|r| {
+            Ok((
+                r.handle.ok_or(TpmError::Truncated)?,
+                t::parse_start_auth_session(r.params)?,
+            ))
+        });
+        let (handle, nonce_tpm) = match parsed {
+            Ok(v) => v,
+            Err(e) => {
+                salt.zeroize();
+                return Err(e.into());
+            }
+        };
+        let mut s = Session {
+            handle,
+            nonce_tpm: [0; t::MAX_NONCE],
+            nonce_len: nonce_tpm.len(),
+            key: [0; 32],
+        };
+        s.nonce_tpm
+            .get_mut(..s.nonce_len)
             .ok_or(TpmFail::Marshal)?
-            .copy_from_slice(nonce.get(..n).ok_or(TpmFail::Marshal)?);
-        Ok((
-            r.handle.ok_or(TpmFail::Protocol(TpmError::Truncated))?,
-            out,
-            n,
-        ))
+            .copy_from_slice(nonce_tpm);
+        let mut key = [0u8; 32];
+        st::kdfa(&salt, b"ATH", s.nonce_tpm(), &nonce_caller, &mut key);
+        s.key = key;
+        key.zeroize();
+        salt.zeroize();
+        Ok(s)
     }
 
     fn policy(&mut self, code: u32, session: u32, pn: usize) -> Result<(), TpmFail> {
@@ -383,20 +485,19 @@ impl<'p, P: Platform> Tpm<'p, P> {
         auth: &[u8],
         out: &mut [u8; 32],
     ) -> Result<(), TpmFail> {
-        let mut nonces = [0u8; 64];
-        self.p.random(&mut nonces)?;
+        let mut nc_unseal = [0u8; 32];
+        self.p.random(&mut nc_unseal)?;
         let srk = self.create_primary_srk()?;
-        let item = match self.load(srk, private, public) {
+        let item = match self.load(srk.handle, private, public) {
             Ok(h) => h,
             Err(e) => {
-                let _ = self.flush(srk);
+                let _ = self.flush(srk.handle);
                 return Err(e);
             }
         };
-        let _ = self.flush(srk);
-        let (n1, n2) = nonces.split_at(32);
-        let (nc_start, nc_unseal) = (arr32(n1), arr32(n2));
-        let (session, nonce_tpm, ntl) = match self.start_policy_session(&nc_start) {
+        let session = self.start_salted(&srk, t::SE_POLICY);
+        let _ = self.flush(srk.handle);
+        let mut session = match session {
             Ok(s) => s,
             Err(e) => {
                 let _ = self.flush(item);
@@ -404,19 +505,12 @@ impl<'p, P: Platform> Tpm<'p, P> {
             }
         };
         let r = self.policy_and_unseal(
-            session,
-            item,
-            public,
-            pcr_mask,
-            deadline,
-            auth,
-            nonce_tpm.get(..ntl).unwrap_or(&[]),
-            &nc_unseal,
-            out,
+            &session, item, public, pcr_mask, deadline, auth, &nc_unseal, out,
         );
         if r.is_err() {
-            let _ = self.flush(session);
+            let _ = self.flush(session.handle);
         }
+        session.key.zeroize();
         let _ = self.flush(item);
         r
     }
@@ -424,54 +518,65 @@ impl<'p, P: Platform> Tpm<'p, P> {
     #[allow(clippy::too_many_arguments)]
     fn policy_and_unseal(
         &mut self,
-        session: u32,
+        session: &Session,
         item: u32,
         public: &[u8],
         pcr_mask: u32,
         deadline: Option<u64>,
         auth: &[u8],
-        nonce_tpm: &[u8],
         nonce_caller: &[u8; 32],
         out: &mut [u8; 32],
     ) -> Result<(), TpmFail> {
         let pn = t::params_policy_pcr(&mut self.params, t::alg::SHA256, pcr_mask)?;
-        self.policy(t::cc::POLICY_PCR, session, pn)?;
+        self.policy(t::cc::POLICY_PCR, session.handle, pn)?;
         if let Some(d) = deadline {
             let pn = t::params_policy_clock_before(&mut self.params, d)?;
-            self.policy(t::cc::POLICY_COUNTER_TIMER, session, pn)?;
+            self.policy(t::cc::POLICY_COUNTER_TIMER, session.handle, pn)?;
         }
-        self.policy(t::cc::POLICY_AUTH_VALUE, session, 0)?;
+        self.policy(t::cc::POLICY_AUTH_VALUE, session.handle, 0)?;
 
-        // Unseal with an HMAC over cpHash, keyed by (empty sessionKey ||) authValue.
+        // Unseal: HMAC over cpHash keyed by sessionKey || authValue (the
+        // policy has PolicyAuthValue); the response's data encrypted.
         let name = object_name(public.get(2..).unwrap_or(&[]));
         let cp = sha256(&[&t::cc::UNSEAL.to_be_bytes(), &name]);
-        let key = trim_zeros(auth);
-        let attrs = 0u8; // continueSession clear: the TPM flushes the session
-        let hmac = hmac256(key, &[&cp, nonce_caller, nonce_tpm, &[attrs]]);
+        let mut key = SessionValue::new(&session.key, trim_zeros(auth));
+        // continueSession clear: the TPM flushes the session on success.
+        let attrs = sa::ENCRYPT;
+        let hmac = hmac256(
+            key.get(),
+            &[&cp, nonce_caller, session.nonce_tpm(), &[attrs]],
+        );
         let s = AuthCommand {
-            handle: session,
+            handle: session.handle,
             nonce: nonce_caller,
             attributes: attrs,
             hmac: &hmac,
         };
-        let len = self.run(t::cc::UNSEAL, &[item], &[s], 0)?;
-        let r = t::response(self.resp(len), false, 1)?;
-        let ra = r.sessions.first().copied().unwrap_or_default();
-        let rp = sha256(&[&0u32.to_be_bytes(), &t::cc::UNSEAL.to_be_bytes(), r.params]);
-        let want = hmac256(key, &[&rp, ra.nonce, nonce_caller, &[ra.attributes]]);
-        if !ct_eq(&want, ra.hmac) {
-            return Err(TpmFail::ResponseAuth);
-        }
-        let data = t::parse_unseal(r.params)?;
-        if data.len() != 32 {
-            return Err(TpmFail::BadPayload);
-        }
-        out.copy_from_slice(data);
+        let r = self.run(t::cc::UNSEAL, &[item], &[s], 0).and_then(|len| {
+            let r = t::response(self.resp(len), false, 1)?;
+            let ra = r.sessions.first().copied().unwrap_or_default();
+            let rp = sha256(&[&0u32.to_be_bytes(), &t::cc::UNSEAL.to_be_bytes(), r.params]);
+            let want = hmac256(key.get(), &[&rp, ra.nonce, nonce_caller, &[ra.attributes]]);
+            if !ct_eq(&want, ra.hmac) {
+                return Err(TpmFail::ResponseAuth);
+            }
+            let data = t::parse_unseal(r.params)?;
+            if data.len() != 32 {
+                return Err(TpmFail::BadPayload);
+            }
+            let mut kiv = st::cfb_key_iv(key.get(), ra.nonce, nonce_caller);
+            out.copy_from_slice(data);
+            st::cfb_decrypt(&kiv, out);
+            kiv.zeroize();
+            Ok(())
+        });
+        key.zeroize();
         self.resp.zeroize();
-        Ok(())
+        r
     }
 
-    /// `TPM2_Create` of a sealed object under the SRK (provisioning boot).
+    /// `TPM2_Create` of a sealed object under the SRK (provisioning boot,
+    /// and the Windows tool's PIN bypass).
     pub fn create_sealed(
         &mut self,
         auth: &[u8; 32],
@@ -480,8 +585,18 @@ impl<'p, P: Platform> Tpm<'p, P> {
         out: &mut CreatedObject,
     ) -> Result<(), TpmFail> {
         let srk = self.create_primary_srk()?;
-        let r = self.create_under(srk, auth, data, policy, out);
-        let _ = self.flush(srk);
+        let r = match self.start_salted(&srk, t::SE_HMAC) {
+            Ok(mut session) => {
+                let r = self.create_under(&srk, &session, auth, data, policy, out);
+                if r.is_err() {
+                    let _ = self.flush(session.handle);
+                }
+                session.key.zeroize();
+                r
+            }
+            Err(e) => Err(e),
+        };
+        let _ = self.flush(srk.handle);
         self.params.zeroize();
         self.cmd.zeroize();
         r
@@ -489,15 +604,50 @@ impl<'p, P: Platform> Tpm<'p, P> {
 
     fn create_under(
         &mut self,
-        srk: u32,
+        srk: &Srk,
+        session: &Session,
         auth: &[u8; 32],
         data: &[u8; 32],
         policy: &Digest32,
         out: &mut CreatedObject,
     ) -> Result<(), TpmFail> {
+        let mut nonce_caller = [0u8; 32];
+        self.p.random(&mut nonce_caller)?;
         let pn = t::params_create_sealed(&mut self.params, auth, data, policy)?;
-        let len = self.run(t::cc::CREATE, &[srk], &[AuthCommand::PASSWORD], pn)?;
+        // The SRK's authValue is empty: the session value is the key alone.
+        let key = session.key;
+        // Encrypt the first parameter's buffer: TPM2B_SENSITIVE_CREATE after
+        // its size (Part 1 §21.1).
+        let first = self
+            .params
+            .get(..2)
+            .and_then(|b| <[u8; 2]>::try_from(b).ok())
+            .map(|b| usize::from(u16::from_be_bytes(b)))
+            .ok_or(TpmFail::Marshal)?;
+        let mut kiv = st::cfb_key_iv(&key, &nonce_caller, session.nonce_tpm());
+        st::cfb_encrypt(
+            &kiv,
+            self.params.get_mut(2..2 + first).ok_or(TpmFail::Marshal)?,
+        );
+        kiv.zeroize();
+        let params = self.params.get(..pn).ok_or(TpmFail::Marshal)?;
+        let cp = sha256(&[&t::cc::CREATE.to_be_bytes(), &srk.name, params]);
+        let attrs = sa::DECRYPT;
+        let hmac = hmac256(&key, &[&cp, &nonce_caller, session.nonce_tpm(), &[attrs]]);
+        let s = AuthCommand {
+            handle: session.handle,
+            nonce: &nonce_caller,
+            attributes: attrs,
+            hmac: &hmac,
+        };
+        let len = self.run(t::cc::CREATE, &[srk.handle], &[s], pn)?;
         let r = t::response(self.resp(len), false, 1)?;
+        let ra = r.sessions.first().copied().unwrap_or_default();
+        let rp = sha256(&[&0u32.to_be_bytes(), &t::cc::CREATE.to_be_bytes(), r.params]);
+        let want = hmac256(&key, &[&rp, ra.nonce, &nonce_caller, &[ra.attributes]]);
+        if !ct_eq(&want, ra.hmac) {
+            return Err(TpmFail::ResponseAuth);
+        }
         let c = t::parse_create(r.params)?;
         let pl = c.private.len();
         let ul = c.public.len();
@@ -515,12 +665,67 @@ impl<'p, P: Platform> Tpm<'p, P> {
     }
 }
 
-fn arr32(b: &[u8]) -> [u8; 32] {
-    let mut o = [0u8; 32];
-    for (d, s) in o.iter_mut().zip(b) {
-        *d = *s;
+/// The storage parent, as `CreatePrimary` returned it.
+#[derive(Clone, Copy, Debug)]
+pub struct Srk {
+    pub handle: u32,
+    pub point: EccPoint,
+    pub name: [u8; 34],
+}
+
+/// A salted session: its handle, the TPM's last nonce and the session key.
+struct Session {
+    handle: u32,
+    nonce_tpm: [u8; t::MAX_NONCE],
+    nonce_len: usize,
+    key: [u8; 32],
+}
+
+impl Session {
+    fn nonce_tpm(&self) -> &[u8] {
+        self.nonce_tpm.get(..self.nonce_len).unwrap_or(&[])
     }
-    o
+}
+
+/// `sessionKey || authValue`: the HMAC key of an authorisation, and the
+/// session value parameter encryption derives its key from.
+struct SessionValue {
+    b: [u8; 32 + t::MAX_NONCE],
+    n: usize,
+}
+
+impl SessionValue {
+    fn new(key: &[u8; 32], auth: &[u8]) -> Self {
+        let mut v = SessionValue {
+            b: [0; 32 + t::MAX_NONCE],
+            n: 0,
+        };
+        let auth = auth.get(..auth.len().min(t::MAX_NONCE)).unwrap_or(&[]);
+        let n = 32 + auth.len();
+        if let Some(d) = v.b.get_mut(..n) {
+            let (a, b) = d.split_at_mut(32);
+            a.copy_from_slice(key);
+            b.copy_from_slice(auth);
+            v.n = n;
+        }
+        v
+    }
+    fn get(&self) -> &[u8] {
+        self.b.get(..self.n).unwrap_or(&[])
+    }
+    fn zeroize(&mut self) {
+        self.b.zeroize();
+    }
+}
+
+impl TpmFail {
+    /// A primary whose name does not hash its public area is a lying TPM.
+    fn name_mismatch_if_value(self) -> Self {
+        match self {
+            TpmFail::Protocol(TpmError::BadValue) => TpmFail::NameMismatch,
+            other => other,
+        }
+    }
 }
 
 /// Length-checked constant-time comparison.

@@ -13,6 +13,9 @@ paguro-crypto.workspace = true
 sha2.workspace = true
 hmac.workspace = true
 zeroize = { version = "1", default-features = false }
+# TPM session salting: ECDH with the SRK (P-256) and nothing else — no
+# signature verification (TPM 2.0 Part 1 §19.6.13, Annex C.6.1).
+p256 = { version = "0.14", default-features = false, features = ["arithmetic"] }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }

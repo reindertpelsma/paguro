@@ -8,8 +8,9 @@
 //! bytes received, every TPM2B/list size is bounded before use, and trailing
 //! bytes anywhere are an error.
 //!
-//! Hashing (cpHash, policy digests, session HMACs) lives in `paguro-boot`,
-//! which has SHA-256; this module stays dependency-free.
+//! Hashing (cpHash, policy digests, session HMACs), key agreement and
+//! parameter encryption live in `paguro-boot` and `paguro-crypto`; this
+//! module stays dependency-free.
 
 use crate::bytes::{Full, Reader, Short, Writer};
 
@@ -85,9 +86,16 @@ pub mod attr {
 /// Session attributes.
 pub mod sa {
     pub const CONTINUE_SESSION: u8 = 1;
+    /// The first command parameter is encrypted (TPM 2.0 Part 1 §21).
+    pub const DECRYPT: u8 = 0x20;
+    /// The first response parameter is encrypted.
+    pub const ENCRYPT: u8 = 0x40;
 }
 
+pub const SE_HMAC: u8 = 0x00;
 pub const SE_POLICY: u8 = 0x01;
+/// Bytes of one P-256 coordinate.
+pub const ECC_P256_LEN: usize = 32;
 pub const EO_UNSIGNED_LT: u16 = 0x0008;
 /// Offset of `clockInfo.clock` inside `TPMS_TIME_INFO` (after `time` u64).
 pub const TIME_INFO_CLOCK_OFFSET: u16 = 8;
@@ -345,16 +353,52 @@ pub fn params_load(out: &mut [u8], private: &[u8], public: &[u8]) -> Result<usiz
     Ok(w.len())
 }
 
+/// A P-256 point as the TPM marshals it (`TPMS_ECC_POINT`, big-endian
+/// coordinates). Not validated here: whoever does arithmetic on it checks
+/// that it is on the curve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EccPoint {
+    pub x: [u8; ECC_P256_LEN],
+    pub y: [u8; ECC_P256_LEN],
+}
+
+/// Parameters of an unbound SHA-256 `TPM2_StartAuthSession`
+/// (`session_type` [`SE_HMAC`] or [`SE_POLICY`]). With `salt`, the
+/// ephemeral public point the salt was agreed with (the `tpmKey` handle is
+/// the caller's), and AES-128-CFB parameter encryption; without, an
+/// unsalted session with no symmetric algorithm.
+pub fn params_start_session(
+    out: &mut [u8],
+    nonce_caller: &[u8],
+    salt: Option<&EccPoint>,
+    session_type: u8,
+) -> Result<usize, Full> {
+    let mut w = Writer::new(out);
+    tpm2b(&mut w, nonce_caller)?;
+    match salt {
+        // encryptedSalt: a TPM2B_ENCRYPTED_SECRET holding a TPMS_ECC_POINT.
+        Some(p) => write_tpm2b_with(&mut w, |w| {
+            tpm2b(w, &p.x)?;
+            tpm2b(w, &p.y)
+        })?,
+        None => tpm2b(&mut w, &[])?,
+    }
+    w.u8(session_type)?;
+    if salt.is_some() {
+        w.u16_be(alg::AES)?;
+        w.u16_be(128)?;
+        w.u16_be(alg::CFB)?;
+    } else {
+        w.u16_be(alg::NULL)?;
+    }
+    w.u16_be(alg::SHA256)?;
+    Ok(w.len())
+}
+
 /// Parameters of an unsalted, unbound `TPM2_StartAuthSession` for a SHA-256
 /// policy session without parameter encryption.
 pub fn params_start_policy_session(out: &mut [u8], nonce_caller: &[u8]) -> Result<usize, Full> {
-    let mut w = Writer::new(out);
-    tpm2b(&mut w, nonce_caller)?;
-    tpm2b(&mut w, &[])?; // encryptedSalt
-    w.u8(SE_POLICY)?;
-    w.u16_be(alg::NULL)?; // symmetric
-    w.u16_be(alg::SHA256)?;
-    Ok(w.len())
+    params_start_session(out, nonce_caller, None, SE_POLICY)
 }
 
 /// Parameters of `TPM2_PolicyPCR` with an empty `pcrDigest` (the TPM uses its
@@ -574,14 +618,70 @@ fn skip_creation(r: &mut Reader<'_>) -> Result<(), TpmError> {
     Ok(())
 }
 
-/// `TPM2_CreatePrimary` parameters: returns the object's name.
-pub fn parse_create_primary(params: &[u8]) -> Result<&[u8], TpmError> {
+/// What `TPM2_CreatePrimary` returned for the storage parent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Primary<'a> {
+    /// `outPublic`'s `TPMT_PUBLIC` (without the TPM2B size): hashed for the
+    /// name, which the caller compares with [`Primary::name`].
+    pub public_area: &'a [u8],
+    /// The parent's public point: session salts are agreed with it.
+    pub point: EccPoint,
+    pub name: &'a [u8],
+}
+
+/// Skip a `TPMT_SYM_DEF_OBJECT`, `TPMT_ECC_SCHEME` or `TPMT_KDF_SCHEME`:
+/// an algorithm, and its details unless it is `TPM_ALG_NULL`. `details`
+/// is how many u16 follow a non-null algorithm.
+fn skip_alg(r: &mut Reader<'_>, details: usize) -> Result<u16, TpmError> {
+    let a = r.u16_be()?;
+    if a != alg::NULL {
+        for _ in 0..details {
+            r.u16_be()?;
+        }
+    }
+    Ok(a)
+}
+
+/// A `TPMT_PUBLIC` that must be an ECC P-256 key: returns its point.
+/// Anything else (another type or curve, coordinates of another size,
+/// trailing bytes) is refused — the loader only ever asks for the SRK
+/// template.
+pub fn parse_ecc_public(area: &[u8]) -> Result<EccPoint, TpmError> {
+    let mut r = Reader::new(area);
+    if r.u16_be()? != alg::ECC {
+        return Err(TpmError::BadValue);
+    }
+    r.u16_be()?; // nameAlg
+    r.u32_be()?; // objectAttributes
+    read_tpm2b(&mut r, 64)?; // authPolicy
+    skip_alg(&mut r, 2)?; // symmetric: keyBits, mode
+    skip_alg(&mut r, 1)?; // scheme: hashAlg
+    if r.u16_be()? != alg::ECC_NIST_P256 {
+        return Err(TpmError::BadValue);
+    }
+    skip_alg(&mut r, 1)?; // kdf: hashAlg
+    let mut coord = || -> Result<[u8; ECC_P256_LEN], TpmError> {
+        let c = read_tpm2b(&mut r, 2 * ECC_P256_LEN)?;
+        c.try_into().map_err(|_| TpmError::BadValue)
+    };
+    let x = coord()?;
+    let y = coord()?;
+    done(&r)?;
+    Ok(EccPoint { x, y })
+}
+
+/// `TPM2_CreatePrimary` parameters of the ECC storage parent.
+pub fn parse_create_primary(params: &[u8]) -> Result<Primary<'_>, TpmError> {
     let mut r = Reader::new(params);
-    read_tpm2b(&mut r, 1024)?; // outPublic
+    let public_area = read_tpm2b(&mut r, 1024)?; // outPublic
     skip_creation(&mut r)?;
     let name = read_tpm2b(&mut r, 2 + 64)?;
     done(&r)?;
-    Ok(name)
+    Ok(Primary {
+        public_area,
+        point: parse_ecc_public(public_area)?,
+        name,
+    })
 }
 
 /// `TPM2_Create` output: whole TPM2B values (size prefix included), ready for
@@ -775,6 +875,14 @@ mod tests {
             params_start_policy_session(&mut b, &[0; 32]),
             Ok(34 + 2 + 1 + 2 + 2)
         );
+        let p = EccPoint {
+            x: [1; 32],
+            y: [2; 32],
+        };
+        let n = params_start_session(&mut b, &[0; 32], Some(&p), SE_HMAC).unwrap();
+        assert_eq!(n, 34 + 2 + 68 + 1 + 6 + 2);
+        assert_eq!(&b[34..40], &[0, 68, 0, 32, 1, 1]);
+        assert_eq!(&b[n - 9..n], &[SE_HMAC, 0, 6, 0, 128, 0, 0x43, 0, 0x0b]);
         assert_eq!(params_policy_pcr(&mut b, alg::SHA256, 0x1095), Ok(2 + 10));
         assert_eq!(params_policy_clock_before(&mut b, 5), Ok(10 + 4));
         assert_eq!(params_get_properties(&mut b, PT_PERMANENT, 16), Ok(12));
@@ -956,15 +1064,55 @@ mod tests {
         let mut x = b;
         x[1] = 0; // empty private
         assert!(parse_create(&x[..n]).is_err());
-        // CreatePrimary: outPublic, creation…, name
-        let mut w = Writer::new(&mut b);
-        w.put(&[0, 2, 4, 5, 0, 0, 0, 0]).unwrap();
-        w.u16_be(ST_CREATION).unwrap();
-        w.u32_be(rh::OWNER).unwrap();
-        w.put(&[0, 0, 0, 3, 0, 0x0b, 9]).unwrap();
-        let n = w.len();
-        assert_eq!(parse_create_primary(&b[..n]), Ok(&[0, 0x0b, 9][..]));
+        // CreatePrimary: outPublic (the SRK template, a point), creation…, name
+        let mut area = [0u8; 256];
+        let mut w = Writer::new(&mut area);
+        write_srk_public(&mut w).unwrap();
+        let empty_unique = w.len();
+        let an = empty_unique + 64;
+        let mut pub_area = [0u8; 256];
+        pub_area[..empty_unique - 4].copy_from_slice(&area[..empty_unique - 4]);
+        pub_area[empty_unique - 4..empty_unique - 2].copy_from_slice(&[0, 32]);
+        pub_area[empty_unique - 2..empty_unique + 30].copy_from_slice(&[7; 32]);
+        pub_area[empty_unique + 30..empty_unique + 32].copy_from_slice(&[0, 32]);
+        pub_area[empty_unique + 32..an].copy_from_slice(&[8; 32]);
+        let primary = |area: &[u8], b: &mut [u8; 256]| {
+            let mut w = Writer::new(b);
+            w.u16_be(area.len() as u16).unwrap();
+            w.put(area).unwrap();
+            w.put(&[0, 0, 0, 0]).unwrap();
+            w.u16_be(ST_CREATION).unwrap();
+            w.u32_be(rh::OWNER).unwrap();
+            w.put(&[0, 0, 0, 3, 0, 0x0b, 9]).unwrap();
+            w.len()
+        };
+        let n = primary(&pub_area[..an], &mut b);
+        let p = parse_create_primary(&b[..n]).unwrap();
+        assert_eq!(p.name, &[0, 0x0b, 9][..]);
+        assert_eq!(p.public_area, &pub_area[..an]);
+        assert_eq!((p.point.x, p.point.y), ([7; 32], [8; 32]));
         assert_eq!(parse_create_primary(&b[..n - 1]), Err(TpmError::Truncated));
+        // The empty-unique template (what we send) is not a key.
+        let n = primary(&area[..empty_unique], &mut b);
+        assert_eq!(parse_create_primary(&b[..n]), Err(TpmError::BadValue));
+        // An RSA key, another curve, a short coordinate, a trailing byte.
+        let mut x = pub_area;
+        x[1] = 0x01;
+        assert_eq!(parse_ecc_public(&x[..an]), Err(TpmError::BadValue));
+        let mut x = pub_area;
+        x[empty_unique - 8..empty_unique - 6].copy_from_slice(&[0, 4]);
+        assert_eq!(parse_ecc_public(&x[..an]), Err(TpmError::BadValue));
+        let mut x = pub_area;
+        x[empty_unique - 3] = 31;
+        assert!(parse_ecc_public(&x[..an]).is_err());
+        assert_eq!(
+            parse_ecc_public(&pub_area[..an + 1]),
+            Err(TpmError::Trailing)
+        );
+        assert_eq!(
+            parse_ecc_public(&pub_area[..an - 1]),
+            Err(TpmError::Truncated)
+        );
     }
 
     #[test]

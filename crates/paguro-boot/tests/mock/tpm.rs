@@ -5,18 +5,24 @@
 //! - SHA-256 PCRs with extend;
 //! - a deterministic SRK per owner seed;
 //! - sealed objects whose private blob is bound to the seed and the public area;
+//! - an ECC P-256 SRK whose public point salts sessions (ECDH, `KDFe`,
+//!   `KDFa`), AES-128-CFB parameter encryption of the Create sensitive and
+//!   the Unseal response, as TPM 2.0 Part 1 §19.6 and §21 define them;
 //! - policy sessions that accumulate PolicyPCR / PolicyCounterTimer /
 //!   PolicyAuthValue exactly as the TPM does, and an Unseal that checks the
-//!   digest against the object's authPolicy and the command HMAC keyed by the
-//!   authValue, with a dictionary-attack counter and lockout;
+//!   digest against the object's authPolicy and the command HMAC keyed by
+//!   sessionKey || authValue, with a dictionary-attack counter and lockout;
 //! - `TPMS_CLOCK_INFO` (clock + safe flag) and lockout properties.
 //!
 //! Fault injection (`corrupt`, `fail`) lets tests drive the loader's handling
 //! of hostile or failing responses.
 
 use hmac::{Hmac, Mac};
-use paguro_core::bytes::Reader;
+use p256::elliptic_curve::point::AffineCoordinates;
+use p256::{AffinePoint, FieldBytes, NonZeroScalar, ProjectivePoint};
+use paguro_core::bytes::{Reader, Writer};
 use paguro_core::tpm::{alg, attr, cc, rc};
+use paguro_crypto::tpm as st;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -57,6 +63,10 @@ struct Session {
     digest: [u8; 32],
     nonce_tpm: [u8; 32],
     auth_needed: bool,
+    /// Empty for an unsalted session.
+    key: Vec<u8>,
+    /// AES-128-CFB parameter encryption was negotiated.
+    aes: bool,
 }
 
 /// How to corrupt the next matching response.
@@ -77,6 +87,12 @@ pub enum Quirk {
     WrongLoadName,
     /// `TPM2_Unseal` returns 31 bytes (correctly authenticated).
     ShortPayload,
+    /// `TPM2_CreatePrimary` returns a public point that is not on the curve.
+    OffCurveSrk,
+    /// `TPM2_CreatePrimary` reports a name that is not its public area's.
+    WrongPrimaryName,
+    /// `TPM2_Unseal` returns `D` unencrypted (a TPM ignoring `encrypt`).
+    PlainUnseal,
 }
 
 #[derive(Clone)]
@@ -186,6 +202,30 @@ impl FakeTpm {
         let dl = *plain.get(1 + al)? as usize;
         let data = plain.get(2 + al..2 + al + dl)?.to_vec();
         Some((auth, data))
+    }
+
+    fn srk_scalar(&self) -> NonZeroScalar {
+        let raw = sha256(&[b"srk", &self.seed]);
+        Option::from(NonZeroScalar::from_repr(FieldBytes::from(raw))).unwrap()
+    }
+
+    /// The SRK's `TPMT_PUBLIC`: the template with the point filled in.
+    pub fn srk_public(&self) -> Vec<u8> {
+        let q = (ProjectivePoint::GENERATOR * *self.srk_scalar()).to_affine();
+        let mut b = [0u8; 256];
+        let mut w = Writer::new(&mut b);
+        paguro_core::tpm::write_srk_public(&mut w).unwrap();
+        let n = w.len() - 4; // without the empty unique
+        let mut v = b[..n].to_vec();
+        let (mut x, y): ([u8; 32], [u8; 32]) = (q.x().into(), q.y().into());
+        if self.quirk == Some(Quirk::OffCurveSrk) {
+            x[31] ^= 1;
+        }
+        for c in [x, y] {
+            v.extend([0, 32]);
+            v.extend(c);
+        }
+        v
     }
 
     fn alloc(&mut self, base: u32) -> u32 {
@@ -335,11 +375,17 @@ impl FakeTpm {
                 let h = self.alloc(0x8000_0000);
                 self.objects.insert(h, Obj::Primary);
                 // outPublic, creationData, creationHash, ticket, name
-                let mut body = vec![0, 2, 0, 0x23, 0, 0, 0, 0];
+                let public = self.srk_public();
+                let mut body = (public.len() as u16).to_be_bytes().to_vec();
+                body.extend(&public);
+                body.extend([0, 0, 0, 0]);
                 body.extend(0x8021u16.to_be_bytes());
                 body.extend(0x4000_0001u32.to_be_bytes());
                 body.extend([0, 0]);
-                let name = [&[0u8, 0x0b][..], &sha256(&[b"srk", &self.seed])].concat();
+                let mut name = [&[0u8, 0x0b][..], &sha256(&[&public])].concat();
+                if self.quirk == Some(Quirk::WrongPrimaryName) {
+                    name[9] ^= 1;
+                }
                 body.extend((name.len() as u16).to_be_bytes());
                 body.extend(name);
                 Ok(ok(Some(h), &body, &pw_sessions(sessions.len())))
@@ -348,6 +394,30 @@ impl FakeTpm {
                 if !matches!(self.objects.get(&h0), Some(Obj::Primary)) {
                     return Err(rc::HANDLE);
                 }
+                let (sh, nonce_caller, attrs, mac) =
+                    sessions.first().cloned().ok_or(rc::AUTH_MISSING)?;
+                let mut params = params.to_vec();
+                let hmac_session = if sh == 0x4000_0009 {
+                    None
+                } else {
+                    let sess = self.sessions.get(&sh).cloned().ok_or(rc::HANDLE)?;
+                    let name = [&[0u8, 0x0b][..], &sha256(&[&self.srk_public()])].concat();
+                    let cp = sha256(&[&cc::CREATE.to_be_bytes(), &name, &params]);
+                    let want = hmac(&sess.key, &[&cp, &nonce_caller, &sess.nonce_tpm, &[attrs]]);
+                    if want[..] != mac[..] {
+                        return Err(rc::AUTH_FAIL | 0x900);
+                    }
+                    if attrs & 0x20 != 0 {
+                        if !sess.aes {
+                            return Err(rc::VALUE);
+                        }
+                        let n = u16::from_be_bytes([params[0], params[1]]) as usize;
+                        let kiv = st::cfb_key_iv(&sess.key, &nonce_caller, &sess.nonce_tpm);
+                        st::cfb_decrypt(&kiv, params.get_mut(2..2 + n).ok_or(rc::VALUE)?);
+                    }
+                    Some((sh, sess, nonce_caller, attrs))
+                };
+                let mut p = Reader::new(&params);
                 let sens = tpm2b(&mut p)?;
                 let mut s = Reader::new(&sens);
                 let auth = tpm2b(&mut s)?;
@@ -356,14 +426,14 @@ impl FakeTpm {
                 let mut pr = Reader::new(&public);
                 let ty = pr.u16_be().map_err(|_| rc::VALUE)?;
                 let _name_alg = pr.u16_be().map_err(|_| rc::VALUE)?;
-                let attrs = pr.u32_be().map_err(|_| rc::VALUE)?;
+                let attrs_obj = pr.u32_be().map_err(|_| rc::VALUE)?;
                 if ty != alg::KEYEDHASH
-                    || attrs & attr::USER_WITH_AUTH != 0
-                    || attrs & attr::NO_DA != 0
+                    || attrs_obj & attr::USER_WITH_AUTH != 0
+                    || attrs_obj & attr::NO_DA != 0
                 {
                     return Err(rc::VALUE);
                 }
-                let private = self.wrap(&public, &auth, &data);
+                let private = self.wrap(&public, trim(&auth), &data);
                 let mut body = private;
                 body.extend((public.len() as u16).to_be_bytes());
                 body.extend(&public);
@@ -371,7 +441,14 @@ impl FakeTpm {
                 body.extend(0x8021u16.to_be_bytes());
                 body.extend(0x4000_0001u32.to_be_bytes());
                 body.extend([0, 0]);
-                Ok(ok(None, &body, &pw_sessions(sessions.len())))
+                match hmac_session {
+                    None => Ok(ok(None, &body, &pw_sessions(sessions.len()))),
+                    Some((sh, sess, nonce_caller, attrs)) => {
+                        let sess_bytes =
+                            self.respond(sh, &sess, cc::CREATE, &body, &nonce_caller, attrs);
+                        Ok(ok(None, &body, &sess_bytes))
+                    }
+                }
             }
             cc::LOAD => {
                 if !matches!(self.objects.get(&h0), Some(Obj::Primary)) {
@@ -402,15 +479,66 @@ impl FakeTpm {
                 Ok(ok(Some(h), &body, &pw_sessions(sessions.len())))
             }
             cc::START_AUTH_SESSION => {
-                let _nc = tpm2b(&mut p)?;
+                let nonce_caller = tpm2b(&mut p)?;
+                let salt_blob = tpm2b(&mut p)?;
+                let session_type = p.u8().map_err(|_| rc::VALUE)?;
+                let sym = p.u16_be().map_err(|_| rc::VALUE)?;
+                let aes = sym == alg::AES;
+                if aes {
+                    let bits = p.u16_be().map_err(|_| rc::VALUE)?;
+                    let mode = p.u16_be().map_err(|_| rc::VALUE)?;
+                    if bits != 128 || mode != alg::CFB {
+                        return Err(rc::VALUE);
+                    }
+                } else if sym != alg::NULL {
+                    return Err(rc::VALUE);
+                }
+                if p.u16_be().map_err(|_| rc::VALUE)? != alg::SHA256 || session_type > 1 {
+                    return Err(rc::VALUE);
+                }
+                let salt = if h0 == 0x4000_0007 {
+                    Vec::new()
+                } else {
+                    if !matches!(self.objects.get(&h0), Some(Obj::Primary)) {
+                        return Err(rc::HANDLE);
+                    }
+                    let mut sr = Reader::new(&salt_blob);
+                    let x = tpm2b(&mut sr)?;
+                    let y = tpm2b(&mut sr)?;
+                    let (x, y): ([u8; 32], [u8; 32]) = (
+                        x.try_into().map_err(|_| rc::VALUE)?,
+                        y.try_into().map_err(|_| rc::VALUE)?,
+                    );
+                    let qe: AffinePoint = Option::from(AffinePoint::from_coordinates(
+                        &FieldBytes::from(x),
+                        &FieldBytes::from(y),
+                    ))
+                    .ok_or(rc::VALUE)?;
+                    let z: [u8; 32] = (ProjectivePoint::from(qe) * *self.srk_scalar())
+                        .to_affine()
+                        .x()
+                        .into();
+                    let q = (ProjectivePoint::GENERATOR * *self.srk_scalar()).to_affine();
+                    let qx: [u8; 32] = q.x().into();
+                    st::kdfe(&z, b"SECRET", &x, &qx).to_vec()
+                };
                 let h = self.alloc(0x0300_0000);
                 let nonce_tpm = self.nonce();
+                let key = if salt.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut k = [0u8; 32];
+                    st::kdfa(&salt, b"ATH", &nonce_tpm, &nonce_caller, &mut k);
+                    k.to_vec()
+                };
                 self.sessions.insert(
                     h,
                     Session {
                         digest: [0; 32],
                         nonce_tpm,
                         auth_needed: false,
+                        key,
+                        aes,
                     },
                 );
                 let mut body = vec![0, 32];
@@ -478,11 +606,10 @@ impl FakeTpm {
                 }
                 let name = [&[0u8, 0x0b][..], &sha256(&[&public])].concat();
                 let cp = sha256(&[&cc::UNSEAL.to_be_bytes(), &name]);
-                let key = if sess.auth_needed {
-                    trim(&auth).to_vec()
-                } else {
-                    Vec::new()
-                };
+                let mut key = sess.key.clone();
+                if sess.auth_needed {
+                    key.extend(trim(&auth));
+                }
                 let want = hmac(&key, &[&cp, &nonce_caller, &sess.nonce_tpm, &[attrs]]);
                 if want[..] != mac[..] {
                     self.lockout_counter += 1;
@@ -491,19 +618,27 @@ impl FakeTpm {
                     }
                     return Err(rc::AUTH_FAIL | 0x900);
                 }
+                if attrs & 0x20 != 0 || (attrs & 0x40 != 0 && !sess.aes) {
+                    // Unseal has no command parameter to decrypt.
+                    return Err(rc::VALUE);
+                }
+                let mut data = if self.quirk == Some(Quirk::ShortPayload) {
+                    data[..31].to_vec()
+                } else {
+                    data.clone()
+                };
+                let new_nonce = self.nonce();
+                if attrs & 0x40 != 0 && self.quirk != Some(Quirk::PlainUnseal) {
+                    let kiv = st::cfb_key_iv(&key, &new_nonce, &nonce_caller);
+                    st::cfb_encrypt(&kiv, &mut data);
+                }
+                let mut body = (data.len() as u16).to_be_bytes().to_vec();
+                body.extend(&data);
+                let rp = sha256(&[&0u32.to_be_bytes(), &cc::UNSEAL.to_be_bytes(), &body]);
+                let rmac = hmac(&key, &[&rp, &new_nonce, &nonce_caller, &[attrs]]);
                 if attrs & 1 == 0 {
                     self.sessions.remove(&sh);
                 }
-                let data = if self.quirk == Some(Quirk::ShortPayload) {
-                    &data[..31]
-                } else {
-                    &data[..]
-                };
-                let mut body = (data.len() as u16).to_be_bytes().to_vec();
-                body.extend(data);
-                let new_nonce = self.nonce();
-                let rp = sha256(&[&0u32.to_be_bytes(), &cc::UNSEAL.to_be_bytes(), &body]);
-                let rmac = hmac(&key, &[&rp, &new_nonce, &nonce_caller, &[attrs]]);
                 let mut sess_bytes = vec![0, 32];
                 sess_bytes.extend(new_nonce);
                 sess_bytes.push(attrs);
@@ -520,6 +655,35 @@ impl FakeTpm {
             }
             _ => Err(rc::COMMAND_CODE),
         }
+    }
+}
+
+impl FakeTpm {
+    /// The response auth of an HMAC session; the session goes unless
+    /// `continueSession`.
+    fn respond(
+        &mut self,
+        sh: u32,
+        sess: &Session,
+        code: u32,
+        body: &[u8],
+        nonce_caller: &[u8],
+        attrs: u8,
+    ) -> Vec<u8> {
+        let new_nonce = self.nonce();
+        let rp = sha256(&[&0u32.to_be_bytes(), &code.to_be_bytes(), body]);
+        let rmac = hmac(&sess.key, &[&rp, &new_nonce, nonce_caller, &[attrs]]);
+        if attrs & 1 == 0 {
+            self.sessions.remove(&sh);
+        } else if let Some(s) = self.sessions.get_mut(&sh) {
+            s.nonce_tpm = new_nonce;
+        }
+        let mut v = vec![0, 32];
+        v.extend(new_nonce);
+        v.push(attrs);
+        v.extend([0, 32]);
+        v.extend(rmac);
+        v
     }
 }
 

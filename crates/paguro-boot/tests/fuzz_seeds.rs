@@ -130,6 +130,24 @@ fn tpm_client_seed(which: u8, deadline: Option<u64>, auth: &[u8; 32]) -> Vec<u8>
     seed
 }
 
+/// The provisioning `TPM2_Create` (salted HMAC session, encrypted
+/// sensitive), exactly as the `tpm_client` target's selector 2 calls it.
+fn tpm_client_create_seed() -> Vec<u8> {
+    let mut r = Recorder {
+        tpm: FakeTpm::new(3),
+        record: true,
+        log: Vec::new(),
+    };
+    let mut obj = CreatedObject::new();
+    Tpm::new(&mut r)
+        .create_sealed(&[1; 32], &[2; 32], &[3; 32], &mut obj)
+        .unwrap();
+    // No object to unseal: two empty TPM2Bs.
+    let mut seed = vec![2, 0, 0, 0, 0];
+    seed.extend(&r.log);
+    seed
+}
+
 #[test]
 #[ignore]
 fn write_fuzz_seeds() {
@@ -336,6 +354,7 @@ fn write_fuzz_seeds() {
         "bypass",
         &tpm_client_seed(1, Some(99), &[0; 32]),
     );
+    put("tpm_client", "create", &tpm_client_create_seed());
     // tpm_response: each recorded response, prefixed by a selector byte
     let mut rest = &tpm[1..];
     for _ in 0..2 {

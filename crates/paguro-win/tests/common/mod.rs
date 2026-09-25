@@ -175,6 +175,8 @@ mod tpm {
         dir: PathBuf,
         sock: UnixStream,
         rng: u64,
+        /// Every command and response, as a bus interposer sees them.
+        pub wire: Vec<Vec<u8>>,
     }
 
     impl Drop for Swtpm {
@@ -227,6 +229,7 @@ mod tpm {
                     dir,
                     sock: s,
                     rng: 7,
+                    wire: Vec::new(),
                 })));
             }
             if t0.elapsed() > Duration::from_secs(10) {
@@ -246,7 +249,17 @@ mod tpm {
             let n = u32::from_be_bytes(hdr[2..6].try_into().unwrap()) as usize;
             let mut rest = vec![0u8; n - 10];
             self.sock.read_exact(&mut rest).unwrap();
-            [&hdr[..], &rest].concat()
+            let r = [&hdr[..], &rest].concat();
+            self.wire.push(cmd.to_vec());
+            self.wire.push(r.clone());
+            r
+        }
+
+        /// Whether `needle` appeared in any command or response.
+        pub fn on_wire(&self, needle: &[u8]) -> bool {
+            self.wire
+                .iter()
+                .any(|m| m.windows(needle.len()).any(|w| w == needle))
         }
 
         /// `TPM2_PCR_Extend(pcr, sha256: digest)`.

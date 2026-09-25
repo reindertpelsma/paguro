@@ -1251,6 +1251,8 @@ fn a_lying_tpm_is_caught() {
     for (quirk, msg) in [
         (Quirk::WrongLoadName, "NameMismatch"),
         (Quirk::ShortPayload, "BadPayload"),
+        (Quirk::OffCurveSrk, "BadParentKey"),
+        (Quirk::WrongPrimaryName, "NameMismatch"),
     ] {
         let mut w = World::new();
         w.with_tpm_seal(PIN);
@@ -1263,6 +1265,32 @@ fn a_lying_tpm_is_caught() {
         assert!(w.m.logged(msg), "{quirk:?}: {:?}", w.m.log);
         assert!(!w.m.logged("rung tpm: unsealed"));
     }
+}
+
+/// DESIGN.md §6: `D` crosses the TPM bus only encrypted (a salted session,
+/// response parameter encryption). The control: a TPM that ignores
+/// `encrypt` puts `D` on the wire, and the loader, decrypting what it was
+/// promised was ciphertext, gets a wrong key and falls through.
+#[test]
+fn d_never_crosses_the_bus_in_clear() {
+    let mut w = World::new();
+    w.with_tpm_seal(PIN);
+    w.m.wire.clear();
+    pin(&mut w, PIN);
+    assert_eq!(w.run(), Outcome::Started(Rung::Tpm));
+    assert!(!w.m.wire.is_empty());
+    assert!(!w.m.on_wire(&D[..16]) && !w.m.on_wire(&D[16..]));
+
+    let mut w = World::new();
+    w.with_tpm_seal(PIN);
+    w.m.tpm().quirk = Some(mock::tpm::Quirk::PlainUnseal);
+    w.v.recovery = Some((RECOVERY_KEY, VMK));
+    pin(&mut w, PIN);
+    w.m.input(Input::Select(Row::RecoveryKey))
+        .secret(RECOVERY_PW);
+    assert_eq!(w.run(), Outcome::Started(Rung::RecoveryKey));
+    assert!(w.m.on_wire(&D), "the control: a plaintext D is seen");
+    assert_eq!(w.m.decoded().vmk, Some(&VMK));
 }
 
 #[test]

@@ -66,6 +66,8 @@ pub struct Mock {
     pub start_fails: bool,
     /// When non-empty, TPM responses come from here instead of the fake.
     pub raw_tpm: VecDeque<Vec<u8>>,
+    /// Every TPM command and response, as a bus interposer sees them.
+    pub wire: Vec<Vec<u8>>,
     pub extend_fails: bool,
     /// Every `Platform::ui_prefs` call.
     pub ui: Vec<paguro_core::config::Ui>,
@@ -110,6 +112,7 @@ impl Mock {
             rng_fails: false,
             start_fails: false,
             raw_tpm: VecDeque::new(),
+            wire: Vec::new(),
             extend_fails: false,
             ui: Vec::new(),
             exposed: Vec::new(),
@@ -137,6 +140,13 @@ impl Mock {
     pub fn put_var(&mut self, name: &str, vendor: Guid, attrs: u32, data: &[u8]) {
         self.vars
             .insert((name.to_string(), vendor), (attrs, data.to_vec()));
+    }
+
+    /// Whether `needle` appeared in any TPM command or response.
+    pub fn on_wire(&self, needle: &[u8]) -> bool {
+        self.wire
+            .iter()
+            .any(|m| m.windows(needle.len()).any(|w| w == needle))
     }
 
     pub fn logged(&self, needle: &str) -> bool {
@@ -250,6 +260,8 @@ impl Platform for Mock {
             Some(raw) => raw,
             None => t.submit(cmd),
         };
+        self.wire.push(cmd.to_vec());
+        self.wire.push(r.clone());
         if r.len() > resp.len() {
             return Err(PlatformError::TooLarge);
         }

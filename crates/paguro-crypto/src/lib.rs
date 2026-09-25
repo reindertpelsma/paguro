@@ -11,11 +11,14 @@
 //! metadata on the raw volume. An early "incorrect password" is an offline
 //! oracle by another name.
 //!
-//! Symmetric primitives only — `paguro-efi` implements no asymmetric crypto.
+//! Symmetric primitives only. (The loader's one asymmetric operation, the
+//! ECDH that salts its TPM sessions, is in `paguro-boot`'s TPM client; it
+//! verifies no signatures.)
 #![no_std]
 #![forbid(unsafe_code)]
 
 pub mod bitlocker;
+pub mod tpm;
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};

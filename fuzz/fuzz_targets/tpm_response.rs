@@ -20,7 +20,11 @@ fuzz_target!(|data: &[u8]| {
             let _ = v.get(i);
         }
     });
-    let _ = tpm::parse_create_primary(body);
+    if let Ok(p) = tpm::parse_create_primary(body) {
+        assert!(p.public_area.len() + p.name.len() <= body.len());
+        assert_eq!(tpm::parse_ecc_public(p.public_area), Ok(p.point));
+    }
+    let _ = tpm::parse_ecc_public(body);
     if let Ok(c) = tpm::parse_create(body) {
         assert!(c.private.len() + c.public.len() <= body.len());
     }

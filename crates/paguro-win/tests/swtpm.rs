@@ -142,6 +142,10 @@ fn restart_linux_writes_a_bypass_the_loader_unseals() {
         vmk_opens_fixture(&vmk),
         "the bypass must yield the volume's VMK"
     );
+    // D crossed the TPM bus only encrypted, both when Windows sealed it and
+    // when the loader unsealed it (DESIGN.md §6: salted sessions).
+    assert!(t.borrow().wire.len() > 20);
+    assert!(!t.borrow().on_wire(&d[..16]) && !t.borrow().on_wire(&d[16..]));
     assert!(!r.stdout.contains(&paguro_win::out::to_hex(&vmk)));
     // After a PCR the policy names moves, it opens nothing.
     t.borrow_mut().pcr_extend(7, &[0x55; 32]);
