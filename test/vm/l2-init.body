@@ -1,0 +1,34 @@
+# The paguro host stack in a throwaway Linux VM (appended to vm_init_head):
+# dm-paguro loaded, the 9p share at /share, the NAT NIC configured, then a
+# command loop — the host drops /share/q/NNN.sh, this runs it and leaves
+# NNN.out and NNN.rc. `poweroff` in a command ends the VM.
+insmod /mod/dm-paguro.ko || bad "insmod dm-paguro"
+mkdir -p /share /run /mnt/esp /mnt/p /mnt/c /mnt/l /run/netns /var/run /tmp
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 share /share || bad "9p share"
+mount -t tmpfs run /run
+mkdir -p /run/netns
+ln -s /proc/mounts /etc/mtab 2>/dev/null
+# NICs by MAC: the NAT one, and the private link's far end.
+for d in /sys/class/net/*; do
+    n=${d##*/}; m=$(cat "$d/address")
+    case $m in
+        52:54:00:12:34:56) nat=$n ;;
+        02:70:67:00:00:01) link=$n ;;
+    esac
+done
+ip link set lo up
+ip link set "$nat" up && ip addr add 10.0.2.15/24 dev "$nat" && ip route add default via 10.0.2.2
+echo "nat=$nat link=$link" > /share/l2-nics
+ok "l2 up: $(uname -r), $(cat /proc/meminfo | head -1)"
+touch /share/l2-ready
+mkdir -p /share/q
+while :; do
+    for f in /share/q/*.sh; do
+        [ -e "$f" ] || continue
+        b=${f%.sh}
+        [ -e "$b.rc" ] && continue
+        sh "$f" > "$b.out" 2>&1
+        echo $? > "$b.rc"
+    done
+    sleep 0.3
+done

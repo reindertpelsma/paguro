@@ -42,6 +42,7 @@ pub fn smb_conf(root: &Path, state_dir: &Path) -> String {
         "# paguro: the private link's Samba (DESIGN.md §5c). Generated.\n\
          [global]\n\
          \tworkgroup = PAGURO\n\
+         \tnetbios name = PAGURO-LINUX\n\
          \tserver role = standalone server\n\
          \tinterfaces = {IFNAME}\n\
          \tbind interfaces only = yes\n\
@@ -233,8 +234,28 @@ pub fn start_samba(root: &Path, state: &Path, secret: &str) -> Result<(), String
     if !st.success() {
         return Err(format!("smbpasswd: {st}"));
     }
-    in_netns(move || run(Command::new("smbd").arg("-D").arg("-s").arg(&conf)))
+    let pidfile = state.join("smbd.pid");
+    let _ = std::fs::remove_file(&pidfile);
+    in_netns(move || run(Command::new("smbd").arg("-D").arg("-s").arg(&conf)))?;
+    // smbd -D returns before it has set up; it may still give up (a
+    // missing guest account, a port in use). Running means its pid file
+    // names a live process a moment later.
+    for _ in 0..SMBD_POLLS {
+        std::thread::sleep(std::time::Duration::from_millis(SMBD_POLL_MS));
+        if let Ok(p) = std::fs::read_to_string(&pidfile) {
+            if Path::new("/proc").join(p.trim()).exists() {
+                return Ok(());
+            }
+        }
+    }
+    Err(format!(
+        "smbd did not stay up; see {}",
+        state.join("log.smbd").display()
+    ))
 }
+
+const SMBD_POLLS: u32 = 30;
+const SMBD_POLL_MS: u64 = 200;
 
 /// Mount `/mnt/c` (Mode 1) from inside the netns.
 pub fn mount_c(target: &Path, secret: &str, uid: u32, gid: u32) -> Result<(), String> {

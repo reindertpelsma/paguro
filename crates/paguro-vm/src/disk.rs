@@ -494,6 +494,72 @@ mod tests {
         );
     }
 
+    proptest::proptest! {
+        /// Any valid owned set, any sizes: the table tiles the disk, every
+        /// volume sector goes to view B at its own offset unless owned,
+        /// and every owned sector to its own place in the FVE buffer.
+        #[test]
+        fn table_routes_every_sector(
+            gaps in proptest::collection::vec((1u64..5000, 1u64..300), 0..7),
+            tail in 1u64..5000,
+            esp_mib in 1u64..300,
+            msr in proptest::bool::ANY,
+        ) {
+            let mut owned = Vec::new();
+            let mut at = 0;
+            for (gap, len) in &gaps {
+                owned.push((at + gap - 1, *len));
+                at += gap - 1 + len;
+            }
+            let mut s = spec(512, msr);
+            s.owned = owned.clone();
+            s.esp_bytes = esp_mib << 20;
+            s.volume_bytes = (at + tail) * SECTOR;
+            let p = plan(&s).unwrap();
+            let t = table(&p, "7:0", "254:3");
+            let mut pos = 0;
+            for x in &t {
+                proptest::prop_assert_eq!(x.start, pos);
+                pos += x.len;
+            }
+            proptest::prop_assert_eq!(pos * SECTOR, p.disk_bytes);
+            let v0 = p.volume_at / SECTOR;
+            let vol = s.volume_bytes / SECTOR;
+            let map = |sec: u64| -> (String, u64) {
+                let x = t.iter().find(|x| sec >= x.start && sec < x.start + x.len).unwrap();
+                let mut it = x.params.split(' ');
+                let dev = it.next().unwrap().to_string();
+                let off: u64 = it.next().unwrap().parse().unwrap();
+                (dev, off + sec - x.start)
+            };
+            // Sample the boundaries of every owned range and the gaps.
+            let mut buf = 0;
+            let mut probes = vec![0, vol - 1];
+            for &(st, l) in &owned {
+                probes.extend([st.saturating_sub(1), st, st + l - 1, st + l]);
+            }
+            for &q in &probes {
+                if q >= vol {
+                    continue;
+                }
+                let (dev, off) = map(v0 + q);
+                match owned.iter().position(|&(st, l)| q >= st && q < st + l) {
+                    Some(i) => {
+                        let before: u64 = owned.iter().take(i).map(|x| x.1).sum();
+                        proptest::prop_assert_eq!(dev, "7:0");
+                        proptest::prop_assert_eq!(off, p.scratch.fve / SECTOR + before + (q - owned[i].0));
+                    }
+                    None => {
+                        proptest::prop_assert_eq!(dev, "254:3");
+                        proptest::prop_assert_eq!(off, q);
+                    }
+                }
+            }
+            buf += owned.iter().map(|x| x.1).sum::<u64>();
+            proptest::prop_assert!(p.scratch.tail >= p.scratch.fve + buf * SECTOR);
+        }
+    }
+
     #[test]
     fn refusals() {
         let mut s = spec(512, true);
