@@ -20,6 +20,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  # a newer push to the same branch supersedes a run still queued or running;
+  # scheduled (nightly) runs are never cancelled
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
 env:
   CARGO_TERM_COLOR: always
 
