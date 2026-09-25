@@ -97,4 +97,4 @@ file comp_c.bin vol4k.img 66 1 Compressed
 file sparse.bin vol4k.img 67 1 Sparse
 file comp vol4k.img 65 1 Directory
 volume clean vol4kn.img - - flags:0000
-file plain.img vol4kn.img 64 1 ok:524288:291b9c7974cf04c8:gpt
+file plain.img vol4kn.img 64 1 ok:524288:8540f35586f79f0c:gpt

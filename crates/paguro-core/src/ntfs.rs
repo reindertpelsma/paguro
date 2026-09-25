@@ -118,9 +118,26 @@ pub enum NtfsError {
     NoVolumeInfo,
     /// File-order extents overlap each other.
     SelfOverlap,
+    /// The payload's GPT header or entry array is malformed, or a
+    /// partition lies outside the usable range.
     PayloadGpt,
-    PayloadNoEsp,
+    /// A GPT none of whose partitions could be verified (FAT ESP or ext4).
+    PayloadNoKnownPartition,
+    /// A partition typed ESP does not start with a FAT boot sector.
     PayloadNotFat,
+    /// The primary GPT header's or entry array's CRC32 is wrong.
+    PayloadGptCrc,
+    /// The backup GPT header (or its entry array) is missing, damaged or
+    /// disagrees with the primary.
+    PayloadGptBackup,
+    /// An ext4 superblock is implausible, or its backup in the block group
+    /// it names (1, or `s_backup_bgs[0]`) is missing or disagrees.
+    PayloadExt4,
+    /// An ISO 9660 primary volume descriptor is malformed, its size is not
+    /// the payload's, or its root directory record does not point at itself.
+    PayloadIso,
+    /// The payload is none of GPT, bare ext4 or ISO 9660.
+    PayloadUnknown,
     Runlist(RunlistError),
 }
 
@@ -170,8 +187,13 @@ impl NtfsError {
             NoVolumeInfo => 39,
             SelfOverlap => 40,
             PayloadGpt => 41,
-            PayloadNoEsp => 42,
+            PayloadNoKnownPartition => 42,
             PayloadNotFat => 43,
+            PayloadGptCrc => 44,
+            PayloadGptBackup => 45,
+            PayloadExt4 => 46,
+            PayloadIso => 47,
+            PayloadUnknown => 48,
             Runlist(e) => match e {
                 RunlistError::Truncated => 50,
                 RunlistError::FieldTooWide => 51,
@@ -845,6 +867,30 @@ pub fn coalesce(e: &mut [Extent]) -> Option<usize> {
     Some(n)
 }
 
+/// The first `sectors` logical sectors of file-order extents, in place;
+/// `None` if they hold fewer, any is empty, or `sectors` is 0. The
+/// cross-check compares FIEMAP and the derived map up to the end of the
+/// file's data this way (drivers report the unused tail of a partly used
+/// last cluster differently; a fixed VHD always has one).
+pub fn truncate(e: &mut [Extent], sectors: u64) -> Option<usize> {
+    let mut left = sectors;
+    for (i, x) in e.iter_mut().enumerate() {
+        if left == 0 {
+            break;
+        }
+        if x.start >= x.end {
+            return None;
+        }
+        let len = x.end - x.start;
+        if len >= left {
+            x.end = x.start + left;
+            return Some(i + 1);
+        }
+        left -= len;
+    }
+    None
+}
+
 /// View A's translation: logical sector `lsec` of the gathered file →
 /// `(physical sector, sectors left in that extent)`, `None` beyond the end.
 pub fn gather(file: &[Extent], lsec: u64) -> Option<(u64, u64)> {
@@ -862,45 +908,269 @@ pub fn gather(file: &[Extent], lsec: u64) -> Option<(u64, u64)> {
     None
 }
 
-/// The mandatory structural assertion (DESIGN §4.3): the gathered image is a
-/// GPT disk whose first EFI System Partition starts with a FAT boot sector.
-/// `img` reads image sectors; `sectors` is the image length.
-pub fn check_payload<D: Disk>(img: &mut D, sectors: u64) -> Result<()> {
+/// The mandatory structural assertion (DESIGN §4.3, INTERFACES §3.2 "the
+/// structural assertion follows the content"), over the gathered image of
+/// `sectors` 512-byte sectors, before anything can mount it:
+///
+/// | payload | checked |
+/// |---|---|
+/// | GPT (`EFI PART` at LBA 1, in units of `lbs`) | header and entry-array CRC32; the backup header at the primary's alternate LBA (the last LBA, or earlier on a disk that grew and has not moved it yet) agreeing field by field, with its own entry array; every used entry inside the usable range; each ESP a FAT boot sector, each partition holding an ext4 superblock checked as bare ext4; at least one partition verified |
+/// | bare ext4 (`0xEF53` at byte 1080) | plausible geometry no larger than the payload, the primary naming group 0, and the backup superblock in group 1 (or `s_backup_bgs[0]` under `sparse_super2`) agreeing on UUID, block count and naming its own group |
+/// | ISO 9660 (`CD001` at byte 32768) | the primary volume descriptor's both-endian fields agree, volume space size × block size = payload length, and the root directory's `.` record points at itself |
+/// | anything else | refused |
+///
+/// Everything checked beyond the first sectors (the backup GPT, partition
+/// starts, ext4's group-1 superblock) sits past a fragmented file's first
+/// extent, so extents gathered in the wrong order fail here.
+///
+/// `lbs` is view A's logical block size (512 or 4096): a GPT counts its LBAs
+/// in it, as the kernel's partition code will. Reads are always 512-byte
+/// sectors; anything else is refused.
+pub fn check_payload<D: Disk>(img: &mut D, sectors: u64, lbs: u64) -> Result<()> {
     let mut b = [0u8; 512];
-    if sectors < 3 {
+    if (lbs != 512 && lbs != 4096) || sectors < 2 {
+        return Err(E::PayloadUnknown);
+    }
+    let k = lbs / 512;
+    if sectors > k {
+        img.read(k, &mut b).map_err(|_| E::Io)?;
+        if b.get(..8) == Some(&b"EFI PART"[..]) {
+            return payload_gpt(img, sectors, k, &mut b);
+        }
+    }
+    if sectors > 2 {
+        img.read(2, &mut b).map_err(|_| E::Io)?;
+        if g16(&b, 56) == EXT4_MAGIC {
+            return payload_ext4(img, 0, sectors, &mut b);
+        }
+    }
+    if sectors > ISO_PVD {
+        img.read(ISO_PVD, &mut b).map_err(|_| E::Io)?;
+        if b.get(..6) == Some(&b"\x01CD001"[..]) {
+            return payload_iso(img, sectors, &mut b);
+        }
+    }
+    Err(E::PayloadUnknown)
+}
+
+const EXT4_MAGIC: u64 = 0xef53;
+/// Sector of the ISO 9660 primary volume descriptor (byte 32768).
+const ISO_PVD: u64 = 64;
+
+/// CRC-32 (IEEE) of the first `n` bytes of the header in `b`, with its own
+/// CRC field (bytes 16..20) taken as zero. `n` ≤ 512.
+fn header_crc(b: &[u8; 512], n: usize) -> u64 {
+    let mut c = crate::gpt::crc32_update(0, b.get(..16).unwrap_or(&[]));
+    c = crate::gpt::crc32_update(c, &[0; 4]);
+    u64::from(crate::gpt::crc32_update(c, b.get(20..n).unwrap_or(&[])))
+}
+
+/// CRC-32 of a GPT entry array of `count` 128-byte entries at sector `at`.
+fn array_crc<D: Disk>(img: &mut D, at: u64, count: u64, b: &mut [u8; 512]) -> Result<u64> {
+    let (mut c, mut left) = (0u32, count * 128);
+    let mut s = at;
+    while left > 0 {
+        img.read(s, b).map_err(|_| E::Io)?;
+        let n = left.min(512);
+        c = crate::gpt::crc32_update(c, b.get(..us(n)).unwrap_or(&[]));
+        left -= n;
+        s += 1;
+    }
+    Ok(u64::from(c))
+}
+
+/// `b` holds LBA 1, which starts `EFI PART`; an LBA is `k` sectors. Every
+/// LBA is checked against `lbas` (the image in LBAs) before it is scaled.
+fn payload_gpt<D: Disk>(img: &mut D, sectors: u64, k: u64, b: &mut [u8; 512]) -> Result<()> {
+    let lbas = sectors / k;
+    let hsize = g32(b, 12);
+    if !(92..=512).contains(&hsize) || g64(b, 24) != 1 {
         return Err(E::PayloadGpt);
     }
-    img.read(1, &mut b).map_err(|_| E::Io)?;
-    let hsize = g32(&b, 12);
-    if b.get(..8) != Some(&b"EFI PART"[..]) || !(92..=512).contains(&hsize) || g64(&b, 24) != 1 {
+    if header_crc(b, us(hsize)) != g32(b, 16) {
+        return Err(E::PayloadGptCrc);
+    }
+    let (alt, first_usable, last_usable) = (g64(b, 32), g64(b, 40), g64(b, 48));
+    let mut guid = [0u8; 16];
+    guid.copy_from_slice(b.get(56..72).unwrap_or(&[0; 16]));
+    let (lba, count, esize, acrc) = (g64(b, 72), g32(b, 80), g32(b, 84), g32(b, 88));
+    if esize != 128 || count == 0 || count > 1024 {
         return Err(E::PayloadGpt);
     }
-    let (lba, count, esize) = (g64(&b, 72), g32(&b, 80), g32(&b, 84));
-    if esize != 128 || count == 0 || count > 1024 || lba < 2 || lba >= sectors {
+    // The array's size in LBAs.
+    let asec = (count * 128).div_ceil(k * 512);
+    // The array lies in [lba, first_usable), partitions in
+    // [first_usable, last_usable], the backup array and header above that.
+    if alt >= lbas
+        || last_usable >= alt
+        || first_usable > last_usable
+        || lba < 2
+        || lba > first_usable
+        || first_usable - lba < asec
+    {
         return Err(E::PayloadGpt);
     }
-    if sectors - lba < count.div_ceil(4) {
-        return Err(E::PayloadGpt);
+    if array_crc(img, lba * k, count, b)? != acrc {
+        return Err(E::PayloadGptCrc);
     }
+    img.read(alt * k, b).map_err(|_| E::Io)?;
+    if b.get(..8) != Some(&b"EFI PART"[..])
+        || g32(b, 12) != hsize
+        || header_crc(b, us(hsize)) != g32(b, 16)
+        || g64(b, 24) != alt
+        || g64(b, 32) != 1
+        || g64(b, 40) != first_usable
+        || g64(b, 48) != last_usable
+        || b.get(56..72) != Some(&guid[..])
+        || g32(b, 80) != count
+        || g32(b, 84) != esize
+        || g32(b, 88) != acrc
+    {
+        return Err(E::PayloadGptBackup);
+    }
+    let blba = g64(b, 72);
+    if blba <= last_usable || blba >= alt || alt - blba < asec {
+        return Err(E::PayloadGptBackup);
+    }
+    if array_crc(img, blba * k, count, b)? != acrc {
+        return Err(E::PayloadGptBackup);
+    }
+    let (mut verified, mut stale) = (0u32, true);
     for i in 0..count {
-        if i % 4 == 0 {
-            img.read(lba + i / 4, &mut b).map_err(|_| E::Io)?;
+        if i % 4 == 0 || stale {
+            img.read(lba * k + i / 4, b).map_err(|_| E::Io)?;
+            stale = false;
         }
         let e = us(i % 4) * 128;
-        if b.get(e..e + 16) != Some(&ESP_TYPE[..]) {
+        let ty = b.get(e..e + 16).unwrap_or(&[]);
+        if ty.iter().all(|&x| x == 0) {
             continue;
         }
-        let (first, last) = (g64(&b, e + 32), g64(&b, e + 40));
-        if first < 2 || first > last || last >= sectors {
+        let esp = ty == ESP_TYPE;
+        let (first, last) = (g64(b, e + 32), g64(b, e + 40));
+        if first < first_usable || last > last_usable || first > last {
             return Err(E::PayloadGpt);
         }
-        img.read(first, &mut b).map_err(|_| E::Io)?;
-        let fat =
-            b.get(0x36..0x39) == Some(&b"FAT"[..]) || b.get(0x52..0x57) == Some(&b"FAT32"[..]);
-        if g16(&b, 510) != 0xaa55 || !fat {
-            return Err(E::PayloadNotFat);
+        // In sectors from here on: last < alt < lbas, so no overflow.
+        let (first, len) = (first * k, (last - first + 1) * k);
+        stale = true;
+        if esp {
+            img.read(first, b).map_err(|_| E::Io)?;
+            if !is_fat(b, len) {
+                return Err(E::PayloadNotFat);
+            }
+            verified += 1;
+        } else if len > 2 {
+            img.read(first + 2, b).map_err(|_| E::Io)?;
+            if g16(b, 56) == EXT4_MAGIC {
+                payload_ext4(img, first, len, b)?;
+                verified += 1;
+            }
         }
-        return Ok(());
     }
-    Err(E::PayloadNoEsp)
+    if verified == 0 {
+        return Err(E::PayloadNoKnownPartition);
+    }
+    Ok(())
+}
+
+/// A FAT boot sector for a partition of `len` sectors: signature, a FAT
+/// type string, sane sector and cluster sizes, and no more sectors than the
+/// partition holds.
+fn is_fat(b: &[u8; 512], len: u64) -> bool {
+    let name = b.get(0x36..0x39) == Some(&b"FAT"[..]) || b.get(0x52..0x57) == Some(&b"FAT32"[..]);
+    let bps = g16(b, 11);
+    let spc = g8(b, 13);
+    let mut total = g16(b, 0x13);
+    if total == 0 {
+        total = g32(b, 0x20);
+    }
+    g16(b, 510) == 0xaa55
+        && name
+        && matches!(bps, 512 | 1024 | 2048 | 4096)
+        && spc.is_power_of_two()
+        && total != 0
+        && total * (bps / 512) <= len
+}
+
+/// ext4 at sector `base` of the image, `len` sectors long; `b` holds sector
+/// `base + 2` (the first half of the superblock), whose magic matched.
+fn payload_ext4<D: Disk>(img: &mut D, base: u64, len: u64, b: &mut [u8; 512]) -> Result<()> {
+    let log = g32(b, 0x18);
+    let first = g32(b, 0x14);
+    let per_group = g32(b, 0x20);
+    let (compat, incompat) = if g32(b, 0x4c) >= 1 {
+        (g32(b, 0x5c), g32(b, 0x60))
+    } else {
+        (0, 0)
+    };
+    let wide = incompat & 0x80 != 0; // INCOMPAT_64BIT
+    let blocks = |b: &[u8; 512]| g32(b, 4) | if wide { g32(b, 0x150) << 32 } else { 0 };
+    let count = blocks(b);
+    // The primary names group 0: a backup copy where the primary belongs
+    // (extents misordered) is refused.
+    // The superblock alone fills sectors 2-3: `len` > 3 bounds the read of
+    // sector 3 below.
+    if len < 4
+        || log > 6
+        || per_group == 0
+        || first > 1
+        || (log > 0 && first != 0)
+        || g16(b, 0x5a) != 0
+    {
+        return Err(E::PayloadExt4);
+    }
+    let per_block = 2u64 << log; // sectors
+    if count == 0 || count > len / per_block {
+        return Err(E::PayloadExt4);
+    }
+    let mut uuid = [0u8; 16];
+    uuid.copy_from_slice(b.get(0x68..0x78).unwrap_or(&[0; 16]));
+    // COMPAT_SPARSE_SUPER2: backups only where s_backup_bgs says.
+    let group = if compat & 0x200 != 0 {
+        img.read(base + 3, b).map_err(|_| E::Io)?;
+        g32(b, 0x24c - 512)
+    } else {
+        1
+    };
+    let block = first + per_group * group;
+    if group == 0 || block >= count {
+        return Err(E::PayloadExt4);
+    }
+    img.read(base + block * per_block, b).map_err(|_| E::Io)?;
+    if g16(b, 56) != EXT4_MAGIC
+        || b.get(0x68..0x78) != Some(&uuid[..])
+        || blocks(b) != count
+        || g16(b, 0x5a) != group & 0xffff
+    {
+        return Err(E::PayloadExt4);
+    }
+    Ok(())
+}
+
+/// `b` holds the primary volume descriptor (type 1, `CD001`).
+fn payload_iso<D: Disk>(img: &mut D, sectors: u64, b: &mut [u8; 512]) -> Result<()> {
+    let be = |b: &[u8; 512], at: usize, n: usize| {
+        b.get(at..at + n)
+            .map_or(0, |s| s.iter().fold(0u64, |a, &x| a << 8 | u64::from(x)))
+    };
+    let (size, bs) = (g32(b, 80), g16(b, 128));
+    if g8(b, 6) != 1 || be(b, 84, 4) != size || be(b, 130, 2) != bs {
+        return Err(E::PayloadIso);
+    }
+    if !matches!(bs, 512 | 1024 | 2048) || size * (bs / 512) != sectors {
+        return Err(E::PayloadIso);
+    }
+    // The root directory record (34 bytes at 156).
+    let root = g32(b, 158);
+    if g8(b, 156) != 34 || be(b, 162, 4) != root || g8(b, 181) & 2 == 0 || root == 0 || root >= size
+    {
+        return Err(E::PayloadIso);
+    }
+    img.read(root * (bs / 512), b).map_err(|_| E::Io)?;
+    if g8(b, 0) < 34 || g32(b, 2) != root || g8(b, 25) & 2 == 0 || g8(b, 32) != 1 || g8(b, 33) != 0
+    {
+        return Err(E::PayloadIso);
+    }
+    Ok(())
 }

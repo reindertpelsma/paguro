@@ -9,7 +9,7 @@ T ?= ntfs
 SECS ?= 60
 MAXLEN := -max_len=131072
 
-all: fuzz_ntfs fuzz_runlist
+all: fuzz_ntfs fuzz_runlist fuzz_payload
 
 fuzz_%: fuzz_%.c $(CORE) ../../*.h
 	clang $(FLAGS) $< $(CORE) -o $@
@@ -23,4 +23,4 @@ merge: fuzz_$(T)
 	./fuzz_$(T) -merge=1 $(MAXLEN) corpus/$(T) new/$(T)
 
 clean:
-	rm -rf fuzz_ntfs fuzz_runlist new crash-* leak-* timeout-*
+	rm -rf fuzz_ntfs fuzz_runlist fuzz_payload new crash-* leak-* timeout-*

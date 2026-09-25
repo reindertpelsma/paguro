@@ -61,7 +61,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 	if (size < 8)
 		return 0;
-	pg_payload_check(flat, &sp, size / 512, buf);
+	pg_payload_check(flat, &sp, size / 512, data[4] & 1 ? 4096 : 512, buf);
 	memset(&v, 0, sizeof(v));
 	v.read = sread;
 	v.ctx = &sp;

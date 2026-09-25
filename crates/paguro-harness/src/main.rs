@@ -16,6 +16,8 @@ mod cntfs;
 mod cref;
 mod model;
 mod ntfsdiff;
+mod payloaddiff;
+mod replay;
 #[path = "../../paguro-core/tests/synth/mod.rs"]
 mod synth;
 
@@ -26,7 +28,19 @@ fn main() {
     match arg.as_str() {
         // Every fixture, exhaustive byte mutation, truncation, I/O faults
         // and the fuzz corpora, C against Rust (ntfsdiff.rs).
-        "ntfs-exhaustive" => return exit(ntfsdiff::exhaustive()),
+        "ntfs-exhaustive" => {
+            return exit(ntfsdiff::exhaustive().and_then(|()| payloaddiff::exhaustive()));
+        }
+        // The structural assertion alone (payloaddiff.rs).
+        "payload-exhaustive" => return exit(payloaddiff::exhaustive()),
+        "payload-seeds" => {
+            let dir = std::env::args().nth(2).unwrap_or_else(|| "seeds".into());
+            match payloaddiff::write_seeds(std::path::Path::new(&dir)) {
+                Ok(n) => println!("{n} seeds in {dir}"),
+                Err(e) => exit(Err(e)),
+            }
+            return;
+        }
         // Fuzz seeds for fuzz/ and kernel/dm-paguro/test/fuzz/.
         "ntfs-seeds" => {
             let dir = std::env::args().nth(2).unwrap_or_else(|| "seeds".into());
@@ -50,10 +64,42 @@ fn main() {
             }
             return;
         }
+        // The map of (rec, seq) on a real device, both implementations
+        // (replay.rs; the VM tests use it).
+        "ntfs-map" => {
+            let a: Vec<String> = std::env::args().skip(2).collect();
+            let (Some(dev), Some(rec), Some(seq)) = (a.first(), a.get(1), a.get(2)) else {
+                return exit(Err("usage: ntfs-map <device> <rec> <seq>".into()));
+            };
+            std::process::exit(replay::ntfs_map(
+                dev,
+                rec.parse().unwrap_or(0),
+                seq.parse().unwrap_or(0),
+            ));
+        }
+        "payload" => {
+            let a: Vec<String> = std::env::args().skip(2).collect();
+            let Some(img) = a.first() else {
+                return exit(Err("usage: payload <image> [lbs] [vhd]".into()));
+            };
+            let lbs = a.get(1).and_then(|l| l.parse().ok()).unwrap_or(512);
+            std::process::exit(replay::payload(
+                img,
+                lbs,
+                a.get(2).is_some_and(|v| v == "vhd"),
+            ));
+        }
+        "ntfs-between" => {
+            let a: Vec<String> = std::env::args().skip(2).collect();
+            let (Some(pre), Some(map), Some(post)) = (a.first(), a.get(1), a.get(2)) else {
+                return exit(Err("usage: ntfs-between <pre> <map> <post>".into()));
+            };
+            std::process::exit(replay::ntfs_between(pre, map, post));
+        }
         _ => {}
     }
     let rounds: u64 = arg.parse().unwrap_or(100_000);
-    let checks: [(&str, Check); 6] = [
+    let checks: [(&str, Check); 8] = [
         ("range model (Rust spec vs oracle)", model::check),
         ("kernel C vs Rust spec", cref::check),
         ("NTFS core C vs Rust, mutated synthetic volumes", |r, s| {
@@ -65,6 +111,14 @@ fn main() {
             ntfsdiff::manifest()
                 .iter()
                 .try_for_each(ntfsdiff::check_case)
+        }),
+        ("payload fixtures and named corruptions", |_, _| {
+            payloaddiff::manifest()
+                .iter()
+                .try_for_each(payloaddiff::check_case)
+        }),
+        ("payload check C vs Rust, mutated fixtures", |r, s| {
+            payloaddiff::random(r / 10, s)
         }),
     ];
     for (name, check) in checks {

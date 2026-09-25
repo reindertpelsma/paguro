@@ -4,3 +4,4 @@ new/
 crash-*
 leak-*
 timeout-*
+fuzz_payload

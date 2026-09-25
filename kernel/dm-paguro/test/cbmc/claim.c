@@ -50,6 +50,26 @@ int main(void)
 		for (j = 0; j < nb; j++)
 			brute |= a[i].start < b[j].end && b[j].start < a[i].end;
 	__CPROVER_assert(pg_claim_intersects(a, na, b, nb) == brute, "intersects exact");
+	/* truncate: exactly the first x sectors, or 0 if there are fewer. */
+	{
+		struct pg_extent c[N];
+		pg_u64 total = 0, got = 0;
+		pg_size m;
+
+		for (i = 0; i < na; i++) {
+			c[i] = a[i];
+			__CPROVER_assume(total + (a[i].end - a[i].start) >= total);
+			total += a[i].end - a[i].start;
+		}
+		m = pg_claim_truncate(c, na, x);
+		__CPROVER_assert((m == 0) == (x == 0 || total < x), "truncate refuses exactly");
+		for (i = 0; i < m; i++) {
+			__CPROVER_assert(c[i].start == a[i].start && c[i].end <= a[i].end &&
+					 (i + 1 == m || c[i].end == a[i].end), "truncate keeps the prefix");
+			got += c[i].end - c[i].start;
+		}
+		__CPROVER_assert(m == 0 || got == x, "truncate keeps x sectors");
+	}
 	/* gather: logical sector x lands in the extent that covers it. */
 	left = pg_claim_gather(a, na, x, &phys);
 	for (i = 0; i < na; i++) {

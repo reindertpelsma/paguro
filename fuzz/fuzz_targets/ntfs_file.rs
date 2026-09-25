@@ -14,7 +14,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let _ = cntfs::rust_flags(&mut disk);
-    let _ = ntfs::check_payload(&mut ntfs_flat(data), data.len() as u64 / 512);
+    let lbs = if seq & 1 != 0 { 4096 } else { 512 };
+    let _ = ntfs::check_payload(&mut ntfs_flat(data), data.len() as u64 / 512, lbs);
     if let Ok(d) = cntfs::rust_file(&mut disk, rec, seq) {
         let mut norm = vec![paguro_core::range::Extent { start: 0, end: 0 }; d.extents.len()];
         if let Ok(n) = ntfs::normalise(&d.extents, &mut norm) {

@@ -43,6 +43,14 @@ static int same(const pg_u8 *a, const char *b, pg_size n)
 	return 1;
 }
 
+static int eq(const pg_u8 *a, const pg_u8 *b, pg_size n)
+{
+	while (n--)
+		if (a[n] != b[n])
+			return 0;
+	return 1;
+}
+
 static int is_pow2(pg_u64 x)
 {
 	return x && !(x & (x - 1));
@@ -582,43 +590,276 @@ int pg_ntfs_volume_flags(struct pg_ntfs *v, pg_u16 *flags)
 	return e ? e : PG_E_NO_VOLUME_INFO;
 }
 
-int pg_payload_check(pg_read_fn read, void *ctx, pg_u64 sectors, pg_u8 *b)
-{
-	pg_u64 hsize, lba, count, esize, i, first, last;
-	pg_size e;
+/*
+ * The structural assertion (INTERFACES 3.2, "the structural assertion follows
+ * the content"). Mirrors check_payload() in ntfs.rs read for read; every
+ * helper below takes the one 512-byte buffer and says what it holds. All
+ * sector numbers are bounded by `sectors` before they are read.
+ */
+#define EXT4_MAGIC 0xef53
+#define ISO_PVD 64u
 
-	if (sectors < 3)
-		return PG_E_PAYLOAD_GPT;
-	if (read(ctx, 1, b))
+#ifdef PG_CBMC_FREE_CRC
+/* Model checking only (test/cbmc/payload.c): a free function there. */
+pg_u32 pg_crc32(pg_u32 c, const pg_u8 *p, pg_size n);
+#else
+/* Bitwise CRC-32 (IEEE, reflected), continuing from `c`. */
+static pg_u32 pg_crc32(pg_u32 c, const pg_u8 *p, pg_size n)
+{
+	unsigned int k;
+
+	c = ~c;
+	while (n--) {
+		c ^= *p++;
+		for (k = 0; k < 8; k++)
+			c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1)));
+	}
+	return ~c;
+}
+#endif
+
+/* CRC of the first n (<= 512) bytes of a GPT header, its CRC field as 0. */
+static pg_u64 header_crc(const pg_u8 *b, pg_size n)
+{
+	static const pg_u8 zero[4];
+	pg_u32 c;
+
+	c = pg_crc32(0, b, 16);
+	c = pg_crc32(c, zero, 4);
+	return pg_crc32(c, b + 20, n - 20);
+}
+
+static int array_crc(pg_read_fn read, void *ctx, pg_u64 lba, pg_u64 count,
+		     pg_u8 *b, pg_u64 *crc)
+{
+	pg_u64 left = count * 128, n;
+	pg_u32 c = 0;
+
+	while (left) {
+		if (read(ctx, lba, b))
+			return PG_E_IO;
+		n = left < SECTOR ? left : SECTOR;
+		c = pg_crc32(c, b, (pg_size)n);
+		left -= n;
+		lba++;
+	}
+	*crc = c;
+	return 0;
+}
+
+static pg_u64 be(const pg_u8 *b, pg_size at, unsigned int n)
+{
+	pg_u64 v = 0;
+	unsigned int i;
+
+	for (i = 0; i < n; i++)
+		v = v << 8 | b[at + i];
+	return v;
+}
+
+/* A FAT boot sector (in b) for a partition of len sectors. */
+static int is_fat(const pg_u8 *b, pg_u64 len)
+{
+	pg_u64 bps = G16(b, 11), spc = G8(b, 13), total = G16(b, 0x13);
+
+	if (!total)
+		total = G32(b, 0x20);
+	return G16(b, 510) == 0xaa55 &&
+	       (same(b + 0x36, "FAT", 3) || same(b + 0x52, "FAT32", 5)) &&
+	       (bps == 512 || bps == 1024 || bps == 2048 || bps == 4096) &&
+	       is_pow2(spc) && total && total * (bps / 512) <= len;
+}
+
+/*
+ * ext4 at sector `base`, `len` sectors long; b holds sector base + 2, whose
+ * magic matched. Bounds: count <= len / per_block, block < count, so every
+ * read is inside [base, base + len).
+ */
+static int payload_ext4(pg_read_fn read, void *ctx, pg_u64 base, pg_u64 len,
+			pg_u8 *b)
+{
+	pg_u64 log = G32(b, 0x18), first = G32(b, 0x14);
+	pg_u64 per_group = G32(b, 0x20), compat = 0, incompat = 0;
+	pg_u64 count, per_block, group, block;
+	pg_u8 uuid[16];
+	pg_size i;
+
+	if (G32(b, 0x4c) >= 1) {
+		compat = G32(b, 0x5c);
+		incompat = G32(b, 0x60);
+	}
+#define BLOCKS(b) (G32(b, 4) | (incompat & 0x80 ? G32(b, 0x150) << 32 : 0))
+	count = BLOCKS(b);
+	/*
+	 * The primary names group 0: a backup copy where it belongs is refused.
+	 * The superblock alone fills sectors 2-3: len > 3 bounds the read of
+	 * sector 3 below.
+	 */
+	if (len < 4 || log > 6 || !per_group || first > 1 || (log && first) ||
+	    G16(b, 0x5a) != 0)
+		return PG_E_PAYLOAD_EXT4;
+	per_block = 2ull << log;
+	if (!count || count > len / per_block)
+		return PG_E_PAYLOAD_EXT4;
+	for (i = 0; i < 16; i++)
+		uuid[i] = b[0x68 + i];
+	group = 1;
+	if (compat & 0x200) {		/* sparse_super2: s_backup_bgs[0] */
+		if (read(ctx, base + 3, b))
+			return PG_E_IO;
+		group = G32(b, 0x24c - 512);
+	}
+	block = first + per_group * group;	/* < 2^64: both factors < 2^32 */
+	if (!group || block >= count)
+		return PG_E_PAYLOAD_EXT4;
+	if (read(ctx, base + block * per_block, b))
 		return PG_E_IO;
-	hsize = G32(b, 12);
-	if (!same(b, "EFI PART", 8) || hsize < 92 || hsize > 512 ||
-	    G64(b, 24) != 1)
+	if (G16(b, 56) != EXT4_MAGIC || !eq(b + 0x68, uuid, 16) ||
+	    BLOCKS(b) != count || G16(b, 0x5a) != (group & 0xffff))
+		return PG_E_PAYLOAD_EXT4;
+#undef BLOCKS
+	return 0;
+}
+
+/* b holds the primary volume descriptor (type 1, CD001). */
+static int payload_iso(pg_read_fn read, void *ctx, pg_u64 sectors, pg_u8 *b)
+{
+	pg_u64 size = G32(b, 80), bs = G16(b, 128), root = G32(b, 158);
+
+	if (G8(b, 6) != 1 || be(b, 84, 4) != size || be(b, 130, 2) != bs)
+		return PG_E_PAYLOAD_ISO;
+	if ((bs != 512 && bs != 1024 && bs != 2048) ||
+	    size * (bs / 512) != sectors)
+		return PG_E_PAYLOAD_ISO;
+	if (G8(b, 156) != 34 || be(b, 162, 4) != root || !(G8(b, 181) & 2) ||
+	    !root || root >= size)
+		return PG_E_PAYLOAD_ISO;
+	if (read(ctx, root * (bs / 512), b))
+		return PG_E_IO;
+	if (G8(b, 0) < 34 || G32(b, 2) != root || !(G8(b, 25) & 2) ||
+	    G8(b, 32) != 1 || G8(b, 33) != 0)
+		return PG_E_PAYLOAD_ISO;
+	return 0;
+}
+
+/*
+ * b holds LBA 1, which starts "EFI PART"; an LBA is k sectors. Every LBA is
+ * checked against lbas (the image in LBAs) before it is scaled.
+ */
+static int payload_gpt(pg_read_fn read, void *ctx, pg_u64 sectors, pg_u64 k,
+		       pg_u8 *b)
+{
+	pg_u64 hsize = G32(b, 12), alt, fu, lu, lba, count, esize, acrc;
+	pg_u64 asec, blba, crc, i, first, last, len, lbas = sectors / k;
+	pg_u8 guid[16];
+	pg_size e, j;
+	unsigned int verified = 0;
+	int stale = 1, err, esp, used;
+
+	if (hsize < 92 || hsize > 512 || G64(b, 24) != 1)
 		return PG_E_PAYLOAD_GPT;
+	if (header_crc(b, (pg_size)hsize) != G32(b, 16))
+		return PG_E_PAYLOAD_GPT_CRC;
+	alt = G64(b, 32);
+	fu = G64(b, 40);
+	lu = G64(b, 48);
+	for (j = 0; j < 16; j++)
+		guid[j] = b[56 + j];
 	lba = G64(b, 72);
 	count = G32(b, 80);
 	esize = G32(b, 84);
-	if (esize != 128 || count == 0 || count > 1024 || lba < 2 ||
-	    lba >= sectors)
+	acrc = G32(b, 88);
+	if (esize != 128 || !count || count > 1024)
 		return PG_E_PAYLOAD_GPT;
-	if (sectors - lba < (count + 3) / 4)	/* bound: the entry array */
+	asec = (count * 128 + k * 512 - 1) / (k * 512);	/* the array, in LBAs */
+	if (alt >= lbas || lu >= alt || fu > lu || lba < 2 || lba > fu ||
+	    fu - lba < asec)
 		return PG_E_PAYLOAD_GPT;
+	err = array_crc(read, ctx, lba * k, count, b, &crc);
+	if (err)
+		return err;
+	if (crc != acrc)
+		return PG_E_PAYLOAD_GPT_CRC;
+	if (read(ctx, alt * k, b))
+		return PG_E_IO;
+	if (!same(b, "EFI PART", 8) || G32(b, 12) != hsize ||
+	    header_crc(b, (pg_size)hsize) != G32(b, 16) || G64(b, 24) != alt ||
+	    G64(b, 32) != 1 || G64(b, 40) != fu || G64(b, 48) != lu ||
+	    !eq(b + 56, guid, 16) || G32(b, 80) != count ||
+	    G32(b, 84) != esize || G32(b, 88) != acrc)
+		return PG_E_PAYLOAD_GPT_BACKUP;
+	blba = G64(b, 72);
+	if (blba <= lu || blba >= alt || alt - blba < asec)
+		return PG_E_PAYLOAD_GPT_BACKUP;
+	err = array_crc(read, ctx, blba * k, count, b, &crc);
+	if (err)
+		return err;
+	if (crc != acrc)
+		return PG_E_PAYLOAD_GPT_BACKUP;
 	for (i = 0; i < count; i++) {
-		if (i % 4 == 0 && read(ctx, lba + i / 4, b))
-			return PG_E_IO;
-		e = (i % 4) * 128;
-		if (!same(b + e, (const char *)esp_type, 16))
+		if (i % 4 == 0 || stale) {
+			if (read(ctx, lba * k + i / 4, b))
+				return PG_E_IO;
+			stale = 0;
+		}
+		e = (pg_size)(i % 4) * 128;
+		for (used = 0, j = 0; j < 16; j++)
+			used |= b[e + j];
+		if (!used)
 			continue;
+		esp = eq(b + e, esp_type, 16);
 		first = G64(b, e + 32);
 		last = G64(b, e + 40);
-		if (first < 2 || first > last || last >= sectors)
+		if (first < fu || last > lu || first > last)
 			return PG_E_PAYLOAD_GPT;
-		if (read(ctx, first, b))
-			return PG_E_IO;
-		if (G16(b, 510) != 0xaa55 ||
-		    !(same(b + 0x36, "FAT", 3) || same(b + 0x52, "FAT32", 5)))
-			return PG_E_PAYLOAD_NOT_FAT;
-		return 0;
+		/* In sectors from here on: last < alt < lbas, no overflow. */
+		len = (last - first + 1) * k;
+		first *= k;
+		stale = 1;
+		if (esp) {
+			if (read(ctx, first, b))
+				return PG_E_IO;
+			if (!is_fat(b, len))
+				return PG_E_PAYLOAD_NOT_FAT;
+			verified++;
+		} else if (len > 2) {
+			if (read(ctx, first + 2, b))
+				return PG_E_IO;
+			if (G16(b, 56) == EXT4_MAGIC) {
+				err = payload_ext4(read, ctx, first, len, b);
+				if (err)
+					return err;
+				verified++;
+			}
+		}
 	}
-	return PG_E_PAYLOAD_NO_ESP;
+	return verified ? 0 : PG_E_PAYLOAD_NO_KNOWN_PARTITION;
+}
+
+int pg_payload_check(pg_read_fn read, void *ctx, pg_u64 sectors,
+		     unsigned int lbs, pg_u8 *b)
+{
+	pg_u64 k = lbs / 512;
+
+	if ((lbs != 512 && lbs != 4096) || sectors < 2)
+		return PG_E_PAYLOAD_UNKNOWN;
+	if (sectors > k) {
+		if (read(ctx, k, b))
+			return PG_E_IO;
+		if (same(b, "EFI PART", 8))
+			return payload_gpt(read, ctx, sectors, k, b);
+	}
+	if (sectors > 2) {
+		if (read(ctx, 2, b))
+			return PG_E_IO;
+		if (G16(b, 56) == EXT4_MAGIC)
+			return payload_ext4(read, ctx, 0, sectors, b);
+	}
+	if (sectors > ISO_PVD) {
+		if (read(ctx, ISO_PVD, b))
+			return PG_E_IO;
+		if (same(b, "\001CD001", 6))
+			return payload_iso(read, ctx, sectors, b);
+	}
+	return PG_E_PAYLOAD_UNKNOWN;
 }

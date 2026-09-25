@@ -1,6 +1,7 @@
 //! Differential: the kernel module's C core against the Rust specification
 //! on the same sparse volume — same result, same error, same sector reads —
-//! plus the runlist decoder, payload check and claim checks on raw bytes.
+//! plus the payload check on the same sparse image, and the runlist decoder
+//! and claim checks on raw bytes.
 #![no_main]
 
 #[path = "../../crates/paguro-harness/src/cntfs.rs"]
@@ -40,6 +41,25 @@ fuzz_target!(|data: &[u8]| {
         cntfs::c_flags(&mut disk()),
         "volume flags"
     );
+
+    // The structural assertion over the same sparse image, its length the
+    // record field and bit 0 of the sequence field choosing a 4096-byte
+    // logical block (the payload corpus's format): same result, same reads.
+    let mut d = disk();
+    let mut t = cntfs::Trace {
+        inner: &mut d,
+        reads: vec![],
+    };
+    let lbs = if seq & 1 != 0 { 4096 } else { 512 };
+    let rp = cntfs::rust_payload(&mut t, rec, lbs);
+    let rpr = t.reads;
+    let mut d = disk();
+    let mut t = cntfs::Trace {
+        inner: &mut d,
+        reads: vec![],
+    };
+    assert_eq!(rp, cntfs::c_payload(&mut t, rec, lbs), "payload result");
+    assert_eq!(rpr, t.reads, "payload reads");
 
     let body = data.get(8..).unwrap_or(&[]);
     assert_eq!(

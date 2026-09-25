@@ -40,6 +40,16 @@ int pg_claim_grows(const struct pg_extent *old, pg_size nold,
 pg_size pg_claim_coalesce(struct pg_extent *e, pg_size n);
 
 /*
+ * The first `sectors` logical sectors of file-order extents, in place.
+ * Returns the new count; 0 if the extents hold fewer sectors, any is empty,
+ * or `sectors` is 0. The cross-check compares FIEMAP and the derived map up
+ * to the end of the file's data this way: drivers report the unused tail of
+ * a partly used last cluster differently (ntfs3: up to EOF), and a fixed VHD
+ * (a whole number of clusters plus a 512-byte footer) always has one.
+ */
+pg_size pg_claim_truncate(struct pg_extent *e, pg_size n, pg_u64 sectors);
+
+/*
  * View A's translation: logical sector `lsec` of the gathered file ->
  * *phys, returning the sectors left in that extent (0 beyond the end).
  */

@@ -477,8 +477,9 @@ static long pg_crosscheck_ioctl(struct pg_crosscheck *a)
 {
 	struct pg_claim_state *c = pg_claim_get(a->claim_id);
 	struct pg_uapi_range *u;
-	struct pg_extent *e;
-	pg_size i, n;
+	struct pg_extent *e, *f;
+	pg_size i, n, nf;
+	u64 size;
 	int match;
 
 	if (!c)
@@ -509,9 +510,23 @@ static long pg_crosscheck_ioctl(struct pg_crosscheck *a)
 		if (e[i].end < e[i].start)
 			match = 0;
 	}
+	/*
+	 * Both sides up to the end of the file's data (pg_claim_truncate):
+	 * the file is `limit` sectors, plus a VHD's footer. c->file only
+	 * changes under pg_mutex, which the caller holds.
+	 */
+	size = c->limit + (c->format == PG_FORMAT_VHD);
+	f = pg_dup(c->file, c->nfile);
+	if (!f) {
+		kvfree(u);
+		kvfree(e);
+		return -ENOMEM;
+	}
+	nf = pg_claim_truncate(f, c->nfile, size);
 	n = match ? pg_claim_coalesce(e, a->count) : 0;
+	n = n ? pg_claim_truncate(e, n, size) : 0;
 	write_lock(&pg_lock);
-	match = n && pg_same(e, n, c->file, c->nfile);
+	match = n && nf && pg_same(e, n, f, nf);
 	/* Compare only: agreement marks the claim, disagreement ends it. */
 	if (match)
 		c->state |= PG_CLAIM_CHECKED;
@@ -521,6 +536,7 @@ static long pg_crosscheck_ioctl(struct pg_crosscheck *a)
 	write_unlock(&pg_lock);
 	kvfree(u);
 	kvfree(e);
+	kvfree(f);
 	pr_info("paguro: cross-check claim %u: %s\n", c->id,
 		match ? "agrees" : "DISAGREES, claim refused");
 	return 0;

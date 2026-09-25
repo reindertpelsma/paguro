@@ -62,7 +62,13 @@ unsafe extern "C" {
         nout: *mut usize,
     ) -> c_int;
     fn pg_ntfs_volume_flags(v: *mut PgNtfs, flags: *mut u16) -> c_int;
-    fn pg_payload_check(read: ReadFn, ctx: *mut c_void, sectors: u64, buf: *mut u8) -> c_int;
+    fn pg_payload_check(
+        read: ReadFn,
+        ctx: *mut c_void,
+        sectors: u64,
+        lbs: std::ffi::c_uint,
+        buf: *mut u8,
+    ) -> c_int;
     fn pg_runlist_decode(
         input: *const u8,
         len: usize,
@@ -85,6 +91,7 @@ unsafe extern "C" {
         nnew: usize,
     ) -> c_int;
     fn pg_claim_coalesce(e: *mut PgExtent, n: usize) -> usize;
+    fn pg_claim_truncate(e: *mut PgExtent, n: usize, sectors: u64) -> usize;
     fn pg_claim_gather(file: *const PgExtent, n: usize, lsec: u64, phys: *mut u64) -> u64;
     fn pg_range_normalise(e: *mut PgExtent, n: usize) -> usize;
 }
@@ -236,11 +243,21 @@ pub fn c_flags(disk: &mut dyn Disk) -> Result<u16, i32> {
     })
 }
 
-pub fn c_payload(disk: &mut dyn Disk, sectors: u64) -> Result<(), i32> {
+pub fn rust_payload<D: Disk + ?Sized>(d: &mut D, sectors: u64, lbs: u32) -> Result<(), i32> {
+    struct Dyn<'a, D: Disk + ?Sized>(&'a mut D);
+    impl<D: Disk + ?Sized> Disk for Dyn<'_, D> {
+        fn read(&mut self, s: u64, b: &mut [u8; 512]) -> Result<(), IoError> {
+            self.0.read(s, b)
+        }
+    }
+    ntfs::check_payload(&mut Dyn(d), sectors, u64::from(lbs)).map_err(NtfsError::code)
+}
+
+pub fn c_payload(disk: &mut dyn Disk, sectors: u64, lbs: u32) -> Result<(), i32> {
     let mut buf = [0u8; 512];
     // SAFETY: `buf` is 512 bytes; the context is live for the call.
     let e = with_disk(disk, |ctx| unsafe {
-        pg_payload_check(trampoline, ctx, sectors, buf.as_mut_ptr())
+        pg_payload_check(trampoline, ctx, sectors, lbs, buf.as_mut_ptr())
     });
     if e != 0 { Err(e) } else { Ok(()) }
 }
@@ -324,6 +341,13 @@ pub fn c_coalesce(e: &[Extent]) -> Option<Vec<Extent>> {
         return None;
     }
     Some(from_c(c.get(..n).unwrap_or(&[])))
+}
+
+pub fn c_truncate(e: &[Extent], sectors: u64) -> Option<Vec<Extent>> {
+    let mut c = to_c(e);
+    // SAFETY: length matches the buffer.
+    let n = unsafe { pg_claim_truncate(c.as_mut_ptr(), c.len(), sectors) };
+    (n != 0).then(|| from_c(c.get(..n).unwrap_or(&[])))
 }
 
 pub fn c_gather(file: &[Extent], lsec: u64) -> Option<(u64, u64)> {
@@ -465,8 +489,13 @@ pub fn all_errors() -> Vec<NtfsError> {
         NoVolumeInfo,
         SelfOverlap,
         PayloadGpt,
-        PayloadNoEsp,
+        PayloadNoKnownPartition,
         PayloadNotFat,
+        PayloadGptCrc,
+        PayloadGptBackup,
+        PayloadExt4,
+        PayloadIso,
+        PayloadUnknown,
     ];
     for e in [
         RunlistError::Truncated,

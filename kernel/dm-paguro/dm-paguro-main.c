@@ -127,11 +127,12 @@ static int pg_image_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	ir.claim = c;
 	r = pg_reader_init(&ir.r, x->dev->bdev);
 	if (!r) {
-		e = pg_payload_check(pg_image_read, &ir, c->limit, buf);
+		e = pg_payload_check(pg_image_read, &ir, c->limit,
+				     per << SECTOR_SHIFT, buf);
 		pg_reader_exit(&ir.r);
 		if (e) {
 			DMERR("claim %u: payload check failed: error %d", id, e);
-			ti->error = "image is not a GPT disk with a FAT ESP";
+			ti->error = "payload structure check failed (GPT, ext4 or ISO 9660)";
 			r = e == PG_E_IO ? -EIO : -EINVAL;
 		}
 	}

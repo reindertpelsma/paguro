@@ -72,6 +72,25 @@ pg_size pg_claim_coalesce(struct pg_extent *e, pg_size n)
 	return k;
 }
 
+pg_size pg_claim_truncate(struct pg_extent *e, pg_size n, pg_u64 sectors)
+{
+	pg_u64 left = sectors, len;
+	pg_size i;
+
+	/* Keeps: left > 0 sectors still to cover from e[i] on. */
+	for (i = 0; i < n && left; i++) {
+		if (e[i].start >= e[i].end)
+			return 0;
+		len = e[i].end - e[i].start;
+		if (len >= left) {
+			e[i].end = e[i].start + left;
+			return i + 1;
+		}
+		left -= len;
+	}
+	return 0;
+}
+
 pg_u64 pg_claim_gather(const struct pg_extent *file, pg_size n, pg_u64 lsec,
 		       pg_u64 *phys)
 {

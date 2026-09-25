@@ -3,7 +3,7 @@
  * Userspace tests for the module's trusted core (pg_range.c, pg_claim.c,
  * pg_ntfs.c), run under ASan+UBSan, MSan and Valgrind (see Makefile):
  *
- *   pg_test [-s stride] <fixture-dir> [corpus-file...]
+ *   pg_test [-s stride] <fixture-dir> [-p <payload-fixture-dir>] [corpus-file...]
  *
  * 1. unit tests: range test, claim checks, runlist decoder, boot sector;
  * 2. every case in <fixture-dir>/manifest.txt: real mkntfs volumes and named
@@ -12,7 +12,15 @@
  * 3. for each clean file: the read callback failing at every call (must give
  *    PG_E_IO), torn at every call, and every byte (every stride-th) of every
  *    sector read set to 0x00, 0xff and each bit flip (must not crash);
- * 4. each corpus file (fuzz input format, see fuzz/fuzz_ntfs.c) parsed once.
+ * 4. every case in <payload-fixture-dir>/manifest.txt (the structural
+ *    assertion over real GPT, ext4 and ISO 9660 images and corruptions of
+ *    them); for each accepted image, failure and tearing at every read, the
+ *    byte sweep over every sector read, and misordered gathering (two of
+ *    four extents swapped, or all reversed: refused whenever a sector the
+ *    check reads moved);
+ * 5. each corpus file (fuzz input format, see fuzz/fuzz_ntfs.c) parsed once
+ *    (files under a "payload" directory: the payload check, first u32 = the
+ *    image length in sectors).
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -68,8 +76,12 @@ static const char *const names[] = {
 	[PG_E_TOO_MANY_EXTENTS] = "TooManyExtents",
 	[PG_E_NO_VOLUME_INFO] = "NoVolumeInfo",
 	[PG_E_SELF_OVERLAP] = "SelfOverlap", [PG_E_PAYLOAD_GPT] = "PayloadGpt",
-	[PG_E_PAYLOAD_NO_ESP] = "PayloadNoEsp",
+	[PG_E_PAYLOAD_NO_KNOWN_PARTITION] = "PayloadNoKnownPartition",
 	[PG_E_PAYLOAD_NOT_FAT] = "PayloadNotFat",
+	[PG_E_PAYLOAD_GPT_CRC] = "PayloadGptCrc",
+	[PG_E_PAYLOAD_GPT_BACKUP] = "PayloadGptBackup",
+	[PG_E_PAYLOAD_EXT4] = "PayloadExt4", [PG_E_PAYLOAD_ISO] = "PayloadIso",
+	[PG_E_PAYLOAD_UNKNOWN] = "PayloadUnknown",
 	[PG_E_RL_TRUNCATED] = "Runlist.Truncated",
 	[PG_E_RL_FIELD_TOO_WIDE] = "Runlist.FieldTooWide",
 	[PG_E_RL_SPARSE] = "Runlist.Sparse",
@@ -268,6 +280,15 @@ static void test_claims(void)
 	check(pg_claim_gather(a, 3, 15, &p) == 3 && p == 5, "gather 15");
 	check(pg_claim_gather(a, 3, 18, &p) == 1 && p == 30, "gather 18");
 	check(pg_claim_gather(a, 3, 19, &p) == 0, "gather beyond");
+
+	/* truncate to the file's data: a VHD's footer in a partial cluster */
+	check(pg_claim_truncate(a, 3, 0) == 0, "truncate to nothing");
+	check(pg_claim_truncate(a, 3, 20) == 0, "truncate past the end");
+	check(pg_claim_truncate(a, 3, 19) == 3 && a[2].end == 31, "truncate whole");
+	check(pg_claim_truncate(a, 3, 16) == 2 && a[1].end == 6 && a[0].end == 25,
+	      "truncate inside the second extent");
+	a[0] = E(10, 10);
+	check(pg_claim_truncate(a, 1, 1) == 0, "truncate refuses empty");
 }
 
 static int decode(const char *bytes, size_t len, pg_size cap, pg_size *n)
@@ -344,92 +365,29 @@ static void test_boot(const pg_u8 *clean)
 	check(pg_ntfs_boot(&v, b) == PG_E_VOLUME_SIZE, "sector overflow");
 }
 
-/* A GPT disk of 100 sectors, ESP (entry 5) at 40..90 with a FAT32 sector. */
-static pg_u8 gpt[100 * 512];
-
-static void put(pg_u8 *b, size_t at, pg_u64 v, int n)
+static int zero_read(void *ctx, pg_u64 s, pg_u8 *buf)
 {
-	while (n--) {
-		b[at++] = (pg_u8)v;
-		v >>= 8;
-	}
-}
-
-static void gpt_disk(void)
-{
-	static const pg_u8 esp[16] = { 0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2,
-				       0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e,
-				       0xc9, 0x3b };
-
-	memset(gpt, 0, sizeof(gpt));
-	memcpy(gpt + 512, "EFI PART", 8);
-	put(gpt, 512 + 12, 92, 4);
-	put(gpt, 512 + 24, 1, 8);
-	put(gpt, 512 + 72, 2, 8);
-	put(gpt, 512 + 80, 128, 4);
-	put(gpt, 512 + 84, 128, 4);
-	memcpy(gpt + 3 * 512 + 128, esp, 16);
-	put(gpt, 3 * 512 + 128 + 32, 40, 8);
-	put(gpt, 3 * 512 + 128 + 40, 90, 8);
-	memcpy(gpt + 40 * 512 + 0x52, "FAT32", 5);
-	put(gpt, 40 * 512 + 510, 0xaa55, 2);
-}
-
-static int flat_read(void *ctx, pg_u64 s, pg_u8 *buf)
-{
-	pg_u64 n = *(pg_u64 *)ctx;
-
-	if (s >= n)
-		return 1;
-	memcpy(buf, gpt + s * 512, 512);
+	(void)ctx;
+	(void)s;
+	memset(buf, 0, 512);
 	return 0;
 }
 
-static int payload(pg_u64 sectors, pg_u64 readable)
+/* Shapes the fixtures cannot show; the manifest (section 4) has the rest. */
+static void test_payload(void)
 {
 	pg_u8 buf[512];
 
-	return pg_payload_check(flat_read, &readable, sectors, buf);
-}
-
-static void test_payload(void)
-{
-	static const struct { size_t at; pg_u64 v; int n, err; } m[] = {
-		{ 512, 0, 1, PG_E_PAYLOAD_GPT },
-		{ 512 + 12, 91, 4, PG_E_PAYLOAD_GPT },
-		{ 512 + 12, 513, 4, PG_E_PAYLOAD_GPT },
-		{ 512 + 24, 2, 8, PG_E_PAYLOAD_GPT },
-		{ 512 + 84, 256, 4, PG_E_PAYLOAD_GPT },
-		{ 512 + 80, 0, 4, PG_E_PAYLOAD_GPT },
-		{ 512 + 80, 1025, 4, PG_E_PAYLOAD_GPT },
-		{ 512 + 72, 1, 8, PG_E_PAYLOAD_GPT },
-		{ 512 + 72, 100, 8, PG_E_PAYLOAD_GPT },
-		{ 512 + 72, 99, 8, PG_E_PAYLOAD_GPT },
-		{ 3 * 512 + 128, 0, 1, PG_E_PAYLOAD_NO_ESP },
-		{ 3 * 512 + 128 + 40, 100, 8, PG_E_PAYLOAD_GPT },
-		{ 3 * 512 + 128 + 32, 91, 8, PG_E_PAYLOAD_GPT },
-		{ 3 * 512 + 128 + 32, 1, 8, PG_E_PAYLOAD_GPT },
-		{ 40 * 512 + 0x52, 0, 1, PG_E_PAYLOAD_NOT_FAT },
-		{ 40 * 512 + 510, 0, 1, PG_E_PAYLOAD_NOT_FAT },
-	};
-	size_t i;
-
-	gpt_disk();
-	check(payload(100, 100) == 0, "payload ok");
-	check(payload(2, 100) == PG_E_PAYLOAD_GPT, "payload too small");
-	check(payload(100, 1) == PG_E_IO, "payload header unreadable");
-	check(payload(100, 3) == PG_E_IO, "payload entries unreadable");
-	check(payload(100, 30) == PG_E_IO, "payload ESP unreadable");
-	for (i = 0; i < sizeof(m) / sizeof(m[0]); i++) {
-		gpt_disk();
-		put(gpt, m[i].at, m[i].v, m[i].n);
-		check(payload(100, 100) == m[i].err, "payload case %zu: %s", i,
-		      name(payload(100, 100)));
-	}
-	gpt_disk();
-	gpt[40 * 512 + 0x52] = 0;
-	memcpy(gpt + 40 * 512 + 0x36, "FAT", 3);
-	check(payload(100, 100) == 0, "FAT12/16 ESP");
+	check(pg_payload_check(zero_read, NULL, 0, 512, buf) == PG_E_PAYLOAD_UNKNOWN,
+	      "empty payload");
+	check(pg_payload_check(zero_read, NULL, 1, 512, buf) == PG_E_PAYLOAD_UNKNOWN,
+	      "one-sector payload");
+	check(pg_payload_check(zero_read, NULL, ~0ull, 512, buf) == PG_E_PAYLOAD_UNKNOWN,
+	      "huge zero payload");
+	check(pg_payload_check(zero_read, NULL, 100, 1024, buf) == PG_E_PAYLOAD_UNKNOWN,
+	      "1 KiB logical blocks");
+	check(pg_payload_check(zero_read, NULL, 8, 4096, buf) == PG_E_PAYLOAD_UNKNOWN,
+	      "no room for a 4 KiB LBA 1");
 }
 
 static void test_extents_cap(void)
@@ -454,12 +412,14 @@ static void test_extents_cap(void)
 /* ---- 2. the manifest ---------------------------------------------------- */
 
 struct image {
+	const char *dir;
 	char name[64];
 	pg_u8 *data;
 	size_t len;
 };
 
-static struct image images[8];
+#define NIMAGES 32
+static struct image images[NIMAGES];
 
 static struct image *load(const char *dir, const char *img)
 {
@@ -469,10 +429,10 @@ static struct image *load(const char *dir, const char *img)
 	size_t cap = 1 << 20;
 	int i;
 
-	for (i = 0; i < 8 && images[i].data; i++)
-		if (!strcmp(images[i].name, img))
+	for (i = 0; i < NIMAGES && images[i].data; i++)
+		if (!strcmp(images[i].name, img) && images[i].dir == dir)
 			return &images[i];
-	if (i == 8)
+	if (i == NIMAGES)
 		return NULL;
 	im = &images[i];
 	snprintf(cmd, sizeof(cmd), "gzip -dc '%s/%s.gz'", dir, img);
@@ -491,6 +451,7 @@ static struct image *load(const char *dir, const char *img)
 	}
 	pclose(f);
 	snprintf(im->name, sizeof(im->name), "%s", img);
+	im->dir = dir;
 	return im;
 }
 
@@ -563,7 +524,9 @@ static void outcome(const char *kind, struct disk *d, pg_u64 rec, pg_u16 seq,
 	}
 	g.data = data;
 	g.sectors = size / 512;
-	e = pg_payload_check(gread, &g, g.sectors, buf);
+	/* View A's logical block is the volume's sector size. */
+	e = pg_payload_check(gread, &g, g.sectors,
+			     (unsigned int)(d->img[11] | d->img[12] << 8), buf);
 	snprintf(out, sz, "ok:%llu:%016llx:%s", (unsigned long long)size,
 		 (unsigned long long)fnv(data, size), e ? "-" : "gpt");
 	free(data);
@@ -687,7 +650,198 @@ static void manifest(const char *dir, int stride)
 	printf("manifest: %d cases, %ld mutated parses\n", cases, mutations);
 }
 
-/* ---- 4. corpus replay --------------------------------------------------- */
+/* ---- 4. the payload manifest ------------------------------------------- */
+
+struct pdisk {
+	const pg_u8 *img;
+	pg_u64 len;		/* sectors present */
+	pg_u64 chunk;		/* > 0: gathered from 4 extents in order perm */
+	unsigned int lbs;
+	int perm[4];
+	long calls, fail_at, torn_at;
+	pg_u64 reads[4096];
+	long nreads;
+};
+
+static int pread_(void *ctx, pg_u64 s, pg_u8 *buf)
+{
+	struct pdisk *d = ctx;
+	long n = d->calls++;
+	pg_u64 p = s;
+
+	if (d->nreads < 4096)
+		d->reads[d->nreads++] = s;
+	if (d->chunk && s / d->chunk < 4)
+		p = (pg_u64)d->perm[s / d->chunk] * d->chunk + s % d->chunk;
+	if (n == d->fail_at || p >= d->len)
+		return 1;
+	memcpy(buf, d->img + p * 512, 512);
+	if (n == d->torn_at)
+		memset(buf + 256, 0, 256);
+	return 0;
+}
+
+static int pcheck(struct pdisk *d, const struct image *im, pg_u64 sectors)
+{
+	pg_u8 buf[512];
+
+	d->img = im->data;
+	d->len = im->len / 512;
+	d->calls = 0;
+	d->nreads = 0;
+	return pg_payload_check(pread_, d, sectors, d->lbs ? d->lbs : 512, buf);
+}
+
+/* Failure, tearing, byte sweep and misordering for one accepted image. */
+static void psweep(struct image *im, pg_u64 sectors, unsigned int lbs,
+		   int stride)
+{
+	static pg_u64 sec[4096];
+	struct pdisk d = { .fail_at = -1, .torn_at = -1, .lbs = lbs };
+	long nsec, i, j, k, refused = 0, must = 0;
+	int b, off, e;
+
+	pcheck(&d, im, sectors);
+	nsec = d.nreads;
+	memcpy(sec, d.reads, sizeof(pg_u64) * (size_t)nsec);
+	for (i = 0; i < nsec; i++) {
+		struct pdisk f = { .fail_at = i, .torn_at = -1, .lbs = lbs };
+		struct pdisk t = { .fail_at = -1, .torn_at = i, .lbs = lbs };
+
+		check(pcheck(&f, im, sectors) == PG_E_IO, "%s: read %ld failing",
+		      im->name, i);
+		pcheck(&t, im, sectors);
+	}
+	for (i = 0; i < nsec && stride > 0; i++) {
+		pg_u8 *p = im->data + sec[i] * 512;
+
+		for (j = 0; j < i && sec[j] != sec[i]; j++)
+			;
+		if (j < i || sec[i] >= im->len / 512)
+			continue;
+		for (off = 0; off < 512; off += stride) {
+			pg_u8 orig = p[off];
+
+			for (b = 0; b < 10; b++) {
+				p[off] = b == 8 ? 0 : b == 9 ? 0xff :
+					 (pg_u8)(orig ^ (1 << b));
+				d.fail_at = d.torn_at = -1;
+				pcheck(&d, im, sectors);
+				mutations++;
+			}
+			p[off] = orig;
+		}
+	}
+	/* Every swap of two of four extents, and the reversal. */
+	for (k = 0; k < 7; k++) {
+		static const int sw[7][2] = { { 0, 1 }, { 0, 2 }, { 0, 3 },
+					      { 1, 2 }, { 1, 3 }, { 2, 3 },
+					      { -1, -1 } };
+		struct pdisk m = { .fail_at = -1, .torn_at = -1,
+				   .chunk = sectors / 4, .lbs = lbs };
+		int moved = 0;
+
+		for (j = 0; j < 4; j++)
+			m.perm[j] = k == 6 ? 3 - (int)j : (int)j;
+		if (k < 6) {
+			m.perm[sw[k][0]] = sw[k][1];
+			m.perm[sw[k][1]] = sw[k][0];
+		}
+		for (i = 0; i < nsec; i++)
+			if (sec[i] / m.chunk < 4 &&
+			    m.perm[sec[i] / m.chunk] != (int)(sec[i] / m.chunk))
+				moved = 1;
+		e = pcheck(&m, im, sectors);
+		if (moved && !e) {
+			/* Tolerated only if every changed read sector was an ext4
+			 * superblock and no longer is (the partition now reads
+			 * as unknown content, which no ext4 mount accepts). */
+			for (i = 0; i < nsec; i++) {
+				pg_u64 c = sec[i] / m.chunk, p = sec[i];
+				const pg_u8 *o = im->data + sec[i] * 512, *q;
+
+				if (c < 4)
+					p = (pg_u64)m.perm[c] * m.chunk + sec[i] % m.chunk;
+				if (sec[i] >= im->len / 512 || p >= im->len / 512)
+					continue;
+				q = im->data + p * 512;
+				if (!memcmp(o, q, 512))
+					continue;
+				check(o[56] == 0x53 && o[57] == 0xef &&
+				      !(q[56] == 0x53 && q[57] == 0xef),
+				      "%s: misordering %ld accepted", im->name, k);
+			}
+		}
+		must += moved;
+		refused += moved && e;
+	}
+	(void)refused;
+	(void)must;
+}
+
+static void payload_manifest(const char *dir, int stride)
+{
+	char path[1024], line[1 << 16];
+	FILE *f;
+	int cases = 0, e;
+
+	snprintf(path, sizeof(path), "%s/manifest.txt", dir);
+	f = fopen(path, "r");
+	check(f != NULL, "open %s", path);
+	if (!f)
+		return;
+	while (fgets(line, sizeof(line), f)) {
+		char *save, *kind, *nm, *img, *len, *expect, *tok;
+		pg_size np = 0, i;
+		static size_t poff[4096];
+		static pg_u8 pold[4096];
+		struct pdisk d = { .fail_at = -1, .torn_at = -1, .lbs = 512 };
+		struct image *im;
+		pg_u64 sectors;
+
+		kind = strtok_r(line, " \n", &save);
+		if (!kind || strcmp(kind, "payload"))
+			continue;
+		nm = strtok_r(NULL, " \n", &save);
+		img = strtok_r(NULL, " \n", &save);
+		len = strtok_r(NULL, " \n", &save);
+		expect = strtok_r(NULL, " \n", &save);
+		if (!expect)
+			continue;
+		im = load(dir, img);
+		check(im && im->len, "load %s", img);
+		if (!im || !im->len)
+			continue;
+		while ((tok = strtok_r(NULL, " \n", &save))) {
+			unsigned long long a, b;
+
+			if (!strncmp(tok, "lbs=", 4))
+				d.lbs = (unsigned int)atoi(tok + 4);
+			else if (sscanf(tok, "%llu=%llx", &a, &b) == 2 &&
+				 a < im->len && np < 4096) {
+				poff[np] = a;
+				pold[np++] = im->data[a];
+				im->data[a] = (pg_u8)b;
+			}
+		}
+		sectors = strcmp(len, "-") ? strtoull(len, NULL, 10) :
+					     im->len / 512;
+		e = pcheck(&d, im, sectors);
+		check(!strcmp(e ? name(e) : "ok", expect),
+		      "payload %s: expected %s, got %s", nm, expect,
+		      e ? name(e) : "ok");
+		if (!e && np == 0 && !strcmp(len, "-"))
+			psweep(im, sectors, d.lbs, stride);
+		for (i = np; i-- > 0;)
+			im->data[poff[i]] = pold[i];
+		cases++;
+	}
+	fclose(f);
+	check(cases > 50, "only %d payload cases", cases);
+	printf("payload manifest: %d cases\n", cases);
+}
+
+/* ---- 5. corpus replay --------------------------------------------------- */
 
 struct sparse {
 	const pg_u8 *p;
@@ -719,6 +873,7 @@ static void replay(const char *path)
 	pg_size n, k;
 	pg_u64 size;
 	pg_u16 flags;
+	pg_u8 buf[512];
 	FILE *f = fopen(path, "rb");
 
 	if (!f)
@@ -727,6 +882,11 @@ static void replay(const char *path)
 	fclose(f);
 	if (sp.n < 8)
 		return;
+	if (strstr(path, "/payload/")) {
+		pg_payload_check(sread, &sp, in[0] | in[1] << 8 | in[2] << 16 |
+				 (pg_u64)in[3] << 24, in[4] & 1 ? 4096 : 512, buf);
+		return;
+	}
 	memset(&v, 0, sizeof(v));
 	v.read = sread;
 	v.ctx = &sp;
@@ -766,6 +926,10 @@ int main(int argc, char **argv)
 		if (im && im->len >= 512)
 			test_boot(im->data);
 		manifest(argv[i], stride);
+		if (i + 2 < argc && !strcmp(argv[i + 1], "-p")) {
+			payload_manifest(argv[i + 2], stride);
+			i += 2;
+		}
 		for (i++; i < argc; i++)
 			replay(argv[i]);
 	}

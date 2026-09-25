@@ -699,6 +699,17 @@ fn coalesce_and_gather() {
     assert_eq!(e[..3], [ext(10, 25), ext(5, 8), ext(30, 31)]);
     assert_eq!(ntfs::coalesce(&mut [ext(1, 1)]), None);
     let file = [ext(10, 25), ext(5, 8), ext(30, 31)];
+    let t = |n: u64| {
+        let mut f = file;
+        ntfs::truncate(&mut f, n).map(|k| f[..k].to_vec())
+    };
+    assert_eq!(t(0), None);
+    assert_eq!(t(1), Some(vec![ext(10, 11)]));
+    assert_eq!(t(15), Some(vec![ext(10, 25)]));
+    assert_eq!(t(16), Some(vec![ext(10, 25), ext(5, 6)]));
+    assert_eq!(t(19), Some(file.to_vec()));
+    assert_eq!(t(20), None);
+    assert_eq!(ntfs::truncate(&mut [ext(3, 3)], 1), None);
     assert_eq!(ntfs::gather(&file, 0), Some((10, 15)));
     assert_eq!(ntfs::gather(&file, 14), Some((24, 1)));
     assert_eq!(ntfs::gather(&file, 15), Some((5, 3)));
@@ -707,65 +718,452 @@ fn coalesce_and_gather() {
 }
 
 // ---- the structural assertion -------------------------------------------
+// Synthetic shapes, one test per refusal; real images from the real tools
+// (and their corruptions, and misordered gathering) are in
+// test/fixtures/payload, checked C against Rust by paguro-harness.
 
-/// A GPT disk of `sectors` with an ESP at `first..=last` holding a FAT boot
-/// sector.
-pub fn gpt_disk(sectors: u64, first: u64, last: u64) -> Vec<u8> {
-    let mut d = vec![0u8; sectors as usize * 512];
-    let h = 512;
-    d[h..h + 8].copy_from_slice(b"EFI PART");
-    put(&mut d, h + 12, 92, 4);
-    put(&mut d, h + 24, 1, 8);
-    put(&mut d, h + 72, 2, 8);
-    put(&mut d, h + 80, 128, 4);
-    put(&mut d, h + 84, 128, 4);
-    // Entry 5 (sector 3, second slot) is the ESP.
-    let e = 3 * 512 + 128;
-    d[e..e + 16].copy_from_slice(&[
-        0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9,
-        0x3b,
-    ]);
-    put(&mut d, e + 32, first, 8);
-    put(&mut d, e + 40, last, 8);
-    let f = first as usize * 512;
-    d[f + 0x52..f + 0x57].copy_from_slice(b"FAT32");
-    d[f + 510] = 0x55;
-    d[f + 511] = 0xaa;
+const ESP: [u8; 16] = [
+    0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
+];
+const LINUX: [u8; 16] = [
+    0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4,
+];
+
+fn payload(d: &[u8], sectors: u64) -> Result<(), E> {
+    ntfs::check_payload(&mut Mem(d.to_vec()), sectors, 512)
+}
+fn check(d: &[u8]) -> Result<(), E> {
+    payload(d, d.len() as u64 / 512)
+}
+
+/// An ext4 superblock at byte offset `at` of `d`: 1 KiB blocks, 8 blocks
+/// per group, `blocks` blocks, group number `group`.
+fn ext4_sb(d: &mut [u8], at: usize, blocks: u64, group: u64) {
+    put(d, at + 4, blocks, 4);
+    put(d, at + 0x14, 1, 4);
+    put(d, at + 0x18, 0, 4);
+    put(d, at + 0x20, 8, 4);
+    put(d, at + 0x38, 0xef53, 2);
+    put(d, at + 0x4c, 1, 4);
+    put(d, at + 0x5a, group, 2);
+    for i in 0..16 {
+        d[at + 0x68 + i] = 0xa0 + i as u8;
+    }
+}
+
+/// Bare ext4 of 32 KiB blocks: primary at 1024, backup at block 9 (group 1).
+fn ext4_at(d: &mut [u8], base: usize, blocks: u64) {
+    ext4_sb(d, base + 1024, blocks, 0);
+    ext4_sb(d, base + 9 * 1024, blocks, 1);
+}
+
+fn ext4_image() -> Vec<u8> {
+    let mut d = vec![0u8; 32 * 1024];
+    ext4_at(&mut d, 0, 32);
+    d
+}
+
+fn hdr_crc(d: &mut [u8], at: usize) {
+    put(d, at + 16, 0, 4);
+    let c = paguro_core::gpt::crc32(&d[at..at + 92]);
+    put(d, at + 16, u64::from(c), 4);
+}
+
+/// Refresh every CRC after an edit of the primary array (copied to the
+/// backup's array) or of either header; LBAs are `k` sectors.
+fn gpt_crcs_k(d: &mut [u8], k: usize) {
+    let l = 512 * k;
+    let n = d.len() / l;
+    let arr: Vec<u8> = d[2 * l..2 * l + 4 * 128].to_vec();
+    let blba = (n - 2) * l;
+    d[blba..blba + 512].copy_from_slice(&arr);
+    let c = u64::from(paguro_core::gpt::crc32(&arr));
+    for at in [l, (n - 1) * l] {
+        put(d, at + 88, c, 4);
+        hdr_crc(d, at);
+    }
+}
+fn gpt_crcs(d: &mut [u8]) {
+    gpt_crcs_k(d, 1);
+}
+
+/// A 200-LBA GPT disk (LBA = `k` sectors): 4-entry array at LBA 2, usable
+/// 3..=197, backup array at 198 and header at 199; ESP (FAT, 40 LBAs) at
+/// 10..=49, ext4 (32 KiB) at 64..=127.
+fn gpt_image_k(k: usize) -> Vec<u8> {
+    let l = 512 * k;
+    let mut d = vec![0u8; 200 * l];
+    for (at, my, alt, arr) in [(l, 1, 199, 2), (199 * l, 199, 1, 198)] {
+        d[at..at + 8].copy_from_slice(b"EFI PART");
+        put(&mut d, at + 8, 0x10000, 4);
+        put(&mut d, at + 12, 92, 4);
+        put(&mut d, at + 24, my, 8);
+        put(&mut d, at + 32, alt, 8);
+        put(&mut d, at + 40, 3, 8);
+        put(&mut d, at + 48, 197, 8);
+        d[at + 56..at + 72].copy_from_slice(&[0x5a; 16]);
+        put(&mut d, at + 72, arr, 8);
+        put(&mut d, at + 80, 4, 4);
+        put(&mut d, at + 84, 128, 4);
+    }
+    let a = 2 * l;
+    d[a..a + 16].copy_from_slice(&ESP);
+    put(&mut d, a + 32, 10, 8);
+    put(&mut d, a + 40, 49, 8);
+    d[a + 128..a + 144].copy_from_slice(&LINUX);
+    put(&mut d, a + 128 + 32, 64, 8);
+    put(&mut d, a + 128 + 40, 127, 8);
+    let f = 10 * l;
+    put(&mut d, f + 11, 512, 2);
+    d[f + 13] = 1;
+    put(&mut d, f + 0x13, 40 * k as u64, 2);
+    d[f + 0x36..f + 0x39].copy_from_slice(b"FAT");
+    put(&mut d, f + 510, 0xaa55, 2);
+    ext4_at(&mut d, 64 * l, 32);
+    gpt_crcs_k(&mut d, k);
+    d
+}
+fn gpt_image() -> Vec<u8> {
+    gpt_image_k(1)
+}
+
+/// A 40-sector (10 × 2048-byte block) ISO 9660 image, root directory at 18.
+fn iso_image() -> Vec<u8> {
+    let mut d = vec![0u8; 10 * 2048];
+    let p = 16 * 2048;
+    d.resize(20 * 2048, 0);
+    d[p..p + 7].copy_from_slice(b"\x01CD001\x01");
+    put(&mut d, p + 80, 20, 4);
+    d[p + 84..p + 88].copy_from_slice(&20u32.to_be_bytes());
+    put(&mut d, p + 128, 2048, 2);
+    d[p + 130..p + 132].copy_from_slice(&2048u16.to_be_bytes());
+    d[p + 156] = 34;
+    put(&mut d, p + 158, 18, 4);
+    d[p + 162..p + 166].copy_from_slice(&18u32.to_be_bytes());
+    d[p + 181] = 2;
+    let r = 18 * 2048;
+    d[r] = 34;
+    put(&mut d, r + 2, 18, 4);
+    d[r + 25] = 2;
+    d[r + 32] = 1;
     d
 }
 
 #[test]
-fn payload_check() {
-    let ok = gpt_disk(100, 40, 90);
-    let c = |d: &[u8]| ntfs::check_payload(&mut Mem(d.to_vec()), d.len() as u64 / 512);
-    assert_eq!(c(&ok), Ok(()));
+fn payload_shapes_accepted() {
+    assert_eq!(check(&gpt_image()), Ok(()));
+    assert_eq!(check(&ext4_image()), Ok(()));
+    assert_eq!(check(&iso_image()), Ok(()));
+    // A grown disk whose backup header has not moved yet.
+    let mut g = gpt_image();
+    g.resize(g.len() + 64 * 512, 0);
+    assert_eq!(check(&g), Ok(()));
+    // ext4 smaller than its payload (grown, not yet resized); FAT32 name.
+    assert_eq!(payload(&ext4_image(), 64), Ok(()));
+    let mut g = gpt_image();
+    g[10 * 512 + 0x36] = 0;
+    g[10 * 512 + 0x52..10 * 512 + 0x57].copy_from_slice(b"FAT32");
+    assert_eq!(check(&g), Ok(()));
+}
+
+#[test]
+fn payload_logical_block_size() {
+    let g4 = gpt_image_k(8);
+    let n = g4.len() as u64 / 512;
+    let c = |d: &[u8], lbs| ntfs::check_payload(&mut Mem(d.to_vec()), d.len() as u64 / 512, lbs);
+    assert_eq!(c(&g4, 4096), Ok(()));
+    assert_eq!(c(&g4, 512), Err(E::PayloadUnknown));
+    assert_eq!(c(&gpt_image(), 4096), Err(E::PayloadUnknown));
+    assert_eq!(c(&gpt_image(), 1024), Err(E::PayloadUnknown));
+    assert_eq!(c(&ext4_image(), 4096), Ok(()));
+    assert_eq!(
+        ntfs::check_payload(&mut Mem(g4.clone()), n - 8, 4096),
+        Err(E::PayloadGpt)
+    );
+    // Partition bounds and contents are in 4 KiB units.
+    let mut d = g4.clone();
+    d[64 * 4096 + 9 * 1024 + 0x68] = 0;
+    assert_eq!(c(&d, 4096), Err(E::PayloadExt4));
+    let mut d = g4.clone();
+    d[10 * 4096 + 510] = 0;
+    assert_eq!(c(&d, 4096), Err(E::PayloadNotFat));
+    let mut d = g4;
+    d[199 * 4096] = 0;
+    assert_eq!(c(&d, 4096), Err(E::PayloadGptBackup));
+    // A tiny image is not probed for a 4 KiB LBA 1.
+    assert_eq!(
+        ntfs::check_payload(&mut Mem(vec![0; 8 * 512]), 8, 4096),
+        Err(E::PayloadUnknown)
+    );
+}
+
+#[test]
+fn payload_unknown() {
+    assert_eq!(payload(&[], 0), Err(E::PayloadUnknown));
+    assert_eq!(payload(&[0; 512], 1), Err(E::PayloadUnknown));
+    assert_eq!(check(&[0; 64 * 1024]), Err(E::PayloadUnknown));
+    let mut i = iso_image();
+    i[16 * 2048 + 1] = b'X';
+    assert_eq!(check(&i), Err(E::PayloadUnknown));
+    // Not probed past the image.
+    assert_eq!(payload(&iso_image(), 64), Err(E::PayloadUnknown));
+}
+
+#[test]
+fn payload_io() {
+    let g = gpt_image();
+    for cut in [1, 2, 5, 10, 64 + 2, 64 + 9 * 2, 198, 199] {
+        assert_eq!(payload(&g[..cut * 512], 200), Err(E::Io), "cut {cut}");
+    }
+    let e = ext4_image();
+    assert_eq!(payload(&e[..1024], 64), Err(E::Io));
+    assert_eq!(payload(&e[..18 * 512], 64), Err(E::Io));
+    let i = iso_image();
+    assert_eq!(payload(&i[..64 * 512], 80), Err(E::Io));
+    assert_eq!(payload(&i[..72 * 512], 80), Err(E::Io));
+}
+
+#[test]
+fn payload_gpt_structure() {
     let m = |at: usize, v: u64, n: usize| {
-        let mut d = ok.clone();
+        let mut d = gpt_image();
         put(&mut d, at, v, n);
-        c(&d)
+        gpt_crcs(&mut d);
+        check(&d)
     };
-    assert_eq!(m(512, 0, 1), Err(E::PayloadGpt));
     assert_eq!(m(512 + 12, 91, 4), Err(E::PayloadGpt));
     assert_eq!(m(512 + 24, 2, 8), Err(E::PayloadGpt));
     assert_eq!(m(512 + 84, 256, 4), Err(E::PayloadGpt));
     assert_eq!(m(512 + 80, 0, 4), Err(E::PayloadGpt));
     assert_eq!(m(512 + 80, 1025, 4), Err(E::PayloadGpt));
-    assert_eq!(m(512 + 72, 1, 8), Err(E::PayloadGpt));
-    assert_eq!(m(512 + 72, 99, 8), Err(E::PayloadGpt)); // entries past the end
-    assert_eq!(m(3 * 512 + 128, 0, 1), Err(E::PayloadNoEsp));
-    assert_eq!(m(3 * 512 + 128 + 40, 100, 8), Err(E::PayloadGpt));
-    assert_eq!(m(3 * 512 + 128 + 32, 91, 8), Err(E::PayloadGpt));
-    assert_eq!(m(40 * 512 + 0x52, 0, 1), Err(E::PayloadNotFat));
-    assert_eq!(m(40 * 512 + 510, 0, 1), Err(E::PayloadNotFat));
-    let mut fat16 = ok.clone();
-    fat16[40 * 512 + 0x52] = 0;
-    fat16[40 * 512 + 0x36..40 * 512 + 0x39].copy_from_slice(b"FAT");
-    assert_eq!(c(&fat16), Ok(()));
-    assert_eq!(c(&ok[..1024]), Err(E::PayloadGpt));
+    assert_eq!(m(512 + 32, 200, 8), Err(E::PayloadGpt)); // backup past the end
+    assert_eq!(m(512 + 48, 199, 8), Err(E::PayloadGpt)); // usable reaches the backup
+    assert_eq!(m(512 + 40, 198, 8), Err(E::PayloadGpt)); // first usable > last
+    assert_eq!(m(512 + 72, 1, 8), Err(E::PayloadGpt)); // array over the header
+    assert_eq!(m(512 + 72, 4, 8), Err(E::PayloadGpt)); // array past first usable
+    assert_eq!(m(1024 + 32, 2, 8), Err(E::PayloadGpt)); // partition before usable
+    assert_eq!(m(1024 + 40, 198, 8), Err(E::PayloadGpt)); // ... past it
+    assert_eq!(m(1024 + 40, 9, 8), Err(E::PayloadGpt)); // reversed
+    assert_eq!(payload(&gpt_image(), 199), Err(E::PayloadGpt)); // payload short
+}
+
+#[test]
+fn payload_gpt_crc() {
+    let mut d = gpt_image();
+    d[512 + 40] ^= 1;
+    assert_eq!(check(&d), Err(E::PayloadGptCrc));
+    let mut d = gpt_image();
+    d[1024 + 60] ^= 1;
+    assert_eq!(check(&d), Err(E::PayloadGptCrc));
+    // Bytes past the header size are not covered.
+    let mut d = gpt_image();
+    d[512 + 100] ^= 1;
+    assert_eq!(check(&d), Ok(()));
+}
+
+#[test]
+fn payload_gpt_backup() {
+    let b = 199 * 512;
+    let m = |f: &dyn Fn(&mut Vec<u8>)| {
+        let mut d = gpt_image();
+        f(&mut d);
+        check(&d)
+    };
+    assert_eq!(m(&|d| d[b] = 0), Err(E::PayloadGptBackup));
+    assert_eq!(m(&|d| d[b + 40] ^= 1), Err(E::PayloadGptBackup));
+    for (at, v, n) in [
+        (12, 96, 4),
+        (24, 198, 8),
+        (32, 2, 8),
+        (40, 4, 8),
+        (48, 196, 8),
+        (56, 0, 1),
+        (80, 8, 4),
+        (84, 256, 4),
+        (88, 0, 4),
+        (72, 197, 8), // array inside the usable range
+        (72, 199, 8), // array over the header
+        (72, 250, 8), // array past the header (and the image)
+    ] {
+        assert_eq!(
+            m(&|d| {
+                put(d, b + at, v, n);
+                hdr_crc(d, b);
+            }),
+            Err(E::PayloadGptBackup),
+            "backup field {at}"
+        );
+    }
+    assert_eq!(m(&|d| d[198 * 512 + 3] ^= 1), Err(E::PayloadGptBackup));
+}
+
+#[test]
+fn payload_gpt_partitions() {
+    let m = |f: &dyn Fn(&mut Vec<u8>)| {
+        let mut d = gpt_image();
+        f(&mut d);
+        check(&d)
+    };
+    let f = 10 * 512;
+    assert_eq!(m(&|d| d[f + 510] = 0), Err(E::PayloadNotFat));
+    assert_eq!(m(&|d| d[f + 0x36] = b'X'), Err(E::PayloadNotFat));
+    assert_eq!(m(&|d| put(d, f + 11, 768, 2)), Err(E::PayloadNotFat));
+    assert_eq!(m(&|d| d[f + 13] = 3), Err(E::PayloadNotFat));
+    assert_eq!(m(&|d| d[f + 13] = 0), Err(E::PayloadNotFat));
+    assert_eq!(m(&|d| put(d, f + 0x13, 41, 2)), Err(E::PayloadNotFat));
+    assert_eq!(m(&|d| put(d, f + 0x13, 0, 2)), Err(E::PayloadNotFat));
+    // A 32-bit total, and 1 KiB sectors counted as two.
     assert_eq!(
-        ntfs::check_payload(&mut Mem(ok[..30 * 512].to_vec()), 100),
-        Err(E::Io)
+        m(&|d| {
+            put(d, f + 0x13, 0, 2);
+            put(d, f + 0x20, 40, 4);
+        }),
+        Ok(())
     );
+    assert_eq!(m(&|d| put(d, f + 11, 1024, 2)), Err(E::PayloadNotFat));
+    // ext4 in a partition: checked as bare ext4, within the partition.
+    let e = 64 * 512;
+    assert_eq!(m(&|d| d[e + 9 * 1024 + 0x68] = 0), Err(E::PayloadExt4));
+    assert_eq!(m(&|d| put(d, e + 1024 + 4, 33, 4)), Err(E::PayloadExt4));
+    // Unknown content in a partition is skipped ...
+    assert_eq!(m(&|d| d[e + 1024 + 0x38] = 0), Ok(()));
+    // ... but something must verify.
+    let none = |d: &mut Vec<u8>| {
+        d[e + 1024 + 0x38] = 0;
+        d[1024..1040].copy_from_slice(&LINUX);
+        gpt_crcs(d);
+    };
+    assert_eq!(m(&none), Err(E::PayloadNoKnownPartition));
+    // A one-sector partition is not probed for ext4.
+    let tiny = |d: &mut Vec<u8>| {
+        none(d);
+        put(d, 1024 + 128 + 40, 65, 8);
+        gpt_crcs(d);
+    };
+    assert_eq!(m(&tiny), Err(E::PayloadNoKnownPartition));
+}
+
+#[test]
+fn payload_ext4() {
+    let m = |at: usize, v: u64, n: usize| {
+        let mut d = ext4_image();
+        put(&mut d, at, v, n);
+        check(&d)
+    };
+    let (p, b) = (1024, 9 * 1024);
+    assert_eq!(m(p + 0x18, 7, 4), Err(E::PayloadExt4));
+    assert_eq!(m(p + 0x20, 0, 4), Err(E::PayloadExt4));
+    assert_eq!(m(p + 0x14, 2, 4), Err(E::PayloadExt4));
+    assert_eq!(m(p + 0x14, 0, 4), Err(E::PayloadExt4)); // group 1 would start at block 8
+    assert_eq!(m(p + 4, 0, 4), Err(E::PayloadExt4));
+    assert_eq!(m(p + 4, 33, 4), Err(E::PayloadExt4)); // bigger than the payload
+    assert_eq!(m(p + 0x20, 40, 4), Err(E::PayloadExt4)); // no group 1
+    assert_eq!(m(b + 0x38, 0, 2), Err(E::PayloadExt4));
+    assert_eq!(m(b + 0x68, 0, 1), Err(E::PayloadExt4));
+    assert_eq!(m(b + 4, 31, 4), Err(E::PayloadExt4));
+    assert_eq!(m(b + 0x5a, 3, 2), Err(E::PayloadExt4));
+    assert_eq!(m(p + 0x5a, 1, 2), Err(E::PayloadExt4)); // a backup where the primary belongs
+    // Three sectors cannot hold a superblock: sector 3 is never read.
+    let mut d = ext4_image();
+    put(&mut d, p + 0x5c, 0x200, 4);
+    assert_eq!(
+        ntfs::check_payload(&mut Mem(d[..3 * 512].to_vec()), 3, 512),
+        Err(E::PayloadExt4)
+    );
+    // 4 KiB blocks need first data block 0.
+    let mut d = vec![0u8; 64 * 4096];
+    ext4_sb(&mut d, 1024, 64, 0);
+    put(&mut d, 1024 + 0x18, 2, 4);
+    put(&mut d, 1024 + 0x14, 0, 4);
+    ext4_sb(&mut d, 8 * 4096, 64, 1);
+    put(&mut d, 8 * 4096 + 0x18, 2, 4);
+    assert_eq!(check(&d), Ok(()));
+    put(&mut d, 1024 + 0x14, 1, 4);
+    assert_eq!(check(&d), Err(E::PayloadExt4));
+    // 64-bit block counts: the high half is compared too.
+    let mut d = ext4_image();
+    put(&mut d, p + 0x60, 0x80, 4);
+    assert_eq!(check(&d), Ok(()));
+    put(&mut d, b + 0x150, 1, 4);
+    assert_eq!(check(&d), Err(E::PayloadExt4));
+    // Revision 0: feature words ignored.
+    let mut d = ext4_image();
+    put(&mut d, p + 0x4c, 0, 4);
+    put(&mut d, p + 0x5c, 0x200, 4);
+    assert_eq!(check(&d), Ok(()));
+    // sparse_super2: the backup named by s_backup_bgs[0].
+    let mut d = ext4_image();
+    put(&mut d, p + 0x5c, 0x200, 4);
+    put(&mut d, p + 0x24c, 3, 4);
+    assert_eq!(check(&d), Err(E::PayloadExt4)); // group 3 has no copy
+    ext4_sb(&mut d, 25 * 1024, 32, 3);
+    assert_eq!(check(&d), Ok(()));
+    put(&mut d, p + 0x24c, 0, 4);
+    assert_eq!(check(&d), Err(E::PayloadExt4));
+    put(&mut d, p + 0x24c, 4, 4);
+    assert_eq!(check(&d), Err(E::PayloadExt4)); // past the last block
+}
+
+#[test]
+fn payload_iso() {
+    let m = |at: usize, v: &[u8]| {
+        let mut d = iso_image();
+        d[at..at + v.len()].copy_from_slice(v);
+        check(&d)
+    };
+    let p = 16 * 2048;
+    assert_eq!(m(p + 6, &[2]), Err(E::PayloadIso));
+    assert_eq!(m(p + 84, &[1]), Err(E::PayloadIso));
+    assert_eq!(m(p + 131, &[1]), Err(E::PayloadIso));
+    assert_eq!(m(p + 128, &[0, 0x10]), Err(E::PayloadIso));
+    assert_eq!(m(p + 156, &[33]), Err(E::PayloadIso));
+    assert_eq!(m(p + 165, &[19]), Err(E::PayloadIso));
+    assert_eq!(m(p + 181, &[0]), Err(E::PayloadIso));
+    assert_eq!(m(p + 158, &[0, 0, 0, 0]), Err(E::PayloadIso));
+    let mut d = iso_image();
+    put(&mut d, p + 158, 20, 4);
+    d[p + 162..p + 166].copy_from_slice(&20u32.to_be_bytes());
+    assert_eq!(check(&d), Err(E::PayloadIso)); // root past the end
+    let r = 18 * 2048;
+    assert_eq!(m(r, &[33]), Err(E::PayloadIso));
+    assert_eq!(m(r + 2, &[17]), Err(E::PayloadIso));
+    assert_eq!(m(r + 25, &[0]), Err(E::PayloadIso));
+    assert_eq!(m(r + 32, &[2]), Err(E::PayloadIso));
+    assert_eq!(m(r + 33, &[1]), Err(E::PayloadIso));
+    assert_eq!(payload(&iso_image(), 79), Err(E::PayloadIso));
+    assert_eq!(payload(&iso_image(), 81), Err(E::PayloadIso));
+    // 512-byte logical blocks: size counted in them.
+    let mut d = iso_image();
+    put(&mut d, p + 128, 512, 2);
+    d[p + 130..p + 132].copy_from_slice(&512u16.to_be_bytes());
+    put(&mut d, p + 80, 80, 4);
+    d[p + 84..p + 88].copy_from_slice(&80u32.to_be_bytes());
+    put(&mut d, p + 158, 72, 4);
+    d[p + 162..p + 166].copy_from_slice(&72u32.to_be_bytes());
+    put(&mut d, 72 * 512 + 2, 72, 4);
+    d[72 * 512] = 34;
+    d[72 * 512 + 25] = 2;
+    d[72 * 512 + 32] = 1;
+    assert_eq!(check(&d), Ok(()));
+}
+
+/// Extents gathered in the wrong order fail the check whenever a sector it
+/// reads moved (the full sweep over real images is in paguro-harness).
+#[test]
+fn payload_misordered() {
+    for img in [gpt_image(), ext4_image()] {
+        let n = img.len() / 512;
+        let q = n / 4;
+        // Swap the second and last quarters, then the first and last.
+        for (a, b) in [(1, 3), (0, 3)] {
+            let mut d = img.clone();
+            let (x, y) = (a * q * 512, b * q * 512);
+            let tmp = d[x..x + q * 512].to_vec();
+            d.copy_within(y..y + q * 512, x);
+            d[y..y + q * 512].copy_from_slice(&tmp);
+            assert!(check(&d).is_err(), "{a}<->{b}");
+        }
+    }
 }
 
 #[test]
@@ -812,8 +1210,13 @@ fn error_codes_are_distinct() {
         E::NoVolumeInfo,
         E::SelfOverlap,
         E::PayloadGpt,
-        E::PayloadNoEsp,
+        E::PayloadNoKnownPartition,
         E::PayloadNotFat,
+        E::PayloadGptCrc,
+        E::PayloadGptBackup,
+        E::PayloadExt4,
+        E::PayloadIso,
+        E::PayloadUnknown,
     ];
     let mut codes: Vec<i32> = all.iter().map(|e| e.code()).collect();
     codes.sort_unstable();

@@ -7,8 +7,8 @@
 #   make analyze      gcc -fanalyzer, clang --analyze, cppcheck, sparse
 CORE    := ../../pg_range.c ../../pg_claim.c ../../pg_ntfs.c
 SRC     := pg_test.c $(CORE)
-FIX     := ../../../../test/fixtures/ntfs
-CORPUS  := $(wildcard ../fuzz/corpus/ntfs/*)
+FIX     := ../../../../test/fixtures/ntfs -p ../../../../test/fixtures/payload
+CORPUS  := $(wildcard ../fuzz/corpus/ntfs/*) $(wildcard ../fuzz/corpus/payload/*)
 WARN    := -Wall -Wextra -Werror -Wshadow -Wstrict-prototypes -Wvla
 CFLAGS  := -std=gnu11 -O1 -g -I../.. $(WARN)
 SAN     := -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer

@@ -36,7 +36,9 @@ enum {
 	PG_E_EXTENSION_BASE, PG_E_MFT_ATTR_LIST, PG_E_ALLOCATED_SIZE,
 	PG_E_NOT_INITIALIZED, PG_E_UNALIGNED, PG_E_TOO_MANY_EXTENTS,
 	PG_E_NO_VOLUME_INFO, PG_E_SELF_OVERLAP, PG_E_PAYLOAD_GPT,
-	PG_E_PAYLOAD_NO_ESP, PG_E_PAYLOAD_NOT_FAT,
+	PG_E_PAYLOAD_NO_KNOWN_PARTITION, PG_E_PAYLOAD_NOT_FAT,
+	PG_E_PAYLOAD_GPT_CRC, PG_E_PAYLOAD_GPT_BACKUP, PG_E_PAYLOAD_EXT4,
+	PG_E_PAYLOAD_ISO, PG_E_PAYLOAD_UNKNOWN,
 	/* runlist decoding (runlist.rs RunlistError) */
 	PG_E_RL_TRUNCATED = 50, PG_E_RL_FIELD_TOO_WIDE, PG_E_RL_SPARSE,
 	PG_E_RL_ZERO_LENGTH, PG_E_RL_NEGATIVE_LCN, PG_E_RL_OVERFLOW,
@@ -93,11 +95,22 @@ int pg_ntfs_extents(const struct pg_ntfs *v, const struct pg_run *runs,
 int pg_ntfs_volume_flags(struct pg_ntfs *v, pg_u16 *flags);
 
 /*
- * The structural assertion (DESIGN 4.3): the image of `sectors` sectors,
- * read through `read`, is a GPT disk whose first ESP starts with a FAT boot
- * sector. `buf` is 512 bytes of scratch.
+ * The structural assertion (DESIGN 4.3, INTERFACES 3.2): the image of
+ * `sectors` sectors, read through `read`, is one of
+ *   - a GPT disk: header and entry-array CRCs, the backup header at the
+ *     primary's alternate LBA agreeing with it (and its own array), every
+ *     partition inside the usable range, each ESP a FAT boot sector, each
+ *     partition holding ext4 checked as below, at least one verified;
+ *   - bare ext4: sane superblock no larger than the image, and the backup
+ *     superblock in group 1 (or s_backup_bgs[0]) agreeing on UUID, block
+ *     count and group number;
+ *   - ISO 9660: PVD fields agree, volume space size == the image, the root
+ *     directory's "." record points at itself.
+ * Anything else is refused. `lbs` (512 or 4096) is view A's logical block
+ * size, the unit of a GPT's LBAs. `buf` is 512 bytes of scratch.
  */
-int pg_payload_check(pg_read_fn read, void *ctx, pg_u64 sectors, pg_u8 *buf);
+int pg_payload_check(pg_read_fn read, void *ctx, pg_u64 sectors,
+		     unsigned int lbs, pg_u8 *buf);
 
 /* Mapping-pairs decoder (the C twin of runlist.rs), exposed for fuzzing. */
 int pg_runlist_decode(const pg_u8 *in, pg_size len, struct pg_run *out,

@@ -251,8 +251,13 @@ pub fn check_case(c: &Case) -> Result<(), String> {
             Ok(d) => {
                 let data = gathered(&img, &d);
                 let sectors = d.size / 512;
-                let r = ntfs::check_payload(&mut Slice(&data), sectors).map_err(NtfsError::code);
-                if cntfs::c_payload(&mut Slice(&data), sectors) != r {
+                // View A's logical block is the volume's sector size.
+                let lbs = img
+                    .get(11..13)
+                    .map_or(512, |b| u16::from_le_bytes([b[0], b[1]]));
+                let r = ntfs::check_payload(&mut Slice(&data), sectors, u64::from(lbs))
+                    .map_err(NtfsError::code);
+                if cntfs::c_payload(&mut Slice(&data), sectors, u32::from(lbs)) != r {
                     return Err(format!("{}: payload check differs", c.name));
                 }
                 let p = if r.is_ok() { "gpt" } else { "-" };
@@ -570,6 +575,11 @@ pub fn random_claims(rounds: u64, seed: u64) -> Result<(), String> {
         let r = ntfs::coalesce(&mut c).map(|n| c[..n].to_vec());
         if r != cntfs::c_coalesce(&a) {
             return Err(format!("round {round}: coalesce {a:?}"));
+        }
+        let t = next(40);
+        let mut tr = a.clone();
+        if ntfs::truncate(&mut tr, t).map(|n| tr[..n].to_vec()) != cntfs::c_truncate(&a, t) {
+            return Err(format!("round {round}: truncate {a:?} {t}"));
         }
         let l = next(100);
         if ntfs::gather(&a, l) != cntfs::c_gather(&a, l) {
