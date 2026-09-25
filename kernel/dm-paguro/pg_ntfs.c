@@ -187,7 +187,7 @@ static int read_record(struct pg_ntfs *v, const struct pg_run *map,
 		       pg_size nmap, pg_u64 limit, pg_u64 recno)
 {
 	pg_u8 *r = v->rec;
-	pg_u64 rb = v->record_bytes, start, s, usn, attrs, used;
+	pg_u64 rb = v->record_bytes, start, s, usn, attrs, used, usa;
 	pg_size i, count;
 
 	if (recno > ~(pg_u64)0 / rb)
@@ -206,28 +206,30 @@ static int read_record(struct pg_ntfs *v, const struct pg_run *map,
 		return PG_E_RECORD_MAGIC;
 	/* One update-sequence entry per 512 bytes, plus the USN itself. */
 	count = GET(r, struct ntfs_file_record, usa_count);
-	if (GET(r, struct ntfs_file_record, usa_offset) != NTFS_USA_OFFSET_31 ||
+	usa = GET(r, struct ntfs_file_record, usa_offset);
+	if ((usa != NTFS_USA_OFFSET_31 && usa != NTFS_USA_OFFSET_30) ||
 	    count != rb / SECTOR + 1)
 		return PG_E_RECORD_LAYOUT;
 	/*
 	 * bound: the array (u16s) ends at 0x30 + 2 * 9 < 512. Each sector's
 	 * last two bytes hold the USN; the array holds what belongs there.
 	 */
-	usn = G16(r, NTFS_USA_OFFSET_31);
+	usn = G16(r, usa);
 	for (i = 1; i < count; i++) {
 		if (G16(r, i * SECTOR - 2) != usn)
 			return PG_E_FIXUP_MISMATCH;
-		r[i * SECTOR - 2] = r[NTFS_USA_OFFSET_31 + 2 * i];
-		r[i * SECTOR - 1] = r[NTFS_USA_OFFSET_31 + 2 * i + 1];
+		r[i * SECTOR - 2] = r[usa + 2 * i];
+		r[i * SECTOR - 1] = r[usa + 2 * i + 1];
 	}
 	attrs = GET(r, struct ntfs_file_record, attrs_offset);
 	used = GET(r, struct ntfs_file_record, bytes_in_use);
 	/* Attributes are 8-byte aligned. */
 	if (GET(r, struct ntfs_file_record, bytes_allocated) != rb || used > rb ||
-	    used % 8 || attrs % 8 || attrs < NTFS_USA_OFFSET_31 + 2 * count ||
-	    attrs >= used)
+	    used % 8 || attrs % 8 || attrs < usa + 2 * count || attrs >= used)
 		return PG_E_RECORD_LAYOUT;
-	if (GET(r, struct ntfs_file_record, mft_record_number) != recno)
+	/* Only the 3.1 layout says which record it is (3.0's array is there). */
+	if (usa == NTFS_USA_OFFSET_31 &&
+	    GET(r, struct ntfs_file_record, mft_record_number) != recno)
 		return PG_E_RECORD_NUMBER;
 	return 0;
 }
@@ -320,10 +322,11 @@ static int segment(const struct pg_ntfs *v, const pg_u8 *r, pg_size pos,
 		return PG_E_SPARSE;
 	if (flags & NTFS_ATTR_IS_ENCRYPTED)
 		return PG_E_ENCRYPTED;
-	if ((flags & NTFS_ATTR_COMPRESSION_MASK) ||
+	lowest = GET_AT(r, pos, struct ntfs_attr_nonresident, lowest_vcn);
+	if ((flags & (lowest ? NTFS_ATTR_IS_COMPRESSED :
+			       NTFS_ATTR_COMPRESSION_MASK)) ||
 	    GET_AT(r, pos, struct ntfs_attr_nonresident, compression_unit))
 		return PG_E_COMPRESSED;
-	lowest = GET_AT(r, pos, struct ntfs_attr_nonresident, lowest_vcn);
 	if (lowest != st->vcn)
 		return PG_E_GAP;
 	if (lowest == 0) {

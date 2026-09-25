@@ -138,8 +138,13 @@ PG_AT(struct ntfs_file_record, mft_record_number, 0x2c);
 PG_SIZEOF(struct ntfs_file_record, 0x30);
 
 #define NTFS_RECORD_MAGIC "FILE"
-/* The update-sequence array follows the 3.1 header; 3.0's (0x2a) refused. */
+/*
+ * The update-sequence array follows the header: at 0x30 in the NTFS 3.1
+ * layout, at 0x2a in the 3.0 layout (no mft_record_number), which ntfs3
+ * still writes for the records it creates. Nothing else is accepted.
+ */
 #define NTFS_USA_OFFSET_31 0x30
+#define NTFS_USA_OFFSET_30 0x2a
 #define NTFS_RECORD_IN_USE 0x0001
 #define NTFS_RECORD_IS_DIRECTORY 0x0002
 /* An MFT reference: 48-bit record number, 16-bit sequence number. */
@@ -208,6 +213,12 @@ PG_SIZEOF(struct ntfs_attr_nonresident, 0x40);
 #define NTFS_AT_DATA 0x80
 #define NTFS_AT_END 0xffffffffu
 #define NTFS_ATTR_COMPRESSION_MASK 0x00ff
+#define NTFS_ATTR_IS_COMPRESSED 0x0001
+/*
+ * On a $DATA segment after the first (lowest_vcn > 0) only IS_COMPRESSED
+ * (with a compression unit) means compression: ntfs3 fills the other
+ * mask bits of the segments it adds from a stale pointer (seen: 0x0020).
+ */
 #define NTFS_ATTR_IS_ENCRYPTED 0x4000
 #define NTFS_ATTR_IS_SPARSE 0x8000
 /* Mapping pairs: each run's header byte, offset size << 4 | length size. */

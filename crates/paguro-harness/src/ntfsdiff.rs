@@ -682,8 +682,15 @@ pub fn write_seeds(dir: &Path) -> Result<usize, String> {
         n += 1;
         Ok(())
     };
+    let mut seen = std::collections::HashSet::new();
     for c in manifest().iter().filter(|c| c.kind == "file") {
-        put(&c.name, &patched(c), c.rec, c.seq)?;
+        // Names repeat across volumes: the later ones get the image's stem.
+        let name = if seen.insert(c.name.clone()) {
+            c.name.clone()
+        } else {
+            format!("{}_{}", c.image.trim_end_matches(".img"), c.name)
+        };
+        put(&name, &patched(c), c.rec, c.seq)?;
     }
     for (name, img) in synthetic() {
         put(&format!("synth_{name}"), &img, USER, 7)?;

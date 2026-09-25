@@ -30,6 +30,7 @@ applied to the decompressed image before parsing. This script locates records
 and attributes with its own small NTFS reader, independent of both parsers.
 """
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -225,6 +226,25 @@ def build_vol4kn(img, mnt, disk):
         write(f"{m}/plain.img", payload4k(os.path.dirname(img)))
 
 
+def build_ntfs3(img, mnt, disk):
+    """A volume whose files ntfs3 wrote (NTFS 3.0-layout FILE records), in a
+    VM (ntfs3-vm.sh): contiguous, fragmented, and grown into fragmented
+    space so ntfs3 made extension records. Returns {path: (rec, seq)}."""
+    sh("truncate", "-s", "32M", img)
+    sh("mkntfs", "-F", "-Q", "-q", "-c", "512", img, stderr=subprocess.DEVNULL)
+    work = os.path.dirname(img)
+    pay, tail, out = (os.path.join(work, n) for n in ("pay.bin", "tail.bin", "ids.txt"))
+    write(pay, disk)
+    write(tail, big(disk)[len(disk):])
+    sh(os.path.join(HERE, "ntfs3-vm.sh"), img, pay, tail, out,
+       *[a for a in (os.environ.get("PG_VM_KERNEL"), os.environ.get("PG_VM_MODULES")) if a])
+    ids = {}
+    for line in open(out):
+        p, rec, seq = line.split()
+        ids[p] = (int(rec), int(seq))
+    return ids
+
+
 # ---- an independent little NTFS reader, to locate things ------------------
 
 class Vol:
@@ -343,17 +363,20 @@ def main():
 
     only = sys.argv[1] if len(sys.argv) > 1 else None
     for name, build in [("vol512", build_vol512), ("vol4k", build_vol4k),
-                        ("vol4kn", build_vol4kn)]:
+                        ("vol4kn", build_vol4kn), ("vol_ntfs3", build_ntfs3)]:
         if only and name != only:
             continue
         img = os.path.join(work, name + ".img")
-        build(img, mnt, disk)
+        ids = build(img, mnt, disk)
         ino = {}
-        with Mounted(img, mnt) as m:
-            for root, dirs, files in os.walk(m):
-                for f in dirs + files:
-                    p = os.path.join(root, f)
-                    ino[os.path.relpath(p, m)] = os.stat(p).st_ino
+        if ids:
+            ino = {p: rec for p, (rec, _) in ids.items()}
+        else:
+            with Mounted(img, mnt) as m:
+                for root, dirs, files in os.walk(m):
+                    for f in dirs + files:
+                        p = os.path.join(root, f)
+                        ino[os.path.relpath(p, m)] = os.stat(p).st_ino
         v = Vol(open(img, "rb").read())
         gz = name + ".img"
 
@@ -395,11 +418,37 @@ def main():
             f("comp/c.bin", "Compressed")
             f("sparse.bin", "Sparse")
             f("comp", "Directory")
+        if name == "vol_ntfs3":
+            usa = lambda r: struct.unpack_from("<H", v.record(r), 4)[0]
+            for p in ["contig.img", "frag.img", "grown.img"]:
+                assert usa(ino[p]) == 0x2A, "%s: not an NTFS 3.0 record" % p
+                assert v.seq(ino[p]) == ids[p][1]
+            f("contig.img", ok)
+            f("frag.img", ok)
+            b = big(disk)
+            f("grown.img", "ok:%d:%016x:gpt" % (len(b), fnv(b)))
+            f("small.txt", "Resident")
+            f("dir", "Directory")
+            g = ino["grown.img"]
+            _, ents = v.alist(g)
+            ext = sorted({e[2] & 0xFFFFFFFFFFFF for e in ents
+                          if e[0] == 0x80 and e[2] & 0xFFFFFFFFFFFF != g})
+            assert ext, "grown.img did not spill into extension records"
+            assert all(usa(x) == 0x2A for x in ext), "extension records not 3.0"
+            add("file", "ntfs3_extension_record", gz, ext[0], v.seq(ext[0]), "NotBase")
+            c = ino["contig.img"]
+            bad = lambda n, t, e, ops: add("file", "f30_" + n, gz, t, v.seq(t), e, ops)
+            bad("usa_offset_2c", c, "RecordLayout", v.patch(c, 4, struct.pack("<H", 0x2C)))
+            bad("usa_offset_30", c, "FixupMismatch", v.patch(c, 4, struct.pack("<H", 0x30)))
+            bad("usa_count", c, "RecordLayout", v.patch(c, 6, struct.pack("<H", 4)))
+            bad("attrs_in_usa", c, "RecordLayout", v.patch(c, 0x14, struct.pack("<H", 0x28)))
+            bad("fixup", c, "FixupMismatch", v.patch(c, 0x2A, struct.pack("<H", 0xBEEF)))
+            bad("ext_fixup", g, "FixupMismatch", v.patch(ext[0], 0x2A, struct.pack("<H", 0xBEEF)))
         if name == "vol4kn":
             d4 = payload4k(work)
             f("plain.img", "ok:%d:%016x:gpt" % (len(d4), fnv(d4)))
         sh("gzip", "-9", "-n", "-f", img)
-        os.replace(img + ".gz", os.path.join(HERE, gz + ".gz"))
+        shutil.move(img + ".gz", os.path.join(HERE, gz + ".gz"))
     if only:
         # Keep every other volume's lines, in place.
         old = open(os.path.join(HERE, "manifest.txt")).read().splitlines()[1:]

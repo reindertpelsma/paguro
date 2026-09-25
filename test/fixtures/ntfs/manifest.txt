@@ -98,3 +98,16 @@ file sparse.bin vol4k.img 67 1 Sparse
 file comp vol4k.img 65 1 Directory
 volume clean vol4kn.img - - flags:0000
 file plain.img vol4kn.img 64 1 ok:524288:8540f35586f79f0c:gpt
+volume clean vol_ntfs3.img - - flags:0000
+file contig.img vol_ntfs3.img 27 1 ok:524288:9439c61df42f5d77:gpt
+file frag.img vol_ntfs3.img 334 1 ok:524288:9439c61df42f5d77:gpt
+file grown.img vol_ntfs3.img 28 1 ok:2097152:4c56d20a32bf5ed3:gpt
+file small.txt vol_ntfs3.img 29 1 Resident
+file dir vol_ntfs3.img 30 1 Directory
+file ntfs3_extension_record vol_ntfs3.img 1286 1 NotBase
+file f30_usa_offset_2c vol_ntfs3.img 27 1 RecordLayout 44036=2c 44037=00
+file f30_usa_offset_30 vol_ntfs3.img 27 1 FixupMismatch 44036=30 44037=00
+file f30_usa_count vol_ntfs3.img 27 1 RecordLayout 44038=04 44039=00
+file f30_attrs_in_usa vol_ntfs3.img 27 1 RecordLayout 44052=28 44053=00
+file f30_fixup vol_ntfs3.img 27 1 FixupMismatch 44074=ef 44075=be
+file f30_ext_fixup vol_ntfs3.img 28 1 FixupMismatch 6636586=ef 6636587=be

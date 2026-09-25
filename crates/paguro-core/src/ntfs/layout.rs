@@ -518,8 +518,11 @@ pub const NTFS_BS_MAX_CLUSTER_SHIFT: u64 = 20;
 pub const NTFS_BS_MAX_RECORD_SHIFT: u64 = 12;
 
 pub const NTFS_RECORD_MAGIC: &[u8] = b"FILE";
-/// The update-sequence array follows the 3.1 header; 3.0's (0x2a) refused.
+/// The update-sequence array follows the header: at 0x30 in the NTFS 3.1
+/// layout, at 0x2a in the 3.0 layout (no `mft_record_number`), which ntfs3
+/// still writes for the records it creates. Nothing else is accepted.
 pub const NTFS_USA_OFFSET_31: u64 = 0x30;
+pub const NTFS_USA_OFFSET_30: u64 = 0x2a;
 pub const NTFS_RECORD_IN_USE: u64 = 0x0001;
 pub const NTFS_RECORD_IS_DIRECTORY: u64 = 0x0002;
 /// An MFT reference: 48-bit record number, 16-bit sequence number.
@@ -531,6 +534,10 @@ pub const NTFS_AT_VOLUME_INFORMATION: u64 = 0x70;
 pub const NTFS_AT_DATA: u64 = 0x80;
 pub const NTFS_AT_END: u64 = 0xffff_ffff;
 pub const NTFS_ATTR_COMPRESSION_MASK: u64 = 0x00ff;
+/// On a `$DATA` segment after the first (`lowest_vcn` > 0) only this bit
+/// (with a compression unit) means compression: ntfs3 fills the other mask
+/// bits of the segments it adds from a stale pointer (seen: 0x0020).
+pub const NTFS_ATTR_IS_COMPRESSED: u64 = 0x0001;
 pub const NTFS_ATTR_IS_ENCRYPTED: u64 = 0x4000;
 pub const NTFS_ATTR_IS_SPARSE: u64 = 0x8000;
 /// Mapping pairs: each run's header byte is offset size << 4 | length size.

@@ -50,8 +50,6 @@ use layout::*;
 
 const ATTR_LIST: u64 = NTFS_AT_ATTRIBUTE_LIST;
 const ATTR_DATA: u64 = NTFS_AT_DATA;
-/// The update-sequence array's offset in an NTFS 3.1 FILE record.
-const USA_OFFSET: usize = NTFS_USA_OFFSET_31 as usize;
 
 /// The read callback failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -364,20 +362,22 @@ fn read_record<'b, D: Disk>(
     }
     // One update-sequence entry per 512 bytes, plus the USN itself.
     let count = us(get!(rec, ntfs_file_record, usa_count));
-    if us(get!(rec, ntfs_file_record, usa_offset)) != USA_OFFSET
+    let usa = get!(rec, ntfs_file_record, usa_offset);
+    if (usa != NTFS_USA_OFFSET_31 && usa != NTFS_USA_OFFSET_30)
         || count != rec.len() / us(SECTOR) + 1
     {
         return Err(E::RecordLayout);
     }
+    let usa = us(usa);
     // Each sector's last two bytes hold the USN; the array (u16s) holds what
     // belongs there.
-    let usn = g16(rec, USA_OFFSET);
+    let usn = g16(rec, usa);
     for i in 1..count {
         let at = i * us(SECTOR) - 2;
         if g16(rec, at) != usn {
             return Err(E::FixupMismatch);
         }
-        let fix = us(g16(rec, USA_OFFSET + 2 * i)).to_le_bytes();
+        let fix = us(g16(rec, usa + 2 * i)).to_le_bytes();
         if let (Some(dst), Some(src)) = (rec.get_mut(at..at + 2), fix.get(..2)) {
             dst.copy_from_slice(src);
         }
@@ -389,12 +389,14 @@ fn read_record<'b, D: Disk>(
         || used > rb
         || used % 8 != 0
         || attrs % 8 != 0
-        || attrs < (USA_OFFSET + 2 * count) as u64
+        || attrs < (usa + 2 * count) as u64
         || attrs >= used
     {
         return Err(E::RecordLayout);
     }
-    if get!(rec, ntfs_file_record, mft_record_number) != recno {
+    // Only the 3.1 layout says which record it is (3.0's array is there).
+    if usa == NTFS_USA_OFFSET_31 as usize && get!(rec, ntfs_file_record, mft_record_number) != recno
+    {
         return Err(E::RecordNumber);
     }
     Ok(rec)
@@ -489,12 +491,15 @@ fn segment(vol: &Volume, rec: &[u8], pos: usize, st: &mut Seg, out: &mut [Run]) 
     if flags & NTFS_ATTR_IS_ENCRYPTED != 0 {
         return Err(E::Encrypted);
     }
-    if flags & NTFS_ATTR_COMPRESSION_MASK != 0
-        || get_at!(rec, pos, ntfs_attr_nonresident, compression_unit) != 0
-    {
+    let lowest = get_at!(rec, pos, ntfs_attr_nonresident, lowest_vcn);
+    let mask = if lowest != 0 {
+        NTFS_ATTR_IS_COMPRESSED
+    } else {
+        NTFS_ATTR_COMPRESSION_MASK
+    };
+    if flags & mask != 0 || get_at!(rec, pos, ntfs_attr_nonresident, compression_unit) != 0 {
         return Err(E::Compressed);
     }
-    let lowest = get_at!(rec, pos, ntfs_attr_nonresident, lowest_vcn);
     if lowest != st.vcn {
         return Err(E::Gap);
     }
