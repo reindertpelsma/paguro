@@ -1317,3 +1317,42 @@ fn a_boot_services_only_b_is_never_touched() {
     ok(&m, &["uninstall", "--yes", "--skip-final-boot"]);
     assert_eq!(m.var("PaguroB", &PAGURO_VENDOR).unwrap(), vec![9; 32]);
 }
+
+/// Unelevated, firmware variables and `fltmc` cannot be read: `status`
+/// says so instead of reporting "Secure Boot: null" or "not loaded".
+#[test]
+fn status_unelevated_reports_unknown_not_a_wrong_value() {
+    let m = MockApi::standard();
+    m.set_runner(|prog, _| {
+        (prog == "fltmc.exe").then(|| paguro_win::api::Output {
+            status: 0,
+            stdout: "Filter Name\n----\nPaguroFlt      0      385100\n".into(),
+            stderr: String::new(),
+        })
+    });
+    m.elevated.set(false);
+    let r = paguro_win::cli::run(&m, ["paguro", "status"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout
+            .contains("secure boot: unknown: needs an elevated prompt"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout
+            .contains("minifilter: unknown: needs an elevated prompt"),
+        "{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains("not loaded"), "{}", r.stdout);
+    let d = common::ok(&m, &["status"]);
+    assert!(d["firmware"]["secure_boot"].is_null());
+    assert!(d["firmware"]["unknown"].is_string());
+    assert!(d["minifilter"]["loaded"].is_null());
+    // Elevated, the same machine reads both.
+    m.elevated.set(true);
+    let r = paguro_win::cli::run(&m, ["paguro", "status"]);
+    assert!(r.stdout.contains("secure boot: on"), "{}", r.stdout);
+    assert!(r.stdout.contains("minifilter: loaded"), "{}", r.stdout);
+}

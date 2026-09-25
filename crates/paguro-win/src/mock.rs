@@ -421,6 +421,16 @@ impl WinApi for MockApi {
                 "not UEFI",
             ));
         }
+        // As Windows: SE_SYSTEM_ENVIRONMENT_NAME is an administrator's
+        // privilege (ERROR_PRIVILEGE_NOT_HELD without it).
+        if !self.elevated.get() {
+            return Err(ApiError::new(
+                ErrorKind::AccessDenied,
+                "GetFirmwareEnvironmentVariableExW",
+                "a required privilege is not held by the client",
+            )
+            .with_code(1314));
+        }
         Ok(self
             .vars
             .borrow()

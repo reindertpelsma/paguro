@@ -149,7 +149,8 @@
             }
           ],
           "secure_boot": true,
-          "setup_mode": false
+          "setup_mode": false,
+          "unknown": null
         },
         "images": [
           {
@@ -307,7 +308,7 @@
       "exit": "ok",
       "lines": [
         "firmware: UEFI",
-        "secure boot: true",
+        "secure boot: on",
         "ESP: \\\\?\\Volume{aaaaaaaa-0000-0000-0000-000000000001}\\",
         "paguro.ini: valid",
         "WSL2: present",

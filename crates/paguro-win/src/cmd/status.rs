@@ -26,7 +26,14 @@ fn wsl(ctx: &Ctx<'_>) -> Value {
     }
 }
 
+/// What an unelevated process cannot read: reported as unknown, never as
+/// a guess (`fltmc` and firmware variables need an administrator).
+const NEEDS_ELEVATION: &str = "unknown: needs an elevated prompt or the paguro service";
+
 fn minifilter(ctx: &Ctx<'_>) -> Value {
+    if !ctx.api.is_elevated() {
+        return json!({ "loaded": Value::Null, "unknown": NEEDS_ELEVATION });
+    }
     match ctx.api.run("fltmc.exe", &["filters"], None) {
         Ok(o) => {
             json!({ "loaded": o.ok() && o.stdout.lines().any(|l| l.trim_start().to_ascii_lowercase().starts_with("paguroflt")) })
@@ -49,7 +56,9 @@ pub fn status(ctx: &Ctx<'_>) -> CmdResult {
             .collect::<Vec<_>>()
     }));
     let firmware = if uefi {
-        let sb = transition::secure_boot(ctx).ok();
+        let sb_read = transition::secure_boot(ctx);
+        let sb_unknown = matches!(&sb_read, Err(e) if e.exit == crate::out::Exit::NeedsElevation);
+        let sb = sb_read.ok();
         let setup_mode = api
             .fw_get("SetupMode", &EFI_GLOBAL_VARIABLE)
             .ok()
@@ -63,6 +72,7 @@ pub fn status(ctx: &Ctx<'_>) -> CmdResult {
             "boot_next": section(bootent::boot_next(api).map(|n| n.map(|n| format!("{n:04X}")))),
             "boot_order": section(bootent::boot_order(api).map(|o| o.iter().map(|n| format!("{n:04X}")).collect::<Vec<_>>())),
             "paguro_b": "not visible from an OS (boot-services only)",
+            "unknown": if sb_unknown { json!(NEEDS_ELEVATION) } else { Value::Null },
         })
     } else {
         json!({ "uefi": false })
@@ -155,7 +165,14 @@ pub fn status(ctx: &Ctx<'_>) -> CmdResult {
     });
     let mut lines = vec![
         format!("firmware: {}", if uefi { "UEFI" } else { "legacy BIOS" }),
-        format!("secure boot: {}", data.at("firmware").at("secure_boot")),
+        format!(
+            "secure boot: {}",
+            match data.at("firmware").at("secure_boot").as_bool() {
+                Some(true) => "on",
+                Some(false) => "off",
+                None => NEEDS_ELEVATION,
+            }
+        ),
         format!(
             "ESP: {}",
             data.at("esp").at("volume").as_str().unwrap_or("not found")
@@ -178,10 +195,10 @@ pub fn status(ctx: &Ctx<'_>) -> CmdResult {
         ),
         format!(
             "minifilter: {}",
-            if data.at("minifilter").at("loaded") == true {
-                "loaded"
-            } else {
-                "not loaded"
+            match data.at("minifilter").at("loaded").as_bool() {
+                Some(true) => "loaded",
+                Some(false) => "not loaded",
+                None => NEEDS_ELEVATION,
             }
         ),
     ];
