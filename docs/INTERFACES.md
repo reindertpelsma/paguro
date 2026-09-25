@@ -217,7 +217,7 @@ order, so it reads past the first extent):
 | Root content | Assertion |
 |---|---|
 | GPT | primary header CRC, the backup header at the last LBA, and each partition's first sector signature where known (FAT, ext4) |
-| bare ext4 | superblock magic `0xEF53` at byte 1 080, and the backup superblock in block group 1 agreeing on UUID and block count |
+| bare ext4 | superblock magic `0xEF53` at byte 1 080, and the backup superblock in block group 1 agreeing on UUID and block count; a filesystem with a single block group (small ext4, under 128 MiB with 4 KiB blocks) has no backup, so instead the root directory inode (#2), found through the group descriptor and the inode table, must be a directory whose extent header carries magic `0xF30A` |
 | ISO 9660 | primary volume descriptor, and the volume space size equal to the payload length |
 
 
@@ -369,8 +369,9 @@ Any size mismatch → the variable is treated as absent.
 **Recorded boot state for the pre-flight** (DESIGN §4.6): each Linux boot's
 initrd writes what the loader measured — PCR 0/2/4/7 and the Secure Boot
 configuration digest (SHA-256 over PCR 7's `EV_EFI_VARIABLE_DRIVER_CONFIG`
-event digests, in log order) — to `\EFI\paguro\<volume-guid>\recorded.bin`
-(format: `paguro-core::recorded`). PCR values are public, and the ESP is the one
+event digests, in log order), and the SHA-256 of `\EFI\paguro\shim<arch>.efi`
+and `\EFI\paguro\paguro.efi` as installed (zeros when absent) — to
+`\EFI\paguro\<volume-guid>\recorded.bin` (format: `paguro-core::recorded`). PCR values are public, and the ESP is the one
 place both operating systems read without mounting anything.
 
 ## 6. Measurements (PCR 12) — FROZEN
@@ -474,6 +475,15 @@ module reads the extents itself (§10).
 How Linux reads the table (a small module or early init code) and what it
 exposes to the initrd (e.g. a read-once `/dev/paguro-handoff`).
 
+### 8.3 What Linux keeps after the handoff
+
+The initrd zeroes the VMK and FVEK once dm-crypt is set up (the FVEK through a
+`logon` key invalidated after the table loads). **`B` and the PCR values are
+kept for re-sealing** (a PIN change from Linux, or re-sealing after a TPM
+failure — §5): `B` goes into a root-only `logon` key in the kernel keyring that
+lives for the session, read only by the re-seal tool; the PCR values are
+public and go into `recorded.bin`. Nothing is written to disk in the clear.
+
 ## 9. Bootstrap — DRAFT
 
 The installer's payload for the first boot travels in a firmware variable, not
@@ -552,7 +562,7 @@ is differential-tested against it (§12).
 
 | ioctl | In | Effect |
 |---|---|---|
-| `PG_VOLUME_ADD` | raw (ciphertext) dev_t, plaintext dev_t, volume GUID, reserved ranges (≤ 8) | registers a volume; parses its boot sector. Reserved ranges are BitLocker's non-data regions from the handoff `FVE_LAYOUT`: sectors `[0, reloc_len)`, the relocated boot-sector copy, the three metadata regions. **Subtract-only**: they can make a claim fail, never make one succeed |
+| `PG_VOLUME_ADD` | raw (ciphertext) dev_t, plaintext dev_t, volume GUID, reserved ranges (≤ 8), flags (`READ_ONLY`: set from the handoff's hibernation or dirty state, making every claim and view on the volume read-only in the module itself) | registers a volume; parses its boot sector. Reserved ranges are BitLocker's non-data regions from the handoff `FVE_LAYOUT`: sectors `[0, reloc_len)`, the relocated boot-sector copy, the three metadata regions, Windows 10+'s extra region. **Subtract-only**: they can make a claim fail, never make one succeed |
 | `PG_CLAIM` | volume id, mft_record, mft_seq, format | core derives extents; refuses intersection with any other claim **or any reserved range**; returns claim id |
 | `PG_GROW` | claim id | re-derives; accepted only if the old extents are an exact prefix of the new (append-only); otherwise the claim becomes read-only |
 | `PG_CROSSCHECK` | claim id, extent list from ntfs3 FIEMAP | compares only; mismatch → claim is refused, never amended |

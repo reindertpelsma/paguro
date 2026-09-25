@@ -1853,9 +1853,19 @@ it are **not ciphertext**:
 
 | Segment | Target |
 |---|---|
-| offset 0 | `linear` — the **relocated** NTFS boot sector, mapped back into place |
-| the three FVE metadata regions | `linear` or `zero` — never decrypted |
-| the data areas | `crypt`, physical-sector tweaks |
+| the first sectors (`[0, reloc_len)`) | `crypt` over the **relocated copy**, with `iv_offset` = the relocated sector — the copy is ciphertext, tweaked by where it physically lives |
+| the relocated copy's own home | `zero` |
+| the three FVE metadata regions, and Windows 10+'s extra region | `zero` — never decrypted |
+| the data areas up to `encrypted_size` | `crypt`, physical-sector tweaks |
+| beyond `encrypted_size` (a paused conversion) | `linear` — still plaintext on disk |
+
+On 4 KiB-sector volumes every `crypt` segment carries `sector_size:4096
+iv_large_sectors`, with `iv_offset` still counted in 512-byte sectors. The
+`encrypted_size` boundary can fall inside any of these, so the builder splits
+segments there. The table is tested unit for unit against the loader's own
+decrypted-view map (`paguro-core::bde`), and the FVEK reaches dm-crypt through a
+kernel `logon` key that is invalidated once the table loads — it never appears
+in a table line.
 
 That is the table `cryptsetup bitlk` builds, and its size is fixed by BitLocker's
 layout rather than by how fragmented anything is. **O(1) segments regardless of
