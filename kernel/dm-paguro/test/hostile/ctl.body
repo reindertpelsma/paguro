@@ -1,0 +1,149 @@
+# /dev/paguro and the table lines (vm-hostile.sh). Fixture: /fx/vol512.img.
+dmesg -c > /tmp/boot.dmesg
+dmesg -n 1	# the refusals below are logged; keep them off the console
+insmod /dm-paguro.ko && ok "insmod" || bad "insmod"
+lo() { L=$(losetup -f); losetup "$@" "$L" /fx/vol512.img; echo "$L"; }
+L1=$(lo -r)
+set -- $ID_contig_img; REC=$1 SEQ=$2
+
+# ---- the ioctls ---------------------------------------------------------
+pghostile numbers
+pghostile pointers
+pghostile privilege
+pghostile bounds "$L1" "$REC" "$SEQ"
+pghostile fuzz "$FUZZ" 1
+pghostile race "$SECS"
+pghostile flood 500000
+kernel_check "ioctls"
+
+# ---- capacity: volumes, claims ------------------------------------------
+V=""; n=0
+for i in 1 2 3 4 5 6 7 8; do
+    d=$(lo -r); v=$(pgctl add "$d" "$d" 2>/dev/null) && { V="$V $v"; n=$((n + 1)); }
+done
+d=$(lo -r)
+out=$(pgctl add "$d" "$d" 2>/dev/null)
+case "$out" in "error 0 (No space"*) full=1 ;; *) full=0 ;; esac
+[ "$n" = 8 ] && [ $full = 1 ] && ok "8 volumes, the 9th refused (ENOSPC)" || bad "volume capacity: $n added, 9th: $out"
+C=""; n=0
+for v in $V; do
+    for f in contig_img frag_img alist_img links_img ads_img; do
+        eval "set -- \$ID_$f"
+        c=$(pgctl claim "$v" "$1" "$2" 2>/dev/null) && { C="$C $c"; n=$((n + 1)); }
+    done
+done
+[ "$n" = 16 ] && ok "16 claims, the rest refused" || bad "claim capacity: $n"
+for c in $C; do pgctl release "$c"; done
+dmesg -c > /dev/null
+i=0; t0=$(date +%s)
+set -- $ID_small_txt; VF=$(echo $V | cut -d" " -f1)
+while [ $i -lt 5000 ]; do pgctl claim "$VF" "$1" "$2" > /dev/null 2>&1; i=$((i + 1)); done
+lines=$(dmesg | grep -c "paguro: claim of record"); dt=$(($(date +%s) - t0 + 1))
+# printk's default limit: a burst of 10 per 5 s per call site.
+[ "$lines" -gt 0 ] && [ "$lines" -le $((10 * (dt / 5 + 2))) ] &&
+    ok "5000 refused claims in $dt s logged $lines lines (rate-limited)" ||
+    bad "log flood: $lines lines"
+for v in $V; do pgctl remove "$v"; done
+[ -z "$(pgctl status)" ] && ok "capacity: all released" || bad "capacity: left over: $(pgctl status)"
+
+# ---- table lines ---------------------------------------------------------
+N=$(blockdev --getsz "$L1")
+V1=$(pgctl add "$L1" "$L1")
+C1=$(pgctl claim "$V1" "$REC" "$SEQ")
+bad_tables=0; n=0
+while IFS= read -r t; do
+    n=$((n + 1))
+    if dmsetup create hostile --table "$t" 2>/dev/null; then
+        bad "table accepted: $t"; bad_tables=1; dmsetup remove hostile
+    fi
+done <<TABLES
+0 8 paguro-image
+0 8 paguro-image x
+0 8 paguro-image $C1 $C1
+0 8 paguro-image 4294967296
+0 8 paguro-image -1
+0 8 paguro-image 0
+0 8 paguro-image 17
+0 8 paguro-image ${C1}x
+0 8 paguro-image 0x$C1
+0 8 paguro-image $C1
+0 $((N * 4)) paguro-image $C1
+0 8 paguro-volume
+0 8 paguro-volume $V1
+0 8 paguro-volume $V1 x
+0 8 paguro-volume $V1 bb
+0 8 paguro-volume $V1 B
+0 8 paguro-volume $V1 c extra
+0 8 paguro-volume 99999999999 c
+0 8 paguro-volume 0 c
+0 8 paguro-volume 9 c
+0 $((N + 8)) paguro-volume $V1 c
+0 8 paguro-volume ${V1}c c
+TABLES
+[ $bad_tables = 0 ] && ok "$n malformed or premature table lines refused" || true
+# (paguro-image $C1 is refused because the claim is not cross-checked yet.)
+x=0; i=0
+while [ $i -lt 300 ]; do
+    dmsetup create hv --table "0 $N paguro-volume $V1 c" 2>/dev/null && dmsetup remove hv 2>/dev/null || x=$((x + 1))
+    i=$((i + 1))
+done
+[ $x = 0 ] && ok "300 view C table create/remove cycles" || bad "$x table cycles failed"
+kernel_check "tables"
+
+# ---- lifetime: everything at once, rmmod under load ----------------------
+pgctl release "$C1"; pgctl remove "$V1"
+L2=$(lo -r)
+( i=0; while [ ! -e /tmp/stop ]; do
+      v=$(pgctl status | awk '$1 == "volume" {print $2; exit}')
+      [ -n "$v" ] && dmsetup create hc --table "0 $N paguro-volume $v c" 2>/dev/null &&
+          { dd if=/dev/mapper/hc of=/dev/null bs=64k count=64 iflag=direct 2>/dev/null; dmsetup remove hc 2>/dev/null; }
+      c=$(pgctl status | awk '$1 == "claim" {print $2; exit}')
+      [ -n "$c" ] && dmsetup create hi --readonly --table "0 8 paguro-image $c" 2>/dev/null && dmsetup remove hi 2>/dev/null
+      i=$((i + 1))
+  done; echo "INFO: $i table rounds" ) &
+tp=$!
+pghostile churn "$SECS" 8 "$L2" "$REC" "$SEQ" &
+cp=$!
+sleep 1	# the churners hold /dev/paguro open from here on
+# Only while the churners surely hold it open: stop 3 s before they end.
+end=$(($(date +%s) + SECS - 4))
+( n=0; while [ "$(date +%s)" -lt $end ]; do rmmod dm_paguro 2>/dev/null && { echo "RMMOD SUCCEEDED UNDER LOAD"; insmod /dm-paguro.ko; }; n=$((n + 1)); done
+  echo "INFO: $n rmmod attempts" ) > /tmp/rmmod.out &
+rp=$!
+wait $cp
+touch /tmp/stop; wait $tp; wait $rp
+cat /tmp/rmmod.out
+grep -q "SUCCEEDED" /tmp/rmmod.out && bad "rmmod succeeded while /dev/paguro was open" || ok "rmmod refused while in use"
+for d in hc hi; do dmsetup remove $d 2>/dev/null; done
+for c in $(pgctl status | awk '$1 == "claim" {print $2}'); do pgctl release "$c"; done
+for v in $(pgctl status | awk '$1 == "volume" {print $2}'); do pgctl remove "$v"; done
+kernel_check "lifetime"
+
+# ---- a device that never answers ------------------------------------------
+L3=$(lo -r); N3=$(blockdev --getsz "$L3")
+dmc hang --table "0 $N3 linear $L3 0"
+dmsetup suspend --nolockfs --noflush hang
+pgctl add /dev/mapper/hang /dev/mapper/hang > /tmp/add.out 2>&1 &
+ap=$!
+sleep 2
+t0=$(date +%s)
+timeout -s KILL 3 pgctl status > /dev/null 2>&1; st=$?
+t1=$(date +%s)
+[ $st = 137 ] && [ $((t1 - t0)) -le 5 ] && ok "a caller queued behind the hung add is killable ($((t1 - t0)) s)" ||
+    bad "status behind a hung add: exit $st after $((t1 - t0)) s"
+kill -9 $ap; t0=$(date +%s)
+wait $ap; st=$?
+t1=$(date +%s)
+[ $((t1 - t0)) -le 5 ] && ok "the hung add itself is killable ($((t1 - t0)) s, exit $st)" || bad "hung add took $((t1 - t0)) s to die"
+dmsetup resume hang
+pgctl status > /dev/null && ok "the control device answers again" || bad "status after the hang"
+V3=$(pgctl add /dev/mapper/hang /dev/mapper/hang) && ok "and the device can be added once it answers" || bad "add after resume"
+pgctl remove "$V3"; dmsetup remove hang
+kernel_check "hung device"
+
+# ---- the end: nothing left, nothing leaked --------------------------------
+kmemleak_check "before unload"
+rmmod dm_paguro && ok "rmmod" || bad "rmmod"
+kernel_check "unload"
+[ $fail = 0 ] && echo "RESULT: ALL PASS" || echo "RESULT: FAILURES"
+poweroff -f

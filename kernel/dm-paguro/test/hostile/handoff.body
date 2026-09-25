@@ -1,0 +1,33 @@
+# /dev/paguro-handoff's loader (vm-hostile.sh): an EFI boot without the
+# paguro loader, so there is no handoff table. Every systab= must be refused
+# cleanly, and nothing may be left behind.
+dmesg -c > /tmp/boot.dmesg
+dmesg -n 1
+[ -d /sys/firmware/efi ] && ok "EFI boot" || bad "not an EFI boot"
+bp=/sys/kernel/boot_params/data
+lo=$(od -An -tu4 -j $((0x1c4)) -N4 $bp | tr -d ' ')
+hi=$(od -An -tu4 -j $((0x1dc)) -N4 $bp | tr -d ' ')
+real=$((hi * 4294967296 + lo))
+echo "INFO: EFI system table at $(printf %#x $real)"
+try() { # try <expected errno name> <systab>
+    out=$(insmod /paguro-handoff.ko ${2:+systab=$2} 2>&1) && { bad "systab=$2 accepted"; rmmod paguro_handoff; return; }
+    ok "systab=${2:-(none)} refused: ${out##*: }"
+}
+try EINVAL ""
+try ENOENT "$(printf %#x $real)"
+for a in 0 1 0x1000 0x7fffffff $((real + 8)) $((real - 8)) $((real + 4096)) \
+         0xfffffffffffff000 0xffffffffffffffff 0x100000000000 0xfee00000 0xa0000; do
+    try x "$a"
+done
+i=0
+while [ $i -lt 200 ]; do
+    a=$(( ($(od -An -tu4 -N4 /dev/urandom | tr -d ' ') % 1073741824) & ~7 ))
+    insmod /paguro-handoff.ko systab=$a 2>/dev/null && { bad "systab=$a accepted"; rmmod paguro_handoff; }
+    i=$((i + 1))
+done
+ok "200 random system table addresses refused"
+[ ! -e /dev/paguro-handoff ] && ok "no /dev/paguro-handoff without a handoff" || bad "/dev/paguro-handoff exists"
+kernel_check "handoff"
+kmemleak_check "handoff"
+[ $fail = 0 ] && echo "RESULT: ALL PASS" || echo "RESULT: FAILURES"
+poweroff -f

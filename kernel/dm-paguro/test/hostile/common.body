@@ -1,0 +1,31 @@
+# Sourced first into /init by vm-hostile.sh.
+. /env
+. /ids
+mount -t debugfs none /sys/kernel/debug 2>/dev/null
+dmc() { dmsetup create "$@" 2>/tmp/dmerr && dmsetup mknodes; }
+# Kernel reports that fail the run. KCSAN also reports races elsewhere in
+# the kernel: only those touching our code count.
+kernel_check() {
+    dmesg > /tmp/dmesg.all
+    if grep -qE "BUG: KASAN|UBSAN:|WARNING: possible|possible circular|possible recursive|inconsistent lock|BUG: sleeping|INFO: task .* blocked|general protection|Oops|kernel BUG|refcount_t:|list_(add|del) corruption|WARNING: CPU" /tmp/dmesg.all; then
+        bad "$1: kernel report"
+        grep -E -A25 "BUG: KASAN|UBSAN:|WARNING: possible|possible circular|possible recursive|inconsistent lock|BUG: sleeping|INFO: task .* blocked|general protection|Oops|kernel BUG|refcount_t:|corruption|WARNING: CPU" /tmp/dmesg.all | head -60
+    else
+        ok "$1: no KASAN/UBSAN/lockdep/hung-task/oops report"
+    fi
+    if [ "$FLAVOUR" = kcsan ]; then
+        n=$(awk '/BUG: KCSAN/ {r = 1; buf = ""} r {buf = buf "\n" $0} /^=+$/ && r && buf ~ /(pg_|paguro)/ {print buf; r = 0; c++} END {print c + 0}' /tmp/dmesg.all | tail -1)
+        [ "$n" = 0 ] && ok "$1: no KCSAN data race in dm-paguro" ||
+            { bad "$1: $n KCSAN reports in dm-paguro"; grep -A30 "BUG: KCSAN" /tmp/dmesg.all | grep -B5 -A25 "pg_\|paguro" | head -80; }
+    fi
+}
+kmemleak_check() {
+    [ -e /sys/kernel/debug/kmemleak ] || { echo "SKIP: $1: no kmemleak"; return; }
+    echo scan > /sys/kernel/debug/kmemleak; sleep 6; echo scan > /sys/kernel/debug/kmemleak
+    if grep -qE "pg_|paguro|dm_paguro" /sys/kernel/debug/kmemleak; then
+        bad "$1: kmemleak finds dm-paguro memory"
+        grep -B3 -A20 -E "pg_|paguro" /sys/kernel/debug/kmemleak | head -60
+    else
+        ok "$1: kmemleak finds nothing of ours ($(grep -c unreferenced /sys/kernel/debug/kmemleak) unreferenced objects elsewhere)"
+    fi
+}

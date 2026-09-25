@@ -216,3 +216,53 @@ jobs:
         with:
           name: coexist-log
           path: ${{ runner.temp }}/co/log
+
+  # /dev/paguro, the dm table lines and /dev/paguro-handoff as a hostile
+  # caller sees them (INTERFACES 12.0) on a debug kernel: KASAN + UBSAN +
+  # lockdep + kmemleak on every push, KCSAN nightly. The kernel is built
+  # once and cached (test/hostile/build-kernel.sh).
+  hostile:
+    name: module — hostile callers, DoS (${{ matrix.flavour }} kernel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        flavour: ${{ github.event_name == 'schedule' && fromJSON('["kasan","kcsan"]') || fromJSON('["kasan"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: install kernel-build and VM-test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential bc bison flex libelf-dev libssl-dev \
+            qemu-system-x86 ovmf busybox-static dmsetup cpio zstd
+      - name: enable KVM if the runner has it (else TCG)
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+              sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          fi
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/kdebug/${{ matrix.flavour }}/out
+          key: kdebug-${{ matrix.flavour }}-${{ hashFiles('kernel/dm-paguro/test/hostile/build-kernel.sh', 'kernel/dm-paguro/test/hostile/*.config') }}
+      - name: debug kernel (cached)
+        run: |
+          d=$RUNNER_TEMP/kdebug/${{ matrix.flavour }}
+          if [ ! -s $d/out/bzImage ]; then
+            kernel/dm-paguro/test/hostile/build-kernel.sh ${{ matrix.flavour }} $d/work
+            mkdir -p $d/out && cp -a $d/work/bzImage $d/work/build $d/work/version $d/out/
+          fi
+      - name: hostile callers in a throwaway VM
+        run: |
+          mkdir -p $RUNNER_TEMP/hlogs
+          sudo -E PG_HOSTILE_LOGS=$RUNNER_TEMP/hlogs PG_VM_MEM=4096 \
+            PG_HOSTILE_SECS=${{ github.event_name == 'schedule' && 120 || 30 }} \
+            PG_HOSTILE_FUZZ=${{ github.event_name == 'schedule' && 1000000 || 200000 }} \
+            kernel/dm-paguro/test/hostile/vm-hostile.sh $RUNNER_TEMP/kdebug/${{ matrix.flavour }}/out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hostile-logs-${{ matrix.flavour }}
+          path: ${{ runner.temp }}/hlogs

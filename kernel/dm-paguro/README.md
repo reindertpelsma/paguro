@@ -150,6 +150,7 @@ device with synchronous bios), `paguro_uapi.h`, `tools/pgctl.c` (test client).
 | fuzzing | `test/fuzz/` (libFuzzer, C: `ntfs`, `runlist`, `payload`), `/fuzz` (cargo-fuzz: `ntfs_file`, `runlist`, `ntfs_diff` — which also diffs the payload check) | in-repo seed corpora (`paguro-harness ntfs-seeds` / `payload-seeds`) and dictionary |
 | static analysis | `make -C test/unit analyze` | `gcc -fanalyzer`, `clang --analyze`, `cppcheck`, `sparse` |
 | VM | `test/vm-test.sh` | the module in QEMU (KVM or TCG) on the host's kernel, over the fixtures |
+| VM: hostile callers | `test/hostile/vm-hostile.sh` | §12.0 on a KASAN/UBSAN/lockdep/kmemleak or KCSAN kernel (below) |
 | VM: coexistence | `test/vm-coexist.sh` (`test/coexist/`) | views A and C of one volume mounted read-write at once under stress; growth; the view-C guard; power-loss replay (below) |
 
 ```sh
@@ -236,6 +237,46 @@ with `sys_immutable` and the `SYSTEM` attribute, and by the BPF layer alone;
 `find`, `du`, `tar`, `rm -rf` of the parent, a churn, ENOSPC, `fstrim` and a
 remount cause no guard hit in `PG_STATUS`; `rm` of the pins, `umount` (also
 `-l`) of the bpffs and `bpftool link detach` (by id and by pin) all fail.
+
+## Hostile callers and denial of service (`test/hostile/`)
+
+INTERFACES §12.0, on a debug kernel built by `test/hostile/build-kernel.sh`
+(a pinned 6.18 longterm: KASAN + UBSAN + lockdep + kmemleak, or KCSAN +
+lockdep), in a VM (`test/hostile/vm-hostile.sh <kernel-out>`); any kernel
+report fails the run (KCSAN: any race in our code). `pghostile` drives
+`/dev/paguro`:
+
+- **numbers**: every ioctl type/number/direction/size combination — only the
+  seven exact commands reach the module, everything else is `ENOTTY`;
+- **pointers**: NULL, kernel, unmapped, read-only and page-straddling
+  arguments and `PG_CROSSCHECK` range pointers — `EFAULT`, state unchanged;
+- **bounds**: `nreserved` > 8, wrapping/empty/out-of-volume reserved ranges,
+  unknown flags and formats, character and missing devices, record ≥ 2³²,
+  sequence 0, `count` 0 / 65537 / 2³²−1, a partly unmapped 1 MiB range list
+  (the claim is untouched), wrapping ranges (compared, never trusted),
+  double release/remove; 8 volumes and 16 claims, then `ENOSPC`;
+- **fuzz**: random structs to every ioctl, ids biased to reach deep;
+- **race**: another thread rewrites the argument during the ioctl (one
+  `copy_from_user`, validated after the copy);
+- **privilege**: without `CAP_SYS_ADMIN`, as uid 65534 on a 0666 node, and
+  as root of a user namespace — `EPERM` for every ioctl (`capable()` is the
+  initial namespace);
+- **churn** and lifetime: 8 threads adding, claiming, growing,
+  cross-checking, releasing and removing while table lines load and unload
+  and I/O runs through them, and `rmmod` is tried in a loop (refused while
+  `/dev/paguro` is open);
+- **flood**: 500 000 `PG_STATUS`; 5 000 refused claims log at most printk's
+  rate limit;
+- **a device that never answers** (a suspended dm table under the volume):
+  the hung `PG_VOLUME_ADD` and everyone queued behind `pg_mutex` are
+  killable; afterwards the control device answers and the device can be
+  added. kmemleak finds nothing of ours; the module unloads.
+
+Malformed and premature table lines (22 of them, plus 300 create/remove
+cycles) are refused cleanly. `/dev/paguro-handoff`'s loader is booted under
+OVMF without the paguro loader: `systab=` missing, 0, 1, the real system
+table (no handoff table there), off by a few bytes, beyond memory and 200
+random addresses are all refused, and nothing is registered or leaked.
 
 ## Findings
 
