@@ -1,12 +1,30 @@
 # paguro
 
-> **Your existing Windows, both ways.** Install Linux like an application, use
-> the Windows you already have from inside it as a VM, and keep a completely
-> ordinary native Windows boot for whatever needs bare metal — with nothing
-> repartitioned and nothing reinstalled.
+> **Linux and Windows on one machine, seamlessly — both ways.** Install Linux
+> like an application, next to the Windows you already have. Whichever one you
+> boot, the other one's apps are right there on your desktop: Linux apps in
+> Windows, Windows apps in Linux. Nothing repartitioned, nothing reinstalled,
+> and Windows' own boot left exactly as it was.
 
 *Paguroidea: the hermit crabs. They occupy a shell they did not build, leave its
 structure unaltered, and can move out without damaging it.*
+
+## One desktop, both operating systems
+
+The idea is simple: pick the OS you want to sit in, and keep using your apps
+from the other one without thinking about where they live.
+
+| You booted | You also get |
+|---|---|
+| **Windows** | your Linux apps in ordinary Windows windows, through WSL2 and WSLg (or GWSL) — running from the same Linux installation you boot natively |
+| **Linux**, on the metal | your Windows apps as ordinary Linux windows, WinBoat-style — from **your own Windows installation**, the one you also boot natively, running as a VM with GPU acceleration |
+
+Same apps, same files, same installations — just a different one in charge of
+the hardware. Reboot into Linux when you want native Linux performance, into
+Windows when something needs bare metal (anti-cheat, vendor tools), and keep
+working with both either way. paguro keeps its footprint small: Windows' boot
+path, BitLocker configuration and partition table are never modified, and
+uninstalling is deleting a handful of files.
 
 ## What you get
 
@@ -17,7 +35,7 @@ structure unaltered, and can move out without damaging it.*
 - **As many distributions as you like.** Each is a file. Trying one out is
   creating a file; removing it is deleting one — not repartitioning, twice.
 - **Your Windows, both ways.** The same installation boots natively and runs as
-  a VM on the Linux desktop.
+  a GPU-accelerated VM under Linux, its apps in ordinary windows.
 - **Windows can reach Linux**, even on a single-disk laptop: the image is a file
   that WSL2 mounts, which a Linux partition on the Windows disk never is.
 - **Your WSL2 distributions on the metal**, as they are.
