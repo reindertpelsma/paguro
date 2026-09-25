@@ -11,7 +11,7 @@ use log::info;
 use paguro_ui::canvas::Rect;
 use paguro_ui::display::{ModeChoice, choose_mode};
 use paguro_ui::pointer::{Cursor, composite};
-use uefi::boot::{self, AllocateType, MemoryType, SearchType};
+use uefi::boot::{self, AllocateType, MemoryType, PAGE_SIZE, SearchType};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, EdidDiscovered, GraphicsOutput};
 use uefi::proto::device_path::DevicePath;
 use uefi::proto::unsafe_protocol;
@@ -21,8 +21,14 @@ use crate::console;
 use crate::platform::open_get;
 
 pub const MAX_DEVICES: usize = 8;
+/// Bytes per pixel of the frames and `Blt` buffers (`EFI_GRAPHICS_OUTPUT_BLT_PIXEL`, BGRA).
+const BYTES_PER_PIXEL: usize = core::mem::size_of::<BltPixel>();
+/// The largest cursor image, in pixels a side.
+const MAX_CURSOR_SIDE: usize = 128;
 /// The cursor's scratch buffer: the largest cursor image, BGRA.
-const SCRATCH: usize = 128 * 128 * 4;
+const SCRATCH: usize = MAX_CURSOR_SIDE * MAX_CURSOR_SIDE * BYTES_PER_PIXEL;
+/// At most this many of a display's modes are considered.
+const MAX_MODES: usize = 64;
 
 /// `EFI_EDID_ACTIVE_PROTOCOL` (UEFI 2.10 §12.9): the EDID the driver uses,
 /// overrides applied. Same layout as the discovered one.
@@ -132,7 +138,7 @@ impl Displays {
         let scratch = boot::allocate_pages(
             AllocateType::AnyPages,
             MemoryType::LOADER_DATA,
-            SCRATCH.div_ceil(4096),
+            SCRATCH.div_ceil(PAGE_SIZE),
         )
         .ok()?;
         let mut d = Displays {
@@ -162,7 +168,7 @@ impl Displays {
         let current = (u32::try_from(cur.0).ok()?, u32::try_from(cur.1).ok()?);
         let preferred = edid_preferred(handle);
         // Mode numbers are the iteration order (QueryMode 0..MaxMode).
-        let mut numbered = [(u32::MAX, 0u32, 0u32); 64];
+        let mut numbered = [(u32::MAX, 0u32, 0u32); MAX_MODES];
         for (i, (slot, m)) in numbered.iter_mut().zip(gop.modes()).enumerate() {
             let (w, h) = m.info().resolution();
             if let (Ok(w), Ok(h)) = (u32::try_from(w), u32::try_from(h)) {
@@ -224,11 +230,13 @@ impl Displays {
         {
             return Some(i);
         }
-        let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+        let len = (w as usize)
+            .checked_mul(h as usize)?
+            .checked_mul(BYTES_PER_PIXEL)?;
         let px = boot::allocate_pages(
             AllocateType::AnyPages,
             MemoryType::LOADER_DATA,
-            len.div_ceil(4096),
+            len.div_ceil(PAGE_SIZE),
         )
         .ok()?;
         let i = self.n_frames;
@@ -324,7 +332,7 @@ impl Displays {
                 continue;
             };
             let cr = c.rect().intersect(&r);
-            if cr.is_empty() || (cr.w * cr.h * 4) as usize > SCRATCH {
+            if cr.is_empty() || (cr.w * cr.h * BYTES_PER_PIXEL as i32) as usize > SCRATCH {
                 continue;
             }
             // SAFETY: the scratch buffer is SCRATCH bytes, exclusively ours.

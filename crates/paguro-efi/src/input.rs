@@ -14,12 +14,26 @@ use uefi::boot::{self, EventType, SearchType, TimerTrigger, Tpl};
 use uefi::proto::console::pointer::{AbsolutePointer, Pointer};
 use uefi::proto::console::text::{Input as TextInput, InputEx, Key as UKey};
 use uefi::proto::device_path::DevicePath;
+use uefi_raw::protocol::console::{KeyShiftState, KeyToggleState};
 
 use crate::console::Serials;
 use crate::platform::{decode_key, open_get};
 
 const MAX_POINTERS: usize = 4;
 const QUEUE: usize = 16;
+/// The wake-up timer's period while waiting for input.
+pub(crate) const TICK_MS: u64 = 10;
+
+// EFI_KEY_STATE modifier bits (UEFI 2.10 §12.2.3), from `uefi_raw`.
+/// Ctrl, left Alt and the logo keys: a chord, not text (right Alt is AltGr).
+const CHORD_MODIFIERS: u32 = KeyShiftState::RIGHT_CONTROL.bits()
+    | KeyShiftState::LEFT_CONTROL.bits()
+    | KeyShiftState::LEFT_ALT.bits()
+    | KeyShiftState::RIGHT_LOGO.bits()
+    | KeyShiftState::LEFT_LOGO.bits();
+const SHIFT_MODIFIERS: u32 = KeyShiftState::RIGHT_SHIFT.bits() | KeyShiftState::LEFT_SHIFT.bits();
+const ALTGR_MODIFIER: u32 = KeyShiftState::RIGHT_ALT.bits();
+const CAPS_LOCK: u8 = KeyToggleState::CAPS_LOCK_ACTIVE.bits();
 
 pub struct Inputs {
     conin: Option<Handle>,
@@ -86,7 +100,7 @@ impl Inputs {
             // 10 ms: serial polling and the lone-Esc timeout.
             let _ = boot::set_timer(
                 t,
-                TimerTrigger::Periodic(core::time::Duration::from_millis(10)),
+                TimerTrigger::Periodic(core::time::Duration::from_millis(TICK_MS)),
             );
         }
         Inputs {
@@ -208,6 +222,7 @@ impl Inputs {
 
     /// Sleep until a key, a pointer or the next timer tick.
     fn wait(&mut self) {
+        // The timer, ConIn, and a simple and an absolute pointer each.
         const N: usize = 2 + 2 * MAX_POINTERS;
         let Some(timer) = self.timer.as_ref() else {
             // No timer: poll again.
@@ -268,13 +283,13 @@ fn key_event(k: UKey, shift: Option<u32>, toggle: Option<u8>) -> Option<Event> {
     };
     let bits = shift.unwrap_or(0);
     // Ctrl, left Alt, the logo keys: a chord, not text. Right Alt is AltGr.
-    if bits & 0xec != 0 {
+    if bits & CHORD_MODIFIERS != 0 {
         return None;
     }
     Some(Event::Typed(Typed {
         ch: c,
-        shift: shift.map(|s| s & 0x03 != 0),
-        altgr: bits & 0x10 != 0,
-        caps: toggle.map(|t| t & 0x04 != 0),
+        shift: shift.map(|s| s & SHIFT_MODIFIERS != 0),
+        altgr: bits & ALTGR_MODIFIER != 0,
+        caps: toggle.map(|t| t & CAPS_LOCK != 0),
     }))
 }

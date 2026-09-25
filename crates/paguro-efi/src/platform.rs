@@ -5,19 +5,22 @@
 //! per call and closed on return.
 
 use core::fmt;
+use core::mem::size_of;
+use core::ops::Range;
 use core::ptr::NonNull;
 
 use log::info;
 
 use crate::front::Front;
+use crate::layout::field;
 use paguro_boot::platform::{DirView, DiskInfo, Input, Platform, PlatformError, Screen};
 use paguro_boot::ui::Key;
 use paguro_core::config::Ui;
-use paguro_core::guid::Guid;
+use paguro_core::guid::{Guid, HANDOFF_TABLE};
 use paguro_ui::driver::{self, Session};
 use uefi::boot::{
     self, AllocateType, LoadImageSource, MemoryType, OpenProtocolAttributes, OpenProtocolParams,
-    SearchType,
+    PAGE_SIZE, SearchType,
 };
 use uefi::proto::BootPolicy;
 use uefi::proto::console::text::{Key as UKey, ScanCode};
@@ -33,6 +36,40 @@ use uefi::{CStr16, Handle, Identify, Status};
 const MAX_DISKS: usize = 16;
 /// Bounce buffer for block reads: page-aligned, satisfies any `IoAlign`.
 const BOUNCE: usize = 64 * 1024;
+/// Room for a UCS-2 path or variable name (they are ASCII and short).
+const NAME16_LEN: usize = 128;
+/// Room for an ESP path, [`ESP_DIR`] plus the file name.
+const ESP_PATH_LEN: usize = 96;
+/// paguro's directory on the ESP.
+const ESP_DIR: &[u8] = b"\\EFI\\paguro\\";
+/// Room for a `TCG_PCClientTaggedEvent` and the `EFI_TCG2_EVENT` around it.
+const TAGGED_EVENT_LEN: usize = 128;
+const TCG2_EVENT_LEN: usize = 256;
+
+/// `TCG_PCClientTaggedEvent` (TCG PC Client PFP §10.4.2.1): the fixed part,
+/// then `taggedEventDataSize` bytes. Layout only (see `layout`).
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct TaggedEventHeader {
+    tagged_event_id: u32,
+    tagged_event_data_size: u32,
+}
+const TAGGED_EVENT_HEADER: usize = size_of::<TaggedEventHeader>();
+const TAGGED_EVENT_ID: Range<usize> = field!(TaggedEventHeader, tagged_event_id);
+const TAGGED_EVENT_DATA_SIZE: Range<usize> = field!(TaggedEventHeader, tagged_event_data_size);
+const _: () = assert!(TAGGED_EVENT_HEADER == 8 && TAGGED_EVENT_DATA_SIZE.start == 4);
+
+/// A TPM 2.0 response header (TCG TPM 2.0 Part 1 §18.3): tag, responseSize,
+/// responseCode, big-endian. Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct TpmResponseHeader {
+    tag: u16,
+    response_size: u32,
+    response_code: u32,
+}
+const TPM_RESPONSE_SIZE: Range<usize> = field!(TpmResponseHeader, response_size);
+const _: () = assert!(TPM_RESPONSE_SIZE.start == 2 && size_of::<TpmResponseHeader>() == 10);
 
 pub struct Efi {
     disks: [Option<Handle>; MAX_DISKS],
@@ -52,7 +89,7 @@ fn vendor(g: &Guid) -> VariableVendor {
 }
 
 /// UCS-2 name into a caller buffer; names are ASCII and short.
-fn name16<'b>(s: &str, buf: &'b mut [u16; 128]) -> Result<&'b CStr16, PlatformError> {
+fn name16<'b>(s: &str, buf: &'b mut [u16; NAME16_LEN]) -> Result<&'b CStr16, PlatformError> {
     CStr16::from_str_with_buf(s, buf).map_err(|_| PlatformError::TooLarge)
 }
 
@@ -61,7 +98,7 @@ impl Efi {
         let bounce = boot::allocate_pages(
             AllocateType::AnyPages,
             MemoryType::LOADER_DATA,
-            BOUNCE / 4096,
+            BOUNCE / PAGE_SIZE,
         )
         .map_err(|e| dev(&e))?;
         let front = Front::new();
@@ -73,7 +110,7 @@ impl Efi {
         let p: NonNull<u8> = boot::allocate_pages(
             AllocateType::AnyPages,
             MemoryType::LOADER_DATA,
-            size.div_ceil(4096),
+            size.div_ceil(PAGE_SIZE),
         )
         .map_err(|e| dev(&e))?;
         let sp = p.as_ptr().cast::<Session>();
@@ -172,7 +209,9 @@ pub(crate) fn decode_key(k: UKey) -> Option<Key> {
             ScanCode::DELETE => Some(Key::Delete),
             ScanCode::PAGE_UP => Some(Key::PageUp),
             ScanCode::PAGE_DOWN => Some(Key::PageDown),
-            ScanCode(f @ 0x0b..=0x16) => Some(Key::Function((f - 0x0a) as u8)),
+            ScanCode(f) if (ScanCode::FUNCTION_1.0..=ScanCode::FUNCTION_12.0).contains(&f) => {
+                Some(Key::Function((f - ScanCode::FUNCTION_1.0 + 1) as u8))
+            }
             _ => None,
         },
         UKey::Printable(c) => {
@@ -195,8 +234,8 @@ impl Platform for Efi {
         name: &str,
         buf: &mut [u8],
     ) -> Result<Option<usize>, PlatformError> {
-        let mut pathbuf = [0u8; 96];
-        let prefix = b"\\EFI\\paguro\\";
+        let mut pathbuf = [0u8; ESP_PATH_LEN];
+        let prefix = ESP_DIR;
         let n = prefix.len() + name.len();
         let p = pathbuf.get_mut(..n).ok_or(PlatformError::TooLarge)?;
         let (a, b) = p.split_at_mut(prefix.len());
@@ -204,7 +243,7 @@ impl Platform for Efi {
         b.copy_from_slice(name.as_bytes());
         let path = core::str::from_utf8(pathbuf.get(..n).unwrap_or(&[]))
             .map_err(|_| PlatformError::Unsupported)?;
-        let mut w = [0u16; 128];
+        let mut w = [0u16; NAME16_LEN];
         let path = name16(path, &mut w)?;
         let mut fs = boot::get_image_file_system(boot::image_handle()).map_err(|e| dev(&e))?;
         let mut root = fs.open_volume().map_err(|e| dev(&e))?;
@@ -236,7 +275,7 @@ impl Platform for Efi {
         vendor_guid: &Guid,
         buf: &mut [u8],
     ) -> Result<Option<usize>, PlatformError> {
-        let mut w = [0u16; 128];
+        let mut w = [0u16; NAME16_LEN];
         let n = name16(name, &mut w)?;
         match runtime::get_variable(n, &vendor(vendor_guid), buf) {
             Ok((data, _)) => Ok(Some(data.len())),
@@ -253,7 +292,7 @@ impl Platform for Efi {
         attrs: u32,
         data: &[u8],
     ) -> Result<(), PlatformError> {
-        let mut w = [0u16; 128];
+        let mut w = [0u16; NAME16_LEN];
         let n = name16(name, &mut w)?;
         runtime::set_variable(
             n,
@@ -265,14 +304,14 @@ impl Platform for Efi {
     }
 
     fn delete_var(&mut self, name: &str, vendor_guid: &Guid) -> Result<(), PlatformError> {
-        let mut w = [0u16; 128];
+        let mut w = [0u16; NAME16_LEN];
         let n = name16(name, &mut w)?;
         runtime::delete_variable(n, &vendor(vendor_guid)).map_err(|e| dev(&e))
     }
 
     fn secure_boot(&mut self) -> bool {
         let mut b = [0u8; 1];
-        let mut w = [0u16; 128];
+        let mut w = [0u16; NAME16_LEN];
         let Ok(n) = name16("SecureBoot", &mut w) else {
             return false;
         };
@@ -292,8 +331,8 @@ impl Platform for Efi {
         event: &[u8],
     ) -> Result<(), PlatformError> {
         // TCG_PCClientTaggedEvent: taggedEventID u32 | size u32 | data.
-        let mut tagged = [0u8; 128];
-        let n = 8 + event.len();
+        let mut tagged = [0u8; TAGGED_EVENT_LEN];
+        let n = TAGGED_EVENT_HEADER + event.len();
         let t = tagged.get_mut(..n).ok_or(PlatformError::TooLarge)?;
         let id = u32::from_le_bytes([
             event.first().copied().unwrap_or(0),
@@ -301,15 +340,15 @@ impl Platform for Efi {
             event.get(2).copied().unwrap_or(0),
             event.get(3).copied().unwrap_or(0),
         ]);
-        let (h, body) = t.split_at_mut(8);
-        h.get_mut(..4)
+        let (h, body) = t.split_at_mut(TAGGED_EVENT_HEADER);
+        h.get_mut(TAGGED_EVENT_ID)
             .ok_or(PlatformError::TooLarge)?
             .copy_from_slice(&id.to_le_bytes());
-        h.get_mut(4..8)
+        h.get_mut(TAGGED_EVENT_DATA_SIZE)
             .ok_or(PlatformError::TooLarge)?
             .copy_from_slice(&(event.len() as u32).to_le_bytes());
         body.copy_from_slice(event);
-        let mut evbuf = [0u8; 256];
+        let mut evbuf = [0u8; TCG2_EVENT_LEN];
         let ev = PcrEventInputs::new_in_buffer(
             &mut evbuf,
             PcrIndex(pcr),
@@ -328,7 +367,7 @@ impl Platform for Efi {
         // The protocol does not return a length: take it from the header,
         // bounded by the buffer (the parser re-checks it).
         let n = resp
-            .get(2..6)
+            .get(TPM_RESPONSE_SIZE)
             .and_then(|b| <[u8; 4]>::try_from(b).ok())
             .map(|b| u32::from_be_bytes(b) as usize)
             .ok_or(PlatformError::TooLarge)?;
@@ -406,7 +445,7 @@ impl Platform for Efi {
     }
 
     fn publish_handoff(&mut self, blob: &[u8]) -> Result<(), PlatformError> {
-        static TABLE: uefi::Guid = uefi::guid!("290e97f6-3835-4ea1-a6f5-847ccbc33a0a");
+        static TABLE: uefi::Guid = uefi::Guid::from_bytes(HANDOFF_TABLE.0);
         let p = boot::allocate_pool(MemoryType::RUNTIME_SERVICES_DATA, blob.len())
             .map_err(|e| dev(&e))?;
         // SAFETY: `p` is a fresh allocation of `blob.len()` bytes.
@@ -457,7 +496,7 @@ impl Platform for Efi {
         let p = boot::allocate_pages(
             AllocateType::AnyPages,
             MemoryType::LOADER_DATA,
-            len.div_ceil(4096).max(1),
+            len.div_ceil(PAGE_SIZE).max(1),
         )
         .map_err(|e| dev(&e))?;
         // SAFETY: a fresh allocation of at least `len` bytes, never freed,

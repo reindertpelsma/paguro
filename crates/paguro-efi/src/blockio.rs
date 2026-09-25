@@ -18,6 +18,8 @@
 //! image keeps reading it).
 
 use core::ffi::c_void;
+use core::mem::size_of;
+use core::ops::Range;
 use core::ptr::{self, NonNull};
 
 use log::info;
@@ -28,12 +30,66 @@ use paguro_core::bde::Layout;
 use paguro_core::ntfs;
 use paguro_core::range::Extent;
 use paguro_crypto::bitlocker::Xts;
-use uefi::boot::{self, AllocateType, MemoryType, SearchType};
+use uefi::boot::{self, AllocateType, MemoryType, PAGE_SIZE, SearchType};
 use uefi::proto::device_path::DevicePath;
 use uefi::proto::device_path::text::{AllowShortcuts, DevicePathToText, DisplayOnly};
 use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::{Handle, Identify, Status};
 use uefi_raw::protocol::block::{BlockIoMedia, BlockIoProtocol, Lba};
+use uefi_raw::protocol::device_path::{DevicePathProtocol, DeviceSubType, DeviceType};
+
+use crate::layout::field;
+
+/// The published disk's block size, and the volume-sector unit every read
+/// is counted in.
+const SECTOR: u64 = 512;
+/// The largest physical block size supported (4Kn disks).
+const MAX_PHYS_BLOCK: u64 = 4096;
+/// `EFI_BLOCK_IO_MEDIA.MediaId` of every published disk: "pagu".
+const MEDIA_ID: u32 = 0x7061_6775;
+
+// EFI device path nodes (UEFI 2.10 §10.3), layout only (see `layout`).
+/// Every node's header (§10.2 `EFI_DEVICE_PATH_PROTOCOL`).
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct NodeHeader {
+    kind: u8,
+    sub_type: u8,
+    length: u16,
+}
+/// paguro's vendor-defined media node (§10.3.5.3): the header, the vendor
+/// GUID, then paguro's data — the disk file's MFT record and sequence.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct VendorNode {
+    header: NodeHeader,
+    guid: [u8; 16],
+    mft_record: u64,
+    mft_seq: u16,
+}
+/// Hard drive media node (§10.3.5.1).
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct HardDriveNode {
+    header: NodeHeader,
+    partition_number: u32,
+    partition_start: u64,
+    partition_size: u64,
+    signature: [u8; 16],
+    mbr_type: u8,
+    signature_type: u8,
+}
+const NODE_HEADER: usize = size_of::<NodeHeader>();
+const NODE_LEN: Range<usize> = field!(NodeHeader, length);
+const VENDOR_GUID: Range<usize> = field!(VendorNode, guid);
+const VENDOR_MFT_RECORD: Range<usize> = field!(VendorNode, mft_record);
+const VENDOR_MFT_SEQ: Range<usize> = field!(VendorNode, mft_seq);
+const VENDOR_NODE_LEN: usize = size_of::<VendorNode>();
+const HARD_DRIVE_NODE_LEN: usize = size_of::<HardDriveNode>();
+const HARD_DRIVE_PARTITION_START: Range<usize> = field!(HardDriveNode, partition_start);
+const _: () = assert!(NODE_HEADER == size_of::<DevicePathProtocol>());
+const _: () = assert!(NODE_LEN.start == 2);
+const _: () = assert!(HARD_DRIVE_NODE_LEN == 42 && HARD_DRIVE_PARTITION_START.start == 8);
 
 /// Vendor-defined media device path node GUID for paguro's disks.
 const VENDOR: [u8; 16] = [
@@ -68,10 +124,10 @@ struct Published {
 const BOUNCE: usize = 64 * 1024;
 
 fn pages<T>(bytes: usize) -> Option<NonNull<T>> {
-    let n = bytes.div_ceil(4096).max(1);
+    let n = bytes.div_ceil(PAGE_SIZE).max(1);
     let p = boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, n).ok()?;
     // SAFETY: a fresh allocation of `n` pages.
-    unsafe { ptr::write_bytes(p.as_ptr(), 0, n * 4096) };
+    unsafe { ptr::write_bytes(p.as_ptr(), 0, n * PAGE_SIZE) };
     Some(p.cast())
 }
 
@@ -101,10 +157,10 @@ struct RawUnits<'a> {
 
 impl UnitRead for RawUnits<'_> {
     fn read_units(&mut self, unit: u64, buf: &mut [u8]) -> Result<(), ReadError> {
-        let per = self.bps / 512;
+        let per = self.bps / SECTOR;
         let sector = unit.checked_mul(per).ok_or(ReadError::Range)?;
         // SAFETY: `buf` is a live slice of `buf.len()` bytes.
-        let st = unsafe { read_raw(self.d, sector, (buf.len() / 512) as u64, buf.as_mut_ptr()) };
+        let st = unsafe { read_raw(self.d, sector, buf.len() as u64 / SECTOR, buf.as_mut_ptr()) };
         if st.is_error() {
             return Err(ReadError::Io);
         }
@@ -127,7 +183,7 @@ unsafe fn read_volume(d: &Published, sector: u64, n: u64, dst: *mut u8) -> Statu
     let (xts, out) = unsafe {
         (
             &*d.xts,
-            core::slice::from_raw_parts_mut(dst, (n * 512) as usize),
+            core::slice::from_raw_parts_mut(dst, (n * SECTOR) as usize),
         )
     };
     let bps = u64::from(d.layout.bytes_per_sector);
@@ -151,7 +207,7 @@ unsafe fn read_raw(d: &Published, sector: u64, n: u64, dst: *mut u8) -> Status {
     if end > d.part_sectors {
         return Status::DEVICE_ERROR;
     }
-    let per = d.phys_block / 512;
+    let per = d.phys_block / SECTOR;
     // SAFETY: `phys` is the physical disk's BlockIo, valid for the loader's
     // lifetime and beyond (firmware-owned).
     let phys = unsafe { &*d.phys };
@@ -162,7 +218,7 @@ unsafe fn read_raw(d: &Published, sector: u64, n: u64, dst: *mut u8) -> Status {
                 d.phys,
                 d.phys_media_id,
                 d.part_first + sector,
-                (n * 512) as usize,
+                (n * SECTOR) as usize,
                 dst.cast(),
             )
         };
@@ -174,7 +230,7 @@ unsafe fn read_raw(d: &Published, sector: u64, n: u64, dst: *mut u8) -> Status {
         let lba = d.part_first + s / per;
         let within = s % per;
         let take = (per - within).min(n - done);
-        // SAFETY: the bounce buffer holds BOUNCE ≥ 4096 bytes.
+        // SAFETY: the bounce buffer holds BOUNCE ≥ MAX_PHYS_BLOCK bytes.
         let st = unsafe {
             (phys.read_blocks)(
                 d.phys,
@@ -190,9 +246,9 @@ unsafe fn read_raw(d: &Published, sector: u64, n: u64, dst: *mut u8) -> Status {
         // SAFETY: in-bounds of both buffers by construction.
         unsafe {
             ptr::copy_nonoverlapping(
-                d.bounce.add((within * 512) as usize),
-                dst.add((done * 512) as usize),
-                (take * 512) as usize,
+                d.bounce.add((within * SECTOR) as usize),
+                dst.add((done * SECTOR) as usize),
+                (take * SECTOR) as usize,
             );
         }
         done += take;
@@ -218,10 +274,10 @@ unsafe extern "efiapi" fn read_blocks(
     if size == 0 {
         return Status::SUCCESS;
     }
-    if buf.is_null() || size % 512 != 0 {
+    if buf.is_null() || size as u64 % SECTOR != 0 {
         return Status::BAD_BUFFER_SIZE;
     }
-    let n = (size / 512) as u64;
+    let n = size as u64 / SECTOR;
     if lba.checked_add(n).is_none_or(|e| e > d.sectors) {
         return Status::INVALID_PARAMETER;
     }
@@ -236,7 +292,7 @@ unsafe extern "efiapi" fn read_blocks(
         let take = left.min(n - done);
         // SAFETY: `dst` holds `size` bytes (the caller's contract); this
         // chunk is within it.
-        let st = unsafe { read_volume(d, vs, take, dst.add((done * 512) as usize)) };
+        let st = unsafe { read_volume(d, vs, take, dst.add((done * SECTOR) as usize)) };
         if st.is_error() {
             return st;
         }
@@ -258,7 +314,7 @@ fn physical(h: Handle) -> Result<(*const BlockIoProtocol, u32, u64), PlatformErr
 /// Bytes of a device path up to (not including) its end node.
 fn path_body(dp: &DevicePath) -> &[u8] {
     let b = dp.as_bytes();
-    b.get(..b.len().saturating_sub(4)).unwrap_or(&[])
+    b.get(..b.len().saturating_sub(END.len())).unwrap_or(&[])
 }
 
 fn log_path(what: &str, dp: &DevicePath) {
@@ -296,7 +352,7 @@ pub fn expose(
         }
     }
     let (phys, phys_media_id, phys_block) = physical(disk_handle)?;
-    if phys_block != 512 && phys_block != 4096 {
+    if phys_block != SECTOR && phys_block != MAX_PHYS_BLOCK {
         return Err(PlatformError::Unsupported);
     }
     let ext_bytes = core::mem::size_of_val(disk.extents);
@@ -327,7 +383,7 @@ pub fn expose(
         }
         None => (
             Layout {
-                bytes_per_sector: 512,
+                bytes_per_sector: SECTOR as u32,
                 volume_size: 0,
                 metadata_offsets: [0; 3],
                 reloc_len: 0,
@@ -345,19 +401,19 @@ pub fn expose(
     let part_sectors = disk
         .part
         .sectors
-        .saturating_mul(u64::from(disk.part.block_size) / 512);
+        .saturating_mul(u64::from(disk.part.block_size) / SECTOR);
     // SAFETY: `d` is a fresh, zeroed allocation large enough for Published;
     // every field is written before a pointer to it is handed out.
     unsafe {
         let p = d.as_ptr();
         ptr::addr_of_mut!((*p).media).write(BlockIoMedia {
-            media_id: 0x7061_6775, // "pagu"
+            media_id: MEDIA_ID,
             removable_media: false.into(),
             media_present: true.into(),
             logical_partition: false.into(),
             read_only: true.into(),
             write_caching: false.into(),
-            block_size: 512,
+            block_size: SECTOR as u32,
             io_align: 0,
             last_block: disk.sectors - 1,
             lowest_aligned_lba: 0,
@@ -390,16 +446,16 @@ pub fn expose(
     let parent = crate::platform::open_get::<DevicePath>(disk_handle)
         .map_err(|e| PlatformError::Device(e.status().0 as u64))?;
     let body = path_body(&parent);
-    let node_len = 4 + 16 + 10;
-    let total = body.len() + node_len + 4;
+    let node_len = VENDOR_NODE_LEN;
+    let total = body.len() + node_len + END.len();
     let dp: NonNull<u8> = pages(total).ok_or(PlatformError::TooLarge)?;
-    let mut vendor = [0u8; 4 + 16 + 10];
-    vendor[0] = 0x04; // media
-    vendor[1] = 0x03; // vendor-defined
-    vendor[2..4].copy_from_slice(&(node_len as u16).to_le_bytes());
-    vendor[4..20].copy_from_slice(&VENDOR);
-    vendor[20..28].copy_from_slice(&disk.file.mft_record.to_le_bytes());
-    vendor[28..30].copy_from_slice(&disk.file.mft_seq.to_le_bytes());
+    let mut vendor = [0u8; VENDOR_NODE_LEN];
+    vendor[0] = DeviceType::MEDIA.0;
+    vendor[1] = DeviceSubType::MEDIA_VENDOR.0;
+    vendor[NODE_LEN].copy_from_slice(&(node_len as u16).to_le_bytes());
+    vendor[VENDOR_GUID].copy_from_slice(&VENDOR);
+    vendor[VENDOR_MFT_RECORD].copy_from_slice(&disk.file.mft_record.to_le_bytes());
+    vendor[VENDOR_MFT_SEQ].copy_from_slice(&disk.file.mft_seq.to_le_bytes());
     // SAFETY: `dp` holds `total` bytes.
     let dp_bytes = unsafe {
         let b = core::slice::from_raw_parts_mut(dp.as_ptr(), total);
@@ -443,24 +499,33 @@ pub fn expose(
 
     // `fs`'s path, a file-path node for `image`, the end node.
     let units = image.encode_utf16().count() + 1;
-    let fnode = 4 + 2 * units;
-    let n = fs_body.len() + fnode + 4;
+    let fnode = NODE_HEADER + 2 * units;
+    let n = fs_body.len() + fnode + END.len();
     let o = out.get_mut(..n).ok_or(PlatformError::TooLarge)?;
     let (a, rest) = o.split_at_mut(fs_body.len());
     a.copy_from_slice(fs_body);
     let (node, end) = rest.split_at_mut(fnode);
-    // Media (4) / file path (4), length, the NUL-terminated UTF-16 path.
-    put(node, 0, &[0x04, 0x04])?;
-    put(node, 2, &(fnode as u16).to_le_bytes())?;
+    // Media / file path (§10.3.5.4), length, the NUL-terminated UTF-16 path.
+    put(
+        node,
+        0,
+        &[DeviceType::MEDIA.0, DeviceSubType::MEDIA_FILE_PATH.0],
+    )?;
+    put(node, NODE_LEN.start, &(fnode as u16).to_le_bytes())?;
     for (i, u) in image.encode_utf16().chain(core::iter::once(0)).enumerate() {
-        put(node, 4 + 2 * i, &u.to_le_bytes())?;
+        put(node, NODE_HEADER + 2 * i, &u.to_le_bytes())?;
     }
     end.copy_from_slice(&END);
     Ok(n)
 }
 
-/// The end-of-device-path node.
-const END: [u8; 4] = [0x7f, 0xff, 0x04, 0x00];
+/// The end-of-device-path node: End / End Entire, length 4 (§10.3.1).
+const END: [u8; NODE_HEADER] = [
+    DeviceType::END.0,
+    DeviceSubType::END_ENTIRE.0,
+    NODE_HEADER as u8,
+    0x00,
+];
 
 fn put(b: &mut [u8], at: usize, src: &[u8]) -> Result<(), PlatformError> {
     b.get_mut(at..at + src.len())
@@ -472,7 +537,7 @@ fn put(b: &mut [u8], at: usize, src: &[u8]) -> Result<(), PlatformError> {
 /// The SimpleFileSystem on the published disk: on the child whose hard
 /// drive node starts at `first_lba` (GPT), or on the disk itself (whole).
 fn find_fs(disk: Handle, own: &[u8], fat: FatAt) -> Option<Handle> {
-    let prefix = own.get(..own.len().saturating_sub(4))?;
+    let prefix = own.get(..own.len().saturating_sub(END.len()))?;
     let handles =
         boot::locate_handle_buffer(SearchType::ByProtocol(&SimpleFileSystem::GUID)).ok()?;
     for h in handles.iter() {
@@ -487,9 +552,11 @@ fn find_fs(disk: Handle, own: &[u8], fat: FatAt) -> Option<Handle> {
                 let Some(rest) = b.strip_prefix(prefix) else {
                     continue;
                 };
-                // Next node: media (4) / hard drive (1), PartitionStart at 8.
-                if rest.len() >= 42 && rest.get(..2) == Some(&[4, 1][..]) {
-                    let start = u64::from_le_bytes(rest.get(8..16)?.try_into().ok()?);
+                // Next node: media / hard drive, and its PartitionStart.
+                let hd = [DeviceType::MEDIA.0, DeviceSubType::MEDIA_HARD_DRIVE.0];
+                if rest.len() >= HARD_DRIVE_NODE_LEN && rest.get(..2) == Some(&hd[..]) {
+                    let start =
+                        u64::from_le_bytes(rest.get(HARD_DRIVE_PARTITION_START)?.try_into().ok()?);
                     if start == first_lba {
                         return Some(*h);
                     }

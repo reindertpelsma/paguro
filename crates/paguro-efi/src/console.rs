@@ -20,7 +20,7 @@ use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use paguro_ui::driver::TextSink;
 use paguro_ui::textui::{self, COLS, Grid, ROWS, Tone};
-use uefi::boot::{self, AllocateType, MemoryType, ScopedProtocol, SearchType};
+use uefi::boot::{self, AllocateType, MemoryType, PAGE_SIZE, ScopedProtocol, SearchType};
 use uefi::proto::console::serial::{ControlBits, Serial};
 use uefi::proto::console::text::{Color, Output};
 use uefi::proto::device_path::{DevicePath, DeviceSubType, DeviceType};
@@ -39,6 +39,22 @@ static LOG_TO: AtomicU8 = AtomicU8::new(TO_CONOUT);
 
 /// At most this many serial consoles are mirrored.
 pub const MAX_SERIALS: usize = 4;
+/// Room for a terminal's device path below its serial device.
+const MAX_TERMINAL_PATH: usize = 64;
+/// At most this many bytes are read from one port per poll.
+const MAX_READ_PER_POLL: usize = 64;
+/// A pending lone Esc is the Esc key after this long without input...
+const ESC_TIMEOUT_MS: u64 = 50;
+/// ...that is, this many quiet polls of the input timer.
+const ESC_QUIET_POLLS: u32 = (ESC_TIMEOUT_MS / crate::input::TICK_MS) as u32;
+/// The serial write buffer.
+const WRITE_BUFFER: usize = 512;
+/// Text mode 0, which every ConOut supports (UEFI 2.10 §12.4.1).
+const MODE0_COLS_ROWS: (usize, usize) = (80, 25);
+/// UTF-16 surrogates: not characters on their own, so not UCS-2.
+const SURROGATES: core::ops::Range<u16> = 0xd800..0xe000;
+/// The brightest colour `SetAttribute` takes as a background (§12.4.7).
+const MAX_BACKGROUND: u8 = Color::LightGray as u8;
 
 /// The owned ports' handles, for the log (opened with GetProtocol, which an
 /// exclusive open by this image does not prevent).
@@ -181,7 +197,7 @@ pub struct Port {
     /// The terminal's device path below the serial device (its terminal
     /// type): the terminal driver is reconnected with it, so the console it
     /// creates matches the `ConIn`/`ConOut` variables again.
-    rest: [u8; 64],
+    rest: [u8; MAX_TERMINAL_PATH],
     rest_len: usize,
     /// Held while the port is owned.
     owned: Option<ScopedProtocol<Serial>>,
@@ -222,7 +238,7 @@ impl Serials {
             if s.ports.iter().flatten().any(|p| p.handle == h) {
                 continue;
             }
-            let mut saved = [0u8; 64];
+            let mut saved = [0u8; MAX_TERMINAL_PATH];
             let bytes = rest.as_bytes();
             let rest_len = match saved.get_mut(..bytes.len()) {
                 Some(d) => {
@@ -319,7 +335,7 @@ impl Serials {
                 continue;
             };
             let mut got = false;
-            for _ in 0..64 {
+            for _ in 0..MAX_READ_PER_POLL {
                 let empty = port
                     .get_control_bits()
                     .map_or(true, |b| b.contains(ControlBits::INPUT_BUFFER_EMPTY));
@@ -339,8 +355,7 @@ impl Serials {
                 p.quiet = 0;
             } else if p.decoder.pending() {
                 p.quiet += 1;
-                // ~50 ms at the 10 ms poll.
-                if p.quiet >= 5 {
+                if p.quiet >= ESC_QUIET_POLLS {
                     p.quiet = 0;
                     if let Some(k) = p.decoder.idle() {
                         key(k);
@@ -365,7 +380,7 @@ impl Serials {
 /// A small write buffer in front of the ports.
 struct Buffered<'s> {
     s: &'s mut Serials,
-    buf: [u8; 512],
+    buf: [u8; WRITE_BUFFER],
     n: usize,
 }
 
@@ -399,7 +414,7 @@ impl TextSink for Serials {
         let before = if full { None } else { prev.as_deref() };
         let mut w = Buffered {
             s: self,
-            buf: [0; 512],
+            buf: [0; WRITE_BUFFER],
             n: 0,
         };
         let _ = textui::write_vt100(before, grid, &mut w);
@@ -417,7 +432,7 @@ fn alloc_grid() -> Option<&'static mut Grid> {
     let p: NonNull<u8> = boot::allocate_pages(
         AllocateType::AnyPages,
         MemoryType::LOADER_DATA,
-        size.div_ceil(4096),
+        size.div_ceil(PAGE_SIZE),
     )
     .ok()?;
     let g = p.as_ptr().cast::<Grid>();
@@ -452,6 +467,7 @@ impl ConOut {
     }
 }
 
+/// An `EFI_TEXT_ATTRIBUTE` colour code (UEFI 2.10 §12.4.7) as a [`Color`].
 fn efi_color(n: u8) -> Color {
     match n {
         0 => Color::Black,
@@ -486,7 +502,7 @@ impl TextSink for ConOut {
                 .current_mode()
                 .ok()
                 .flatten()
-                .map_or((80, 25), |m| (m.columns(), m.rows()));
+                .map_or(MODE0_COLS_ROWS, |m| (m.columns(), m.rows()));
             for r in 0..ROWS.min(rows) {
                 let row = grid.row(r);
                 if !full && prev.is_some_and(|p| p.row(r) == row) {
@@ -504,7 +520,7 @@ impl TextSink for ConOut {
                         let ch = row.get(c).map_or(' ', |x| x.ch);
                         let u = u16::try_from(u32::from(ch)).unwrap_or(u16::from(b'?'));
                         if let Some(slot) = buf.get_mut(n) {
-                            *slot = if (0xd800..0xe000).contains(&u) {
+                            *slot = if SURROGATES.contains(&u) {
                                 u16::from(b'?')
                             } else {
                                 u
@@ -516,7 +532,7 @@ impl TextSink for ConOut {
                     let (fg, bg) = textui::conout_attr(tone);
                     // The protocol takes backgrounds 0..=7 only (the uefi
                     // crate asserts it).
-                    let _ = o.set_color(efi_color(fg), efi_color(bg.min(7)));
+                    let _ = o.set_color(efi_color(fg), efi_color(bg.min(MAX_BACKGROUND)));
                     if let Ok(s) = CStr16::from_u16_with_nul(buf.get(..=n).unwrap_or(&[0])) {
                         let _ = o.output_string(s);
                     }

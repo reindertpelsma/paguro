@@ -24,6 +24,7 @@ mod console;
 mod front;
 mod gop;
 mod input;
+mod layout;
 mod platform;
 
 /// SBAT metadata (shim's revocation scheme). shim refuses to start a second
@@ -39,13 +40,14 @@ use core::ptr::{self, NonNull, addr_of_mut};
 use log::info;
 use paguro_boot::stage4::Stage4;
 use paguro_boot::{BdeVolume, Buffers, Outcome, Params};
-use uefi::boot::{self, AllocateType, MemoryType};
+use paguro_core::bde::REGION_SIZE;
+use uefi::boot::{self, AllocateType, MemoryType, PAGE_SIZE};
 use uefi::prelude::*;
 
 /// Place [`Buffers`] (~200 KiB, too large for the firmware stack) in pages.
 fn buffers() -> Option<&'static mut Buffers> {
     let size = core::mem::size_of::<Buffers>();
-    let pages = size.div_ceil(4096);
+    let pages = size.div_ceil(PAGE_SIZE);
     let p: NonNull<u8> =
         boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages).ok()?;
     let b = p.as_ptr().cast::<Buffers>();
@@ -55,7 +57,7 @@ fn buffers() -> Option<&'static mut Buffers> {
     // fields holding enums or constructors are written explicitly before the
     // reference is formed.
     unsafe {
-        ptr::write_bytes(p.as_ptr(), 0, pages * 4096);
+        ptr::write_bytes(p.as_ptr(), 0, pages * PAGE_SIZE);
         addr_of_mut!((*b).located).write(paguro_boot::volume::Located::new());
         addr_of_mut!((*b).created).write(paguro_boot::tpm::CreatedObject::new());
         Some(&mut *b)
@@ -68,24 +70,24 @@ fn buffers() -> Option<&'static mut Buffers> {
 /// All-zero must be a valid `T`.
 unsafe fn zeroed<T>() -> Option<&'static mut T> {
     let size = core::mem::size_of::<T>();
-    let pages = size.div_ceil(4096);
+    let pages = size.div_ceil(PAGE_SIZE);
     let p: NonNull<u8> =
         boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages).ok()?;
     // SAFETY: a fresh, page-aligned allocation of at least `size` bytes,
     // exclusively ours; the caller vouches for the all-zero value.
     unsafe {
-        ptr::write_bytes(p.as_ptr(), 0, pages * 4096);
+        ptr::write_bytes(p.as_ptr(), 0, pages * PAGE_SIZE);
         Some(&mut *p.as_ptr().cast::<T>())
     }
 }
 
 /// The volume's two large parts, in pages: stage 4's memory (~2.5 MiB) and
 /// one 64 KiB FVE metadata region.
-fn volume_memory() -> Option<(&'static mut Stage4, &'static mut [u8; 0x1_0000])> {
+fn volume_memory() -> Option<(&'static mut Stage4, &'static mut [u8; REGION_SIZE as usize])> {
     // SAFETY: all-zero is a valid Stage4 (an unmounted volume; every field
     // is an integer, a bool, an array of those, or an `Option<&mut [u8]>`,
     // whose None is null) and a valid byte array.
-    unsafe { Some((zeroed::<Stage4>()?, zeroed::<[u8; 0x1_0000]>()?)) }
+    unsafe { Some((zeroed::<Stage4>()?, zeroed::<[u8; REGION_SIZE as usize]>()?)) }
 }
 
 #[entry]
