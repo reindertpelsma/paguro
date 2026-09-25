@@ -125,3 +125,15 @@ Two things the oracles do not settle:
 - Windows 10+ adds a structure after the offset/size in the volume-header
   entry naming a further 64 KiB region at `reloc_offset + 8 KiB`; none of
   the readers hides it, and neither does paguro.
+
+## Where the fixtures are used
+
+| Test | What |
+|---|---|
+| `cargo test -p paguro-crypto --test bitlocker` | IEEE 1619 XTS, Wycheproof AES-256-CCM |
+| `cargo test -p paguro-core --test bde` | every parser error, the map against a model, never-panic properties |
+| `cargo test -p paguro-boot --test bde` | `windows/`: metadata = bdeinfo, every key, boot sectors = the oracles, refusals, tampering, the stage machine |
+| `cargo test -p paguro-boot --test bde_stage4` | make.sh volumes through the stage machine and a real stage 4 (needs `paguro-bde-write` built) |
+| `test/fixtures/bde/diff.sh` | whole volumes: ours = dislocker = libbde (CI `bde` job) |
+| `test/qemu/run.sh 's4-bde-*'` | OVMF: password, recovery password, clear key, disagreeing copies; the probe boots from the VHD inside the encrypted NTFS |
+| `fuzz/`: `bde_metadata`, `bde_unlock` | seeded from `windows/` |

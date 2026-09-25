@@ -215,7 +215,8 @@ pub enum BdeError {
     ValidationHash,
     /// A startup-key (`.BEK`) file is malformed.
     BadStartupKey,
-    /// Used-space-only ("encrypt on write") volume: recognised, not read.
+    /// Used-space-only ("encrypt on write") volume: recognised, and refused
+    /// until DESIGN.md §11 Q25 is answered (INTERFACES.md §12.2).
     /// The only Windows-made sample stores its relocated boot sectors in
     /// plaintext, which neither libbde, dislocker nor cryptsetup models (all
     /// three refuse such volumes), and `FVE_LAYOUT` cannot express it
