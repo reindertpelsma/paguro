@@ -17,6 +17,29 @@ impl Color {
     }
 }
 
+/// Glyph advances and pen positions are 26.6 fixed point: 1/64 px.
+pub const SUBPX_SHIFT: u32 = 6;
+pub const SUBPX: i64 = 1 << SUBPX_SHIFT;
+
+/// Scales are fixed point ×1000 ([`Step::milli`]).
+pub const MILLI: u32 = 1000;
+
+// The glyph coverage coding written by `paguro_theme::rle_encode`: each
+// run's tag in the top two bits, its length − 1 in the low six; a literal
+// run's 4-bit values follow, two per byte, low nibble first.
+const RLE_TAG_SHIFT: u32 = 6;
+const RLE_LEN_MASK: u8 = 0x3f;
+/// A run of transparent pixels.
+const RLE_TRANSPARENT: u8 = 0;
+/// A run of fully covered pixels (any other tag: literal values).
+const RLE_COVERED: u8 = 1;
+const NIBBLE_BITS: u32 = 4;
+const NIBBLE_MASK: u8 = 0xf;
+/// A 4-bit coverage value × 17 spans 0..=255 exactly.
+const NIBBLE_TO_ALPHA: u8 = 17;
+/// Full coverage.
+const OPAQUE: u8 = 255;
+
 /// One pre-rasterised glyph. The bitmap is `w`×`h` 4-bit coverage values,
 /// run-length coded (`paguro_theme::rle_encode`) from byte `off` of the
 /// font's `alpha`.
@@ -80,12 +103,12 @@ impl Font {
                 return;
             };
             i += 1;
-            let n = u32::from(b & 0x3f) + 1;
-            match b >> 6 {
-                0 => k += n,
-                1 => {
+            let n = u32::from(b & RLE_LEN_MASK) + 1;
+            match b >> RLE_TAG_SHIFT {
+                RLE_TRANSPARENT => k += n,
+                RLE_COVERED => {
                     for _ in 0..n.min(total - k) {
-                        f(k % w, k / w, 255);
+                        f(k % w, k / w, OPAQUE);
                         k += 1;
                     }
                 }
@@ -94,9 +117,13 @@ impl Font {
                         let Some(&byte) = data.get(i + (j / 2) as usize) else {
                             return;
                         };
-                        let v = if j % 2 == 0 { byte & 0xf } else { byte >> 4 };
+                        let v = if j % 2 == 0 {
+                            byte & NIBBLE_MASK
+                        } else {
+                            byte >> NIBBLE_BITS
+                        };
                         if k < total && v != 0 {
-                            f(k % w, k / w, v * 17);
+                            f(k % w, k / w, v * NIBBLE_TO_ALPHA);
                         }
                         k += 1;
                     }
@@ -154,10 +181,11 @@ impl Step {
     /// non-negative input).
     pub fn px(&self, v: i32) -> i32 {
         let v = i64::from(v) * i64::from(self.milli);
+        let (one, half) = (i64::from(MILLI), i64::from(MILLI / 2));
         let r = if v >= 0 {
-            (v + 500) / 1000
+            (v + half) / one
         } else {
-            (v - 500) / 1000
+            (v - half) / one
         };
         i32::try_from(r).unwrap_or(0)
     }
@@ -219,20 +247,26 @@ pub enum Anchor {
     BottomRight,
 }
 
+/// An [`Anchor`]'s alignment on one axis.
+pub const ALIGN_START: u8 = 0;
+pub const ALIGN_CENTER: u8 = 1;
+pub const ALIGN_END: u8 = 2;
+
 impl Anchor {
-    /// Horizontal: 0 left, 1 centre, 2 right. Vertical likewise.
+    /// Horizontal: [`ALIGN_START`] left, [`ALIGN_CENTER`] centre,
+    /// [`ALIGN_END`] right. Vertical likewise.
     pub const fn h(self) -> u8 {
         match self {
-            Anchor::TopLeft | Anchor::CenterLeft | Anchor::BottomLeft => 0,
-            Anchor::TopCenter | Anchor::Center | Anchor::BottomCenter => 1,
-            _ => 2,
+            Anchor::TopLeft | Anchor::CenterLeft | Anchor::BottomLeft => ALIGN_START,
+            Anchor::TopCenter | Anchor::Center | Anchor::BottomCenter => ALIGN_CENTER,
+            _ => ALIGN_END,
         }
     }
     pub const fn v(self) -> u8 {
         match self {
-            Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => 0,
-            Anchor::CenterLeft | Anchor::Center | Anchor::CenterRight => 1,
-            _ => 2,
+            Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => ALIGN_START,
+            Anchor::CenterLeft | Anchor::Center | Anchor::CenterRight => ALIGN_CENTER,
+            _ => ALIGN_END,
         }
     }
 }
@@ -395,7 +429,8 @@ impl Theme {
             u64::from(self.reference.0.max(1)),
             u64::from(self.reference.1.max(1)),
         );
-        let s = (u64::from(w) * 1000 / rw).min(u64::from(h) * 1000 / rh);
+        let milli = u64::from(MILLI);
+        let s = (u64::from(w) * milli / rw).min(u64::from(h) * milli / rh);
         let mut pick = 0usize;
         for (i, st) in steps.iter().enumerate() {
             if u64::from(st.milli) <= s {
@@ -437,7 +472,7 @@ static EMPTY_FONT: Font = Font {
 /// Never used by a generated theme (they have at least one step); keeps
 /// [`Theme::step_for`] total.
 static EMPTY_STEP: Step = Step {
-    milli: 1000,
+    milli: MILLI,
     fonts: [&EMPTY_FONT; STYLE_COUNT],
     images: &[],
 };

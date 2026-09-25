@@ -4,7 +4,28 @@
 //! outside the buffer, whatever its arguments. Integer arithmetic only (the
 //! UEFI targets are soft-float).
 
-use crate::theme::{Color, Font, Image};
+use crate::theme::{Color, Font, Image, SUBPX, SUBPX_SHIFT};
+
+/// Bytes per pixel: blue, green, red, reserved (alpha in images).
+pub const BYTES_PER_PIXEL: usize = 4;
+/// The colour channels of a pixel, and where an image keeps its alpha.
+pub const COLOR_CHANNELS: usize = 3;
+pub const ALPHA: usize = 3;
+/// Full coverage / opacity.
+pub const OPAQUE: u32 = 255;
+
+/// `dst` under the premultiplied `src` pixel (`src` over `dst`, rounded).
+pub(crate) fn over(dst: &mut [u8], src: &[u8]) {
+    let inv = OPAQUE - u32::from(src.get(ALPHA).copied().unwrap_or(0));
+    for (dc, sc) in dst.iter_mut().zip(src.iter()).take(COLOR_CHANNELS) {
+        *dc = (u32::from(*sc) + (u32::from(*dc) * inv + OPAQUE / 2) / OPAQUE).min(OPAQUE) as u8;
+    }
+}
+
+/// Anti-aliasing of rounded corners: SAMPLES × SAMPLES samples per pixel,
+/// at the centres of a grid of 1/(2 × SAMPLES) px cells.
+const SAMPLES: i64 = 4;
+const SAMPLE_GRID: i64 = 2 * SAMPLES;
 
 /// A rectangle in pixels; `w` or `h` ≤ 0 is empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -75,7 +96,7 @@ impl<'a> Canvas<'a> {
     pub fn new(buf: &'a mut [u8], width: u32, height: u32, stride: u32) -> Option<Canvas<'a>> {
         let need = (stride as usize)
             .checked_mul(height as usize)?
-            .checked_mul(4)?;
+            .checked_mul(BYTES_PER_PIXEL)?;
         if stride < width
             || buf.len() < need
             || width > i32::MAX as u32 / 2
@@ -108,13 +129,13 @@ impl<'a> Canvas<'a> {
     }
 
     /// The BGRA bytes of pixel (`x`, `y`), if on the canvas.
-    pub fn pixel(&self, x: i32, y: i32) -> Option<[u8; 4]> {
+    pub fn pixel(&self, x: i32, y: i32) -> Option<[u8; BYTES_PER_PIXEL]> {
         let (x, y) = (u32::try_from(x).ok()?, u32::try_from(y).ok()?);
         if x >= self.width || y >= self.height {
             return None;
         }
-        let i = ((y as usize) * (self.stride as usize) + x as usize) * 4;
-        <[u8; 4]>::try_from(self.buf.get(i..i + 4)?).ok()
+        let i = ((y as usize) * (self.stride as usize) + x as usize) * BYTES_PER_PIXEL;
+        <[u8; BYTES_PER_PIXEL]>::try_from(self.buf.get(i..i + BYTES_PER_PIXEL)?).ok()
     }
 
     /// Row `y`, pixels `x0..x1` (already clipped by the caller).
@@ -126,7 +147,7 @@ impl<'a> Canvas<'a> {
         };
         let row = y * self.stride as usize;
         self.buf
-            .get_mut((row + x0) * 4..(row + x1.max(x0)) * 4)
+            .get_mut((row + x0) * BYTES_PER_PIXEL..(row + x1.max(x0)) * BYTES_PER_PIXEL)
             .unwrap_or(&mut [])
     }
 
@@ -148,7 +169,10 @@ impl<'a> Canvas<'a> {
         }
         let px = [c.b, c.g, c.r, 0];
         for y in r.y..r.bottom() {
-            for p in self.span(y, r.x, r.right()).chunks_exact_mut(4) {
+            for p in self
+                .span(y, r.x, r.right())
+                .chunks_exact_mut(BYTES_PER_PIXEL)
+            {
                 p.copy_from_slice(&px);
             }
         }
@@ -158,7 +182,7 @@ impl<'a> Canvas<'a> {
         if a == 0 || x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
         }
-        if let Some(p) = self.span(y, x, x + 1).get_mut(..4) {
+        if let Some(p) = self.span(y, x, x + 1).get_mut(..BYTES_PER_PIXEL) {
             blend(p, c, a);
         }
     }
@@ -234,17 +258,17 @@ impl<'a> Canvas<'a> {
         for yy in area.y..area.bottom() {
             let sy = (yy - y) as usize;
             let sx0 = (area.x - x) as usize;
-            let src0 = (sy * img.w as usize + sx0) * 4;
+            let src0 = (sy * img.w as usize + sx0) * BYTES_PER_PIXEL;
             let src = img
                 .px
-                .get(src0..src0 + (area.w as usize) * 4)
+                .get(src0..src0 + (area.w as usize) * BYTES_PER_PIXEL)
                 .unwrap_or(&[]);
             let dst = self.span(yy, area.x, area.right());
-            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                let inv = 255 - u32::from(s.get(3).copied().unwrap_or(0));
-                for (dc, sc) in d.iter_mut().zip(s.iter()).take(3) {
-                    *dc = (u32::from(*sc) + (u32::from(*dc) * inv + 127) / 255).min(255) as u8;
-                }
+            for (d, s) in dst
+                .chunks_exact_mut(BYTES_PER_PIXEL)
+                .zip(src.chunks_exact(BYTES_PER_PIXEL))
+            {
+                over(d, s);
             }
         }
     }
@@ -262,12 +286,12 @@ impl<'a> Canvas<'a> {
         clip: Rect,
     ) -> i32 {
         let clip = clip.intersect(&self.bounds());
-        let mut pen = i64::from(x) * 64;
+        let mut pen = i64::from(x) * SUBPX;
         for ch in text {
             let Some(g) = font.glyph_or_fallback(ch) else {
                 continue;
             };
-            let gx = i32::try_from((pen + 32) >> 6)
+            let gx = i32::try_from((pen + SUBPX / 2) >> SUBPX_SHIFT)
                 .unwrap_or(i32::MAX)
                 .saturating_add(i32::from(g.x));
             let gy = baseline.saturating_add(i32::from(g.y));
@@ -282,7 +306,7 @@ impl<'a> Canvas<'a> {
             }
             pen += i64::from(g.adv);
         }
-        i32::try_from((pen + 63) >> 6).unwrap_or(i32::MAX)
+        i32::try_from((pen + SUBPX - 1) >> SUBPX_SHIFT).unwrap_or(i32::MAX)
     }
 }
 
@@ -290,7 +314,7 @@ fn blend(p: &mut [u8], c: Color, a: u8) {
     let a = u32::from(a);
     let mix = |d: u8, s: u8| -> u8 {
         let (d, s) = (u32::from(d), u32::from(s));
-        ((d * (255 - a) + s * a + 127) / 255) as u8
+        ((d * (OPAQUE - a) + s * a + OPAQUE / 2) / OPAQUE) as u8
     };
     if let [b, g, r, ..] = p {
         *b = mix(*b, c.b);
@@ -310,24 +334,24 @@ fn coverage(r: &Rect, rad: i32, x: i32, y: i32) -> u8 {
     let in_x = x >= cx0 && x < cx1;
     let in_y = y >= cy0 && y < cy1;
     if rad == 0 || in_x || in_y {
-        return 255;
+        return OPAQUE as u8;
     }
-    // Corner centre, in 1/8 px.
-    let ccx = i64::from(if x < cx0 { cx0 } else { cx1 }) * 8;
-    let ccy = i64::from(if y < cy0 { cy0 } else { cy1 }) * 8;
-    let rr = i64::from(rad) * 8;
+    // Corner centre, in sample-grid cells.
+    let ccx = i64::from(if x < cx0 { cx0 } else { cx1 }) * SAMPLE_GRID;
+    let ccy = i64::from(if y < cy0 { cy0 } else { cy1 }) * SAMPLE_GRID;
+    let rr = i64::from(rad) * SAMPLE_GRID;
     let mut n = 0u32;
-    for j in 0..4i64 {
-        for i in 0..4i64 {
-            let sx = i64::from(x) * 8 + 2 * i + 1;
-            let sy = i64::from(y) * 8 + 2 * j + 1;
+    for j in 0..SAMPLES {
+        for i in 0..SAMPLES {
+            let sx = i64::from(x) * SAMPLE_GRID + 2 * i + 1;
+            let sy = i64::from(y) * SAMPLE_GRID + 2 * j + 1;
             let (dx, dy) = (sx - ccx, sy - ccy);
             if dx * dx + dy * dy <= rr * rr {
                 n += 1;
             }
         }
     }
-    (n * 255 / 16) as u8
+    (n * OPAQUE / (SAMPLES * SAMPLES) as u32) as u8
 }
 
 #[cfg(test)]

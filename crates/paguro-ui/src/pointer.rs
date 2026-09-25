@@ -16,7 +16,7 @@
 //!   clamped, an absolute report with an empty range is ignored, and
 //!   nothing here can panic or leave the screen.
 
-use crate::canvas::Rect;
+use crate::canvas::{BYTES_PER_PIXEL, Rect, over};
 use crate::theme::Image;
 
 /// Relative motion is scaled to this many pixels per millimetre when the
@@ -24,6 +24,8 @@ use crate::theme::Image;
 pub const PX_PER_MM: i64 = 4;
 /// The largest motion one report can cause, in pixels per axis.
 pub const MAX_STEP: i32 = 4096;
+/// The most wheel notches one report can scroll.
+pub const MAX_WHEEL: i32 = 16;
 
 /// One pointer report, as the adapter read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,7 +156,7 @@ impl Pointer {
                 resolution,
                 left,
             } => {
-                wheel = dz.clamp(-16, 16);
+                wheel = dz.clamp(-MAX_WHEEL, MAX_WHEEL);
                 let scale = |d: i32| -> i32 {
                     let d = i64::from(d);
                     let px = if resolution == 0 {
@@ -249,14 +251,15 @@ pub fn composite(
         return Rect::default();
     }
     let (w, h) = (r.w as usize, r.h as usize);
-    if out.len() < w * h * 4 || frame.len() < (fw as usize) * (fh as usize) * 4 {
+    const BPP: usize = BYTES_PER_PIXEL;
+    if out.len() < w * h * BPP || frame.len() < (fw as usize) * (fh as usize) * BPP {
         return Rect::default();
     }
     for row in 0..h {
-        let src = ((r.y as usize + row) * fw as usize + r.x as usize) * 4;
+        let src = ((r.y as usize + row) * fw as usize + r.x as usize) * BPP;
         if let (Some(d), Some(s)) = (
-            out.get_mut(row * w * 4..(row + 1) * w * 4),
-            frame.get(src..src + w * 4),
+            out.get_mut(row * w * BPP..(row + 1) * w * BPP),
+            frame.get(src..src + w * BPP),
         ) {
             d.copy_from_slice(s);
         }
@@ -267,15 +270,12 @@ pub fn composite(
     let cr = c.rect().intersect(&r);
     for yy in cr.y..cr.bottom() {
         for xx in cr.x..cr.right() {
-            let si = (((yy - c.y) as usize) * c.img.w as usize + (xx - c.x) as usize) * 4;
-            let di = (((yy - r.y) as usize) * w + (xx - r.x) as usize) * 4;
-            let (Some(s), Some(d)) = (c.img.px.get(si..si + 4), out.get_mut(di..di + 4)) else {
+            let si = (((yy - c.y) as usize) * c.img.w as usize + (xx - c.x) as usize) * BPP;
+            let di = (((yy - r.y) as usize) * w + (xx - r.x) as usize) * BPP;
+            let (Some(s), Some(d)) = (c.img.px.get(si..si + BPP), out.get_mut(di..di + BPP)) else {
                 continue;
             };
-            let inv = 255 - u32::from(s.get(3).copied().unwrap_or(0));
-            for (dc, sc) in d.iter_mut().zip(s.iter()).take(3) {
-                *dc = (u32::from(*sc) + (u32::from(*dc) * inv + 127) / 255).min(255) as u8;
-            }
+            over(d, s);
         }
     }
     r

@@ -24,15 +24,18 @@ use crate::draw::{Cmd, DrawList, Target, TextRun, TextSrc};
 use crate::strings::Str;
 use crate::text;
 use crate::theme::{
-    Align, Color, Font, Layout, Palette, Part, Placement, ScreenKind, Selection, Step, Style, Theme,
+    ALIGN_CENTER, ALIGN_START, Align, Color, Font, Layout, Palette, Part, Placement, ScreenKind,
+    Selection, Step, Style, Theme,
 };
 
 /// Below this the loader uses the text console instead.
 pub const MIN_WIDTH: u32 = 640;
 pub const MIN_HEIGHT: u32 = 480;
+/// Above this (per axis) likewise.
+pub const MAX_SIDE: u32 = 16384;
 
 pub const fn supported(w: u32, h: u32) -> bool {
-    w >= MIN_WIDTH && h >= MIN_HEIGHT && w <= 16384 && h <= 16384
+    w >= MIN_WIDTH && h >= MIN_HEIGHT && w <= MAX_SIDE && h <= MAX_SIDE
 }
 
 /// A short message carried over from a screen that needs no key
@@ -152,6 +155,12 @@ pub enum Arg<'a> {
 pub(crate) const MAX_BLOCKS: usize = 10;
 pub(crate) const MAX_ACTIONS: usize = 3;
 pub(crate) const MAX_HINTS: usize = 6;
+/// The recovery key's groups of digits.
+const RECOVERY_GROUPS: usize = RECOVERY_DIGITS / RECOVERY_GROUP;
+/// The narrowest selection or paragraph bar, in pixels.
+const MIN_MARKER: i32 = 2;
+/// Rounds of shrinking the content before giving up.
+const MAX_SHRINK_ROUNDS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BlockKind {
@@ -312,15 +321,15 @@ fn joined<'a>(list: &mut DrawList<'a>, a: TextSrc<'a>, b: TextSrc<'a>) -> TextSr
 fn place(p: &Placement, w: i32, h: i32, off: (i32, i32), area: Rect) -> Rect {
     let x = area.x
         + match p.anchor.h() {
-            0 => 0,
-            1 => (area.w - w) / 2,
+            ALIGN_START => 0,
+            ALIGN_CENTER => (area.w - w) / 2,
             _ => area.w - w,
         }
         + off.0;
     let y = area.y
         + match p.anchor.v() {
-            0 => 0,
-            1 => (area.h - h) / 2,
+            ALIGN_START => 0,
+            ALIGN_CENTER => (area.h - h) / 2,
             _ => area.h - h,
         }
         + off.1;
@@ -1010,7 +1019,7 @@ fn key_grid(ctx: &Ctx<'_>, d: &Dims, cw: i32) -> (i32, i32, i32) {
     let pad = ctx.px(ctx.lay.field.padding) / 2 + ctx.px(ctx.lay.field.border);
     let gw = slot * RECOVERY_GROUP as i32 + 2 * pad;
     let gap = ctx.px(ctx.lay.field.group_gap);
-    let mut per = 8i32;
+    let mut per = RECOVERY_GROUPS as i32;
     while per > 1 && per * gw + (per - 1) * gap > cw {
         per /= 2;
     }
@@ -1062,7 +1071,7 @@ fn block_height(
         BlockKind::Field => match fkind {
             Some(FieldKind::RecoveryKey) => {
                 let (per, _, _) = key_grid(ctx, d, cw);
-                let rows = (8 + per - 1) / per;
+                let rows = (RECOVERY_GROUPS as i32 + per - 1) / per;
                 rows * d.field_h + (rows - 1) * ctx.px(ctx.lay.field.group_gap)
             }
             _ => d.field_h,
@@ -1081,7 +1090,7 @@ fn more_h(d: &Dims) -> i32 {
 }
 
 fn bar_inset(ctx: &Ctx<'_>) -> i32 {
-    ctx.px(ctx.lay.row.marker).max(2) + ctx.px(ctx.lay.row.padding)
+    ctx.px(ctx.lay.row.marker).max(MIN_MARKER) + ctx.px(ctx.lay.row.padding)
 }
 
 fn gap_between(ctx: &Ctx<'_>, a: BlockKind, b: BlockKind) -> i32 {
@@ -1218,7 +1227,7 @@ pub fn layout<'a>(
         let mut r = place(&lay.banner.place, bw, bh, off, safe);
         // Never over the brand: move away from it vertically.
         if r.intersects(&brand) {
-            if lay.banner.place.anchor.v() == 0 {
+            if lay.banner.place.anchor.v() == ALIGN_START {
                 r.y = brand.bottom() + ctx.px(lay.spacing.paragraph);
             } else {
                 r.y = brand.y - ctx.px(lay.spacing.paragraph) - bh;
@@ -1361,7 +1370,7 @@ pub fn layout<'a>(
     // Shrink until it fits: paragraphs from the last, then the list, then
     // the title.
     let mut guard = 0;
-    while heights(&blocks, list) > band.h && guard < 64 {
+    while heights(&blocks, list) > band.h && guard < MAX_SHRINK_ROUNDS {
         guard += 1;
         let mut shrunk = false;
         for b in blocks.iter_mut().rev().flatten() {
@@ -1522,7 +1531,7 @@ fn draw_para<'a>(
     let mut x = r.x;
     let mut w = r.w;
     if b.bar {
-        let bar = ctx.px(ctx.lay.row.marker).max(2);
+        let bar = ctx.px(ctx.lay.row.marker).max(MIN_MARKER);
         list.push(Cmd::Fill {
             r: Rect::new(r.x, r.y, bar, r.h),
             radius: bar / 2,
@@ -1685,7 +1694,7 @@ fn draw_list<'a>(
         if selected {
             match ctx.theme.options.selection {
                 Selection::Bar => {
-                    let m = marker.max(2);
+                    let m = marker.max(MIN_MARKER);
                     let inset = (d.row_h / 4).max(1);
                     list.push(Cmd::Fill {
                         r: Rect::new(rr.x + m, rr.y + inset, m, rr.h - 2 * inset),
@@ -1894,9 +1903,9 @@ fn draw_field<'a>(
         let (per, gw, slot) = key_grid(ctx, d, cw);
         let gap = ctx.px(lay.group_gap);
         let pad = (gw - slot * RECOVERY_GROUP as i32) / 2;
-        let active = (before / RECOVERY_GROUP).min(RECOVERY_DIGITS / RECOVERY_GROUP - 1);
+        let active = (before / RECOVERY_GROUP).min(RECOVERY_GROUPS - 1);
         let mut digits = text.char_indices();
-        for g in 0..(RECOVERY_DIGITS / RECOVERY_GROUP) {
+        for g in 0..RECOVERY_GROUPS {
             let (row, colm) = ((g as i32) / per, (g as i32) % per);
             let gr = Rect::new(
                 r.x + colm * (gw + gap),

@@ -23,9 +23,14 @@
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
+/// The resolution rendered when none is given.
+const DEFAULT_RES: (u32, u32) = (1920, 1080);
+
 use paguro_ui::builtin::{BY_LANG, LANGS, THEMES};
+use paguro_ui::canvas::BYTES_PER_PIXEL;
 use paguro_ui::draw::DrawList;
 use paguro_ui::fixtures::{self, Fixture, RESOLUTIONS};
+use paguro_ui::layout::{MIN_HEIGHT, MIN_WIDTH};
 use paguro_ui::pointer::{Cursor, composite};
 use paguro_ui::textui::{self, Grid, ROWS};
 use paguro_ui::{Canvas, Rect, render};
@@ -93,13 +98,13 @@ fn render_one(fx: &Fixture, o: &Opts, (w, h): (u32, u32), out: &Path) -> Result<
         .get(o.lang)
         .and_then(|l| l.get(o.theme))
         .ok_or_else(|| "no such theme".to_string())?;
-    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut buf = vec![0u8; (w * h) as usize * BYTES_PER_PIXEL];
     let mut c = Canvas::new(&mut buf, w, h, w).ok_or("bad size")?;
     if o.text {
         textui::paint_grid(&grid_of(fx, o), t, &mut c);
     } else if !render(&fx.screen, &fx.view(), t, &mut c) {
         return Err(format!(
-            "{w}x{h} is below the smallest supported size (640x480): the loader uses the text console"
+            "{w}x{h} is below the smallest supported size ({MIN_WIDTH}x{MIN_HEIGHT}): the loader uses the text console"
         ));
     }
     if let Some((x, y)) = o.cursor {
@@ -261,7 +266,7 @@ fn main() {
         }
         return;
     };
-    let r = res.first().copied().unwrap_or((1920, 1080));
+    let r = res.first().copied().unwrap_or(DEFAULT_RES);
     if let Err(e) = render_one(f, &o, r, &out) {
         eprintln!("{e}");
         exit(1)

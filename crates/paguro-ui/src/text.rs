@@ -2,7 +2,10 @@
 //! Widths are ink-accurate on the right (a glyph whose bitmap overhangs its
 //! advance counts), so fitted text never spills out of its box.
 
-use crate::theme::Font;
+use crate::theme::{Font, SUBPX, SUBPX_SHIFT};
+
+/// A guard against a wrap that makes no progress (it always does).
+const MAX_LINES: usize = 1000;
 
 /// A running measurement: push characters, read the width so far.
 #[derive(Clone, Copy)]
@@ -26,13 +29,13 @@ impl<'f> Measure<'f> {
         let Some(g) = self.font.glyph_or_fallback(c) else {
             return;
         };
-        let gx = ((self.pen + 32) >> 6) + i64::from(g.x);
+        let gx = ((self.pen + SUBPX / 2) >> SUBPX_SHIFT) + i64::from(g.x);
         if g.w > 0 {
             self.left = self.left.min(gx);
             self.right = self.right.max(gx + i64::from(g.w));
         }
         self.pen += i64::from(g.adv);
-        self.right = self.right.max((self.pen + 63) >> 6);
+        self.right = self.right.max((self.pen + SUBPX - 1) >> SUBPX_SHIFT);
     }
     /// Width with `c` appended, without appending it.
     pub fn with(&self, c: char) -> i32 {
@@ -108,7 +111,7 @@ pub fn fit_repeat(font: &Font, c: char, n: usize, max: i32, ellipsis: char) -> (
     }
     let room = i64::from(max.saturating_sub(char_width(font, ellipsis)));
     let mut k = if one > 0 {
-        usize::try_from((room * 64 / one).max(0))
+        usize::try_from((room * SUBPX / one).max(0))
             .unwrap_or(0)
             .min(n)
     } else {
@@ -161,7 +164,7 @@ pub fn count_lines(font: &Font, s: &str, max: i32) -> usize {
         let (_, r) = next_line(font, rest, max);
         rest = r;
         n += 1;
-        if n > 1000 {
+        if n > MAX_LINES {
             break;
         }
     }

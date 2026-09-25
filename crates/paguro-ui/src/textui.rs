@@ -35,6 +35,30 @@ const INDENT: usize = 3;
 const WIDTH: usize = COLS - 2 * INDENT;
 /// Rows the list shows at most (the browser's limit in graphics too).
 const LIST_MAX: usize = layout::BROWSER_ROWS;
+/// A cut string's ellipsis.
+const ELLIPSIS: [char; 3] = ['.', '.', '.'];
+/// A key cap's decoration: `[`, then `] ` after the key.
+const KEY_CAP_EXTRA: usize = 3;
+/// Blank columns between two key hints.
+const HINT_GAP: usize = 3;
+/// A list row's selection marker (`> `) left of the content column, and a
+/// paragraph's bar or toast mark (`| `, `! `) inside it.
+const MARK_WIDTH: usize = 2;
+/// A list row's number column (`1  `); the "more" lines align past it.
+const ROW_NUMBER_WIDTH: usize = 3;
+/// Blank columns between a list row's label and its detail, or a path and
+/// its position.
+const COLUMN_GAP: usize = 2;
+/// Where an action's label starts, past its key cap.
+const ACTION_LABEL_COL: usize = 9;
+/// The "more above" and "more below" lines of an overflowing list.
+const MORE_LINES: usize = 2;
+/// Rounds of shrinking the content before giving up.
+const MAX_SHRINK_ROUNDS: usize = 64;
+/// The longest transliterated run of text.
+const MAX_CHARS: usize = 640;
+/// The share of the display (percent, per axis) the 80×24 grid may cover.
+const GRID_FILL_PERCENT: i32 = 96;
 
 /// How a cell is shown. Serial terminals get bold/dim/reverse video,
 /// ConOut its 16 colours, a canvas the theme's palette.
@@ -156,14 +180,14 @@ impl Grid {
 
 /// A bounded run of characters, after transliteration.
 struct Chars {
-    buf: [char; 640],
+    buf: [char; MAX_CHARS],
     n: usize,
 }
 
 impl Chars {
     const fn new() -> Chars {
         Chars {
-            buf: [' '; 640],
+            buf: [' '; MAX_CHARS],
             n: 0,
         }
     }
@@ -361,8 +385,8 @@ pub fn render<'a>(
         let mut n = 0;
         let (mut line_i, mut col) = (0usize, 0usize);
         for (key, label) in all.iter().flatten() {
-            let need = tr(list, theme, *key).n + 3 + tr(list, theme, *label).n;
-            let gap = if col > 0 { 3 } else { 0 };
+            let need = tr(list, theme, *key).n + KEY_CAP_EXTRA + tr(list, theme, *label).n;
+            let gap = if col > 0 { HINT_GAP } else { 0 };
             if col + gap + need > WIDTH {
                 if line_i == 1 || col == 0 {
                     break;
@@ -370,7 +394,7 @@ pub fn render<'a>(
                 line_i = 1;
                 col = 0;
             }
-            let gap = if col > 0 { 3 } else { 0 };
+            let gap = if col > 0 { HINT_GAP } else { 0 };
             if let Some(slot) = placed.get_mut(n) {
                 *slot = (line_i, col + gap);
                 n += 1;
@@ -406,7 +430,7 @@ pub fn render<'a>(
             BlockKind::Title | BlockKind::Para | BlockKind::Toast => {
                 let w = WIDTH
                     - if b.bar || b.kind == BlockKind::Toast {
-                        2
+                        MARK_WIDTH
                     } else {
                         0
                     };
@@ -414,7 +438,7 @@ pub fn render<'a>(
             }
             BlockKind::List => {
                 let max = b.max.min(LIST_MAX);
-                n_rows.clamp(b.min, max) + if n_rows > max { 2 } else { 0 }
+                n_rows.clamp(b.min, max) + if n_rows > max { MORE_LINES } else { 0 }
             }
             BlockKind::Actions => spec.actions.iter().flatten().count().clamp(1, b.max),
             _ => 1,
@@ -431,7 +455,7 @@ pub fn render<'a>(
     };
     let room = bottom.saturating_sub(top);
     let mut guard = 0;
-    while total(&blocks, list) > room && guard < 64 {
+    while total(&blocks, list) > room && guard < MAX_SHRINK_ROUNDS {
         guard += 1;
         // Paragraphs from the last, then the list, then the title, then
         // whole paragraphs.
@@ -510,9 +534,9 @@ pub fn render<'a>(
                     let last = i + 1 == b.max && at + next < s.len();
                     if last {
                         // Cut, with an ellipsis.
-                        let keep = len.min(w.saturating_sub(3));
+                        let keep = len.min(w.saturating_sub(ELLIPSIS.len()));
                         let c = grid.put(r, c0, rest.get(..keep).unwrap_or(&[]), tone, COLS);
-                        grid.put(r, c, &['.', '.', '.'], tone, COLS);
+                        grid.put(r, c, &ELLIPSIS, tone, COLS);
                     } else {
                         grid.put(r, c0, rest.get(..len).unwrap_or(&[]), tone, COLS);
                     }
@@ -551,11 +575,11 @@ pub fn render<'a>(
                 }
                 let path = chars_of(list, &b.src);
                 let p = path.as_slice();
-                let room = WIDTH - if pos.n > 0 { pos.n + 2 } else { 0 };
+                let room = WIDTH - if pos.n > 0 { pos.n + COLUMN_GAP } else { 0 };
                 if p.len() > room {
                     // Cut at the front: the current folder stays visible.
-                    let c = grid.put(r, INDENT, &['.', '.', '.'], Tone::Muted, COLS);
-                    let from = p.len() - (room - 3);
+                    let c = grid.put(r, INDENT, &ELLIPSIS, Tone::Muted, COLS);
+                    let from = p.len() - (room - ELLIPSIS.len());
                     grid.put(r, c, p.get(from..).unwrap_or(&[]), Tone::Muted, COLS);
                 } else {
                     grid.put(r, INDENT, p, Tone::Muted, COLS);
@@ -566,7 +590,7 @@ pub fn render<'a>(
             BlockKind::List => {
                 let max = b.max.min(LIST_MAX);
                 let overflow = n_rows > max;
-                let room = (limit - r).saturating_sub(if overflow { 2 } else { 0 });
+                let room = (limit - r).saturating_sub(if overflow { MORE_LINES } else { 0 });
                 let visible = n_rows.min(max).min(room).max(1);
                 page = visible;
                 let sel = view.selected.min(n_rows.saturating_sub(1));
@@ -590,7 +614,13 @@ pub fn render<'a>(
                 if overflow {
                     if first > 0 {
                         let m = more(list, Str::MoreAbove, first);
-                        grid.put(r, INDENT + 3, m.as_slice(), Tone::Muted, COLS);
+                        grid.put(
+                            r,
+                            INDENT + ROW_NUMBER_WIDTH,
+                            m.as_slice(),
+                            Tone::Muted,
+                            COLS,
+                        );
                     }
                     r += 1;
                 }
@@ -608,7 +638,7 @@ pub fn render<'a>(
                     };
                     let mut c = grid.put(
                         r,
-                        INDENT - 2,
+                        INDENT - MARK_WIDTH,
                         if selected { &['>', ' '] } else { &[' ', ' '] },
                         Tone::Strong,
                         COLS,
@@ -619,17 +649,17 @@ pub fn render<'a>(
                     }
                     let end = INDENT + WIDTH;
                     let dl = detail.n.min((end - c) / 2);
-                    let lw = end - c - if dl > 0 { dl + 2 } else { 0 };
+                    let lw = end - c - if dl > 0 { dl + COLUMN_GAP } else { 0 };
                     let l = label.as_slice();
                     if l.len() > lw {
                         let cc = grid.put(
                             r,
                             c,
-                            l.get(..lw.saturating_sub(3)).unwrap_or(&[]),
+                            l.get(..lw.saturating_sub(ELLIPSIS.len())).unwrap_or(&[]),
                             tone,
                             COLS,
                         );
-                        grid.put(r, cc, &['.', '.', '.'], tone, COLS);
+                        grid.put(r, cc, &ELLIPSIS, tone, COLS);
                     } else {
                         grid.put(r, c, l, tone, COLS);
                     }
@@ -645,11 +675,11 @@ pub fn render<'a>(
                             let c = grid.put(
                                 r,
                                 end - dl,
-                                d.get(..dl.saturating_sub(3)).unwrap_or(&[]),
+                                d.get(..dl.saturating_sub(ELLIPSIS.len())).unwrap_or(&[]),
                                 dtone,
                                 COLS,
                             );
-                            grid.put(r, c, &['.', '.', '.'], dtone, COLS);
+                            grid.put(r, c, &ELLIPSIS, dtone, COLS);
                         } else {
                             grid.put(r, end - dl, d, dtone, COLS);
                         }
@@ -662,7 +692,13 @@ pub fn render<'a>(
                 if overflow {
                     if below > 0 {
                         let m = more(list, Str::MoreBelow, below);
-                        grid.put(r, INDENT + 3, m.as_slice(), Tone::Muted, COLS);
+                        grid.put(
+                            r,
+                            INDENT + ROW_NUMBER_WIDTH,
+                            m.as_slice(),
+                            Tone::Muted,
+                            COLS,
+                        );
                     }
                     r += 1;
                 }
@@ -688,7 +724,7 @@ pub fn render<'a>(
                     c = grid.put(r, c, &[']', ' '], Tone::Strong, COLS);
                     grid.put(
                         r,
-                        c.max(INDENT + 9),
+                        c.max(INDENT + ACTION_LABEL_COL),
                         ls.as_slice(),
                         Tone::Normal,
                         INDENT + WIDTH,
@@ -794,13 +830,30 @@ impl<const N: usize> Write for Small<N> {
 // ---------------------------------------------------------------------------
 // Out: VT100
 
+// VT100 / ECMA-48 control sequences.
+/// Control Sequence Introducer.
+const CSI: &str = "\x1b[";
+/// SGR (ECMA-48 §8.3.117): reset, then bold, faint or reverse video.
+const SGR_RESET: &str = "\x1b[0m";
+const SGR_BOLD: &str = "\x1b[0;1m";
+const SGR_FAINT: &str = "\x1b[0;2m";
+const SGR_REVERSE: &str = "\x1b[0;7m";
+const SGR_BOLD_REVERSE: &str = "\x1b[0;1;7m";
+/// DEC private mode 25 (DECTCEM): hide / show the cursor.
+const HIDE_CURSOR: &str = "\x1b[?25l";
+const SHOW_CURSOR: &str = "\x1b[?25h";
+/// ED 2: erase the whole display.
+const ERASE_DISPLAY: &str = "\x1b[2J";
+/// EL 0: erase to the end of the line.
+const ERASE_TO_EOL: &str = "\x1b[K";
+
 fn sgr(t: Tone) -> &'static str {
     match t {
-        Tone::Normal | Tone::Muted => "\x1b[0m",
-        Tone::Strong | Tone::Toast => "\x1b[0;1m",
-        Tone::Faint => "\x1b[0;2m",
-        Tone::Selected => "\x1b[0;7m",
-        Tone::Banner => "\x1b[0;1;7m",
+        Tone::Normal | Tone::Muted => SGR_RESET,
+        Tone::Strong | Tone::Toast => SGR_BOLD,
+        Tone::Faint => SGR_FAINT,
+        Tone::Selected => SGR_REVERSE,
+        Tone::Banner => SGR_BOLD_REVERSE,
     }
 }
 
@@ -811,9 +864,11 @@ fn sgr(t: Tone) -> &'static str {
 /// hidden.
 pub fn write_vt100(prev: Option<&Grid>, grid: &Grid, w: &mut impl Write) -> fmt::Result {
     if prev.is_none() {
-        w.write_str("\x1b[0m\x1b[?25l\x1b[2J")?;
+        w.write_str(SGR_RESET)?;
+        w.write_str(HIDE_CURSOR)?;
+        w.write_str(ERASE_DISPLAY)?;
     } else {
-        w.write_str("\x1b[?25l")?;
+        w.write_str(HIDE_CURSOR)?;
     }
     for r in 0..ROWS {
         let row = grid.row(r);
@@ -822,7 +877,8 @@ pub fn write_vt100(prev: Option<&Grid>, grid: &Grid, w: &mut impl Write) -> fmt:
                 continue;
             }
         }
-        write!(w, "\x1b[{};1H", r + 1)?;
+        // CUP: rows and columns count from 1.
+        write!(w, "{CSI}{};1H", r + 1)?;
         // Up to the last cell that is not a plain blank.
         let end = row
             .iter()
@@ -836,31 +892,44 @@ pub fn write_vt100(prev: Option<&Grid>, grid: &Grid, w: &mut impl Write) -> fmt:
             }
             w.write_char(c.ch)?;
         }
-        w.write_str("\x1b[0m\x1b[K")?;
+        w.write_str(SGR_RESET)?;
+        w.write_str(ERASE_TO_EOL)?;
         if prev.is_none() && r + 1 < ROWS {
             // A plain line end too, so a log of the port reads as text.
             w.write_str("\r\n")?;
         }
     }
     match grid.cursor {
-        Some((r, c)) => write!(w, "\x1b[{};{}H\x1b[?25h", r + 1, c + 1),
-        None => write!(w, "\x1b[{};1H", ROWS),
+        Some((r, c)) => write!(w, "{CSI}{};{}H{SHOW_CURSOR}", r + 1, c + 1),
+        None => write!(w, "{CSI}{};1H", ROWS),
     }
+}
+
+/// `EFI_TEXT_ATTR` colours (UEFI 2.10 §12.4.7), those the tones use.
+pub mod efi_color {
+    pub const BLACK: u8 = 0x00;
+    pub const BROWN: u8 = 0x06;
+    pub const LIGHTGRAY: u8 = 0x07;
+    pub const DARKGRAY: u8 = 0x08;
+    pub const LIGHTRED: u8 = 0x0c;
+    pub const YELLOW: u8 = 0x0e;
+    pub const WHITE: u8 = 0x0f;
 }
 
 /// ConOut colours for a tone: `(foreground, background)` as
 /// `EFI_TEXT_ATTR` values (UEFI 2.10 §12.4: 0 black … 7 light grey, 8 dark
 /// grey … 15 white).
 pub const fn conout_attr(t: Tone) -> (u8, u8) {
+    use efi_color::*;
     match t {
-        Tone::Normal => (7, 0),
-        Tone::Strong => (15, 0),
-        Tone::Muted => (7, 0),
-        Tone::Faint => (8, 0),
-        Tone::Selected => (0, 7),
+        Tone::Normal => (LIGHTGRAY, BLACK),
+        Tone::Strong => (WHITE, BLACK),
+        Tone::Muted => (LIGHTGRAY, BLACK),
+        Tone::Faint => (DARKGRAY, BLACK),
+        Tone::Selected => (BLACK, LIGHTGRAY),
         // Backgrounds are 0..=7 only (EFI_TEXT_ATTR).
-        Tone::Banner => (14, 6),
-        Tone::Toast => (12, 0),
+        Tone::Banner => (YELLOW, BROWN),
+        Tone::Toast => (LIGHTRED, BLACK),
     }
 }
 
@@ -879,7 +948,9 @@ fn cell_metrics(theme: &Theme, w: u32, h: u32) -> Option<(&'static crate::theme:
             cw = cw.max(text::char_width(f, c));
         }
         let ch = f.line.max(f.ascent - f.descent).max(1);
-        if cw * COLS as i32 <= wi * 96 / 100 && ch * ROWS as i32 <= hi * 96 / 100 {
+        if cw * COLS as i32 <= wi * GRID_FILL_PERCENT / 100
+            && ch * ROWS as i32 <= hi * GRID_FILL_PERCENT / 100
+        {
             return Some((st, cw, ch));
         }
     }
