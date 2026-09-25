@@ -919,6 +919,40 @@ three ways to drive it, all over the same service:
 The same `--shell` works on an existing image (`Enter-PaguroDistro`): its disk
 in a privileged WSL2 container, chroot-ready, for repairs.
 
+### 11.7a Distribution: the program is its own installer — DRAFT
+
+**One download, `paguro.exe`** (signed), which is also the installed program:
+
+- **The Rust `paguro.exe`** is CLI, service (`paguro.exe service`, run by the
+  Service Control Manager) and installer in one binary. Run from anywhere while
+  not installed, it offers to install: copies itself to
+  `C:\Program Files\paguro\`, extracts the embedded payloads (the GUI, the
+  minifilter package, shim, MokManager, `paguro.efi`), registers the service and
+  an **Apps & Features** entry (`UninstallString` = `paguro.exe uninstall`,
+  `ModifyPath` = `paguro.exe repair`), and starts the GUI. Distribution ISOs and
+  anything large are downloaded on demand, checksums verified.
+- **The GUI is a second file** (`paguro-app.exe`, .NET single-file,
+  self-contained WinUI 3). One binary cannot be both: a console-subsystem
+  executable opens a console window when double-clicked, a GUI-subsystem one
+  cannot write to the terminal it was started from, and the service must be a
+  separate process running as SYSTEM anyway.
+- **Install, repair and uninstall are pages of the app and verbs of the CLI**
+  (`install | repair | uninstall`, `Install-Paguro | Repair-Paguro |
+  Uninstall-Paguro`), all calling the same service methods — no separate
+  installer to keep in step with the service.
+- **Uninstall and repair work with a broken install**: a copy of `paguro.exe` is
+  kept in `C:\ProgramData\paguro\setup\`, and Apps & Features points at that
+  copy; it needs neither the GUI nor .NET.
+- **Uninstall says what it removes and asks about the rest**: files, service,
+  driver, ESP files, boot entry and variables are removed (the last step is
+  `PaguroUninstall`, completed by the loader on the next boot); the Linux images
+  are kept or deleted as the user chooses, never silently; the MOK's removal is
+  queued (MokDel) and confirmed at the next boot.
+- **Repair** re-installs paguro's files, service, driver, ESP files and the boot
+  entry; it never touches the Linux images. The service also repairs the ESP by
+  itself after a feature update (DESIGN §7).
+- A **winget** manifest points at the same `paguro.exe`.
+
 ### 11.8 The installer GUI — DRAFT
 
 For a non-expert, in this order:
