@@ -2854,6 +2854,106 @@ password or recovery key for those.
 
 ---
 
+## 5c. One machine, one set of paths
+
+Whichever system is on the metal, the other one's files, shells and network
+should be where the user expects them. **The same path names the same file in
+every topology** — Windows native with WSL, Linux native with the Windows VM,
+images or a dedicated disk, one distribution or several.
+
+### The paths
+
+| From | Windows' files | Linux distribution *d*'s files |
+|---|---|---|
+| any Linux (WSL, bare metal, a container) | `/mnt/c`, `/mnt/d`, … — one per NTFS volume | `/mnt/l/d` |
+| Windows (native or the VM) | `C:\`, `D:\`, … | **`L:\d`** — one drive, a folder per distribution |
+
+`L:` is the default letter, configurable, and moved to the next free one if
+taken; every distribution paguro knows — images, WSL distributions made
+bootable, a dedicated disk — appears as a folder. WSL's own
+`\\wsl.localhost\d` keeps working for WSL-registered distributions; `L:` is the
+path that also works when Windows is the VM.
+
+### Who serves what, per topology
+
+The same idea both ways round: **a small host distribution runs the other
+distributions as privileged containers and serves their roots**.
+
+| Topology | `/mnt/c` in Linux | `L:\` in Windows |
+|---|---|---|
+| **Windows native** | WSL's own drive mounting (9P, or virtiofs where WSL uses it) — no SMB | Samba in paguro's **WSL helper distribution**, which attaches every paguro image and a dedicated disk into the WSL VM (`wsl --mount --vhd --bare`, `wsl --mount \\.\PhysicalDriveN`) and exports each root |
+| **Linux native, VM running** | SMB from the VM over the host-only link (§5b Mode 1) | Samba on the Linux host, over the same link, exporting every distribution's root |
+| **Linux native, VM off** | `ntfs3` on view C (§5b Mode 2) | — (Windows is not running) |
+
+- **The same disk mounted twice is safe only inside one kernel.** WSL2 runs all
+  distributions in one VM, so the helper mounting a disk a WSL distribution is
+  already using yields the same superblock — the kernel shares it. Across
+  kernels it is never safe, and never happens: a disk is either in the WSL VM or
+  in the bare-metal host (or its Windows VM), not both.
+- **SMB is used only where it wins**: Windows reading Linux's roots, where WSL's
+  9P is the slow path, and Linux reading C: when Windows is a VM. Linux reading
+  C: from inside Windows (WSL) uses WSL's own mount.
+- **A dedicated disk** is the same row: attached whole into the WSL VM (opened
+  with the VMK-derived LUKS slot, §8d) or mounted by the bare-metal host.
+
+### The private link
+
+Every paguro share travels on a link nothing else uses, so it can neither
+conflict with nor be reached from the user's own network or their own Samba:
+
+- **Windows VM ↔ Linux host**: a dedicated host-only virtio-net adapter
+  (`paguro0`, 169.254.244.0/30), separate from the VM's LAN adapter. The host's
+  Samba runs **in its own network namespace** attached to that link, so it can
+  never bind anything else and a user's own `smbd` is untouched. Windows' SMB
+  server cannot be bound per interface, so it is scoped by firewall rules to
+  that adapter and serves a paguro-only share to a paguro-only local account.
+- **Windows ↔ WSL helper**: the WSL VM's own address in NAT mode. In mirrored
+  networking mode the WSL VM shares Windows' addresses and port 445 is taken by
+  Windows' own server, so the helper's Samba listens on another port, which
+  Windows' SMB client supports from Windows 11 24H2; older builds fall back to
+  NAT mode for the helper.
+- **Authentication, not encryption**: a random per-installation secret for a
+  dedicated SMB account, kept in Windows' Credential Manager and the Linux
+  keyring (§4.7); SMB signing on, SMB encryption off — the link never leaves the
+  machine. Nothing is exposed as a guest share.
+
+### Shells, the same command both ways
+
+`paguro shell <target>` works from either side, whichever is booted:
+
+| Target | From Windows | From Linux |
+|---|---|---|
+| `windows` | a local shell | into the running VM (or an offer to start it) |
+| a distribution *d* | `wsl -d` for WSL distributions; into the container for paguro images | into the container, or the host itself |
+
+The channel is **vsock**, not the network: Hyper-V sockets to the WSL VM,
+virtio-vsock to the QEMU VM (Windows' `viosock` driver), with the paguro agent
+on the far side starting a PTY (ConPTY on Windows). No SSH keys, no listening
+ports.
+
+### Adding WSL distributions for bare metal
+
+A WSL distribution becomes bootable by being **registered with the paguro host
+distribution**, which runs it as a privileged container on the metal (§8b). The
+Windows app writes that registration into the host image (it is a VHD WSL can
+attach), not into `paguro.ini`, which stays the bootloader's configuration.
+
+### The network: Windows keeps its inbound services
+
+When Linux is on the metal and Windows is the VM, **inbound LAN connections go
+to Linux if Linux listens on that port, and to the Windows VM otherwise** —
+Windows remains reachable for what it serves natively (RDP, a game server, a
+sync client's port), like a DMZ host behind the Linux one:
+
+- nftables DNAT on the LAN interface for new inbound connections whose port is
+  not in the set of Linux's listening sockets; the set is kept current from the
+  kernel's socket diagnostics, plus ports the user pins to either side;
+- replies and Linux's own outbound traffic are untouched (conntrack); the VM's
+  outbound traffic is NATed through the host;
+- the VM's LAN adapter carries the host's MAC (§4.5), so the network sees one
+  machine, as it does when Windows is booted natively; Windows' firewall still
+  applies to what reaches it.
+
 ## 6. Encryption model
 
 **What this section guarantees:** a stolen, powered-off machine yields nothing
