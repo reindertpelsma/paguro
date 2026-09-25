@@ -931,11 +931,21 @@ in a privileged WSL2 container, chroot-ready, for repairs.
   an **Apps & Features** entry (`UninstallString` = `paguro.exe uninstall`,
   `ModifyPath` = `paguro.exe repair`), and starts the GUI. Distribution ISOs and
   anything large are downloaded on demand, checksums verified.
-- **The GUI is a second file** (`paguro-app.exe`, .NET single-file,
-  self-contained WinUI 3). One binary cannot be both: a console-subsystem
-  executable opens a console window when double-clicked, a GUI-subsystem one
-  cannot write to the terminal it was started from, and the service must be a
-  separate process running as SYSTEM anyway.
+- **`paguro.exe` is the one entry point, for the GUI too.** Started with no
+  arguments (a double-click, the Start menu) it opens the GUI; with a command it
+  is the CLI; `paguro.exe service` is the service. It is a *console* program, so
+  in a terminal it behaves properly — the shell waits for it, exit codes and
+  redirection work, and it can prompt. The double-click problem of console
+  programs is handled by the manifest's detached console allocation policy on
+  Windows versions that have it (no console is created unless started from
+  one), and on older ones by releasing the console at once when this process is
+  its only user (a brief flash at worst).
+- **The GUI itself is .NET, so it runs as a child process** (`paguro-app.exe`,
+  embedded in `paguro.exe` and extracted on install): the Rust program and the
+  .NET UI cannot share one executable, and the service has to be a separate
+  process running as SYSTEM anyway. Users only ever start `paguro.exe`.
+- **A CLI-only build** without the embedded GUI is published alongside, for
+  servers, scripts and anyone who wants it small.
 - **Install, repair and uninstall are pages of the app and verbs of the CLI**
   (`install | repair | uninstall`, `Install-Paguro | Repair-Paguro |
   Uninstall-Paguro`), all calling the same service methods — no separate
