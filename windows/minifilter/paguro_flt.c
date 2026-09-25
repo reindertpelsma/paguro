@@ -59,7 +59,7 @@ static volatile LONG g_Generation = 1;
 static volatile LONG g_AllowUnload;
 
 DRIVER_INITIALIZE DriverEntry;
-DRIVER_UNLOAD PgInertUnload;
+static DRIVER_UNLOAD PgInertUnload;
 
 /* ---- the table ------------------------------------------------------ */
 

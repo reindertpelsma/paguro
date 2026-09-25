@@ -43,8 +43,8 @@ use windows::Win32::Storage::Vhd::{
     CREATE_VIRTUAL_DISK_FLAG_FULL_PHYSICAL_ALLOCATION, CREATE_VIRTUAL_DISK_PARAMETERS,
     CREATE_VIRTUAL_DISK_VERSION_1, CreateVirtualDisk, DETACH_VIRTUAL_DISK_FLAG_NONE,
     DetachVirtualDisk, GetVirtualDiskPhysicalPath, OPEN_VIRTUAL_DISK_FLAG_NONE, OpenVirtualDisk,
-    VIRTUAL_DISK_ACCESS_ALL, VIRTUAL_DISK_ACCESS_NONE, VIRTUAL_STORAGE_TYPE,
-    VIRTUAL_STORAGE_TYPE_DEVICE_VHD, VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT,
+    VIRTUAL_DISK_ACCESS_ALL, VIRTUAL_STORAGE_TYPE, VIRTUAL_STORAGE_TYPE_DEVICE_VHD,
+    VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Ioctl::{
@@ -693,7 +693,7 @@ impl WinApi for RealApi {
             CreateVirtualDisk(
                 &st,
                 &wide(path),
-                VIRTUAL_DISK_ACCESS_NONE,
+                VIRTUAL_DISK_ACCESS_ALL,
                 None,
                 CREATE_VIRTUAL_DISK_FLAG_FULL_PHYSICAL_ALLOCATION,
                 0,
