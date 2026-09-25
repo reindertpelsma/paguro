@@ -530,7 +530,11 @@ pub fn uninstall(
         let data = json!({ "journal": j, "finished": false });
         return Ok(Report::new(data)
             .lines(lines)
-            .line("restart now (paguro's entry is BootNext): the loader removes PaguroB and returns to Windows; then run `paguro uninstall --yes` again")
+            .line(if j.state("final-boot") == Some(StepState::AwaitingReboot) {
+                "restart now (paguro's entry is BootNext): the loader removes PaguroB and returns to Windows; the uninstall then finishes by itself at the next logon (or run `paguro uninstall --yes` again)"
+            } else {
+                "restart now: the minifilter goes with the restart; the uninstall then finishes by itself at the next logon (or run `paguro uninstall --yes` again)"
+            })
             .exit(Exit::Pending));
     }
     for id in PHASE2 {

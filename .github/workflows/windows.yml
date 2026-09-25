@@ -289,7 +289,16 @@ jobs:
           # Uninstall, from the repair copy; the images are the user's choice.
           & "$env:ProgramData\paguro\setup\paguro.exe" uninstall --yes --keep-images --skip-final-boot
           $rc = $LASTEXITCODE
-          if ($rc -eq 8) { & "$env:ProgramData\paguro\setup\paguro.exe" --direct uninstall --yes --keep-images --skip-final-boot; $rc = $LASTEXITCODE }
+          if ($rc -eq 8) {
+            # Phase 1 is done; phase 2 waits for the restart that removes the
+            # minifilter. Check what phase 1 left, then stand in for the
+            # restart: the driver is inert here, so sc stop unloads it.
+            if (-not (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name paguro-uninstall -ErrorAction SilentlyContinue)) { throw 'phase 2 is not scheduled (RunOnce)' }
+            if ((sc.exe query paguro | Out-String) -notmatch '1060') { throw 'phase 1 left the service' }
+            sc.exe stop paguroflt
+            & "$env:ProgramData\paguro\setup\paguro.exe" --direct uninstall --yes --keep-images --skip-final-boot
+            $rc = $LASTEXITCODE
+          }
           if ($rc) { throw "uninstall exited $rc" }
           if (Test-Path $arp) { throw 'Apps & Features entry left' }
           if ((sc.exe query paguro | Out-String) -notmatch '1060') { throw 'the service is left' }
