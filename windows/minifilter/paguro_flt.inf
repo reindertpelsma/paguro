@@ -1,0 +1,73 @@
+;
+; paguro_flt.inf -- the paguro minifilter (DESIGN.md sec. 4.4), a primitive
+; driver: install with `pnputil /add-driver paguro_flt.inf /install` (or
+; InstallHinfSection DefaultInstall.NTamd64). Boot-start, as DESIGN asks; on
+; a native boot the driver stays inert (no filter, no port).
+;
+; ALTITUDE: 409010 is a placeholder in the Security Enhancer range
+; (400000-409999). A production altitude must be allocated by Microsoft.
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = "SecurityEnhancer"
+ClassGuid   = {d02bc3da-0c8e-4945-9bd5-f1883c226c8c}
+Provider    = %ManufacturerName%
+DriverVer   = 09/25/2026,0.1.0.0
+CatalogFile = paguro_flt.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir         = 13
+PaguroFlt.DriverFiles  = 13
+
+[DefaultInstall.NTamd64]
+OptionDesc = %ServiceDescription%
+CopyFiles  = PaguroFlt.DriverFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService = %ServiceName%,,PaguroFlt.Service
+
+[DefaultUninstall.NTamd64]
+LegacyUninstall = 1
+DelFiles        = PaguroFlt.DriverFiles
+
+[DefaultUninstall.NTamd64.Services]
+DelService = %ServiceName%,0x200
+
+[PaguroFlt.Service]
+DisplayName    = %ServiceName%
+Description    = %ServiceDescription%
+ServiceBinary  = %13%\%DriverName%.sys
+Dependencies   = "FltMgr"
+ServiceType    = 2                     ; SERVICE_FILE_SYSTEM_DRIVER
+StartType      = 0                     ; SERVICE_BOOT_START
+ErrorControl   = 1                     ; SERVICE_ERROR_NORMAL
+LoadOrderGroup = "FSFilter Security Enhancer"
+AddReg         = PaguroFlt.AddRegistry
+
+[PaguroFlt.AddRegistry]
+HKR,,"SupportedFeatures",0x00010001,0x3
+HKR,"Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Instances\"%Instance1.Name%,"Altitude",0x00000000,%Instance1.Altitude%
+HKR,"Instances\"%Instance1.Name%,"Flags",0x00010001,%Instance1.Flags%
+
+[PaguroFlt.DriverFiles]
+%DriverName%.sys
+
+[SourceDisksFiles]
+paguro_flt.sys = 1,,
+
+[SourceDisksNames]
+1 = %DiskId1%,,,
+
+[Strings]
+ManufacturerName   = "paguro"
+ServiceDescription = "paguro: clean refusals for Linux disk images inside NTFS (inert outside the paguro VM)"
+ServiceName        = "PaguroFlt"
+DriverName         = "paguro_flt"
+DiskId1            = "paguro minifilter"
+DefaultInstance    = "PaguroFlt Instance"
+Instance1.Name     = "PaguroFlt Instance"
+Instance1.Altitude = "409010"
+Instance1.Flags    = 0x0                ; automatic attachment

@@ -1,0 +1,11 @@
+<Project>
+  <!-- The WDK from NuGet, used only when packages/ was restored (a runner
+       without an installed WDK). With an installed WDK nothing is imported. -->
+  <PropertyGroup>
+    <PgWdkVersion>10.0.28000.2526</PgWdkVersion>
+    <PgPackages>$(MSBuildThisFileDirectory)packages\</PgPackages>
+  </PropertyGroup>
+  <Import Project="$(PgPackages)Microsoft.Windows.SDK.CPP.$(PgWdkVersion)\build\native\Microsoft.Windows.SDK.cpp.props" Condition="Exists('$(PgPackages)Microsoft.Windows.SDK.CPP.$(PgWdkVersion)\build\native\Microsoft.Windows.SDK.cpp.props')" />
+  <Import Project="$(PgPackages)Microsoft.Windows.SDK.CPP.x64.$(PgWdkVersion)\build\native\Microsoft.Windows.SDK.cpp.x64.props" Condition="Exists('$(PgPackages)Microsoft.Windows.SDK.CPP.x64.$(PgWdkVersion)\build\native\Microsoft.Windows.SDK.cpp.x64.props')" />
+  <Import Project="$(PgPackages)Microsoft.Windows.WDK.x64.$(PgWdkVersion)\build\native\Microsoft.Windows.WDK.x64.props" Condition="Exists('$(PgPackages)Microsoft.Windows.WDK.x64.$(PgWdkVersion)\build\native\Microsoft.Windows.WDK.x64.props')" />
+</Project>

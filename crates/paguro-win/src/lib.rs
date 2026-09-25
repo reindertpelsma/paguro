@@ -19,6 +19,7 @@ pub mod cli;
 pub mod cmd;
 pub mod ctx;
 pub mod esp;
+pub mod fltmsg;
 pub mod hw;
 pub mod journal;
 pub mod keys;
