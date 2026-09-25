@@ -9,8 +9,6 @@
  *        the images named. Needs lsm=...,bpf.
  *   pgguard add <image> [<claim>]   (from the exempt cgroup only, afterwards)
  *   pgguard del <image>             (likewise)
- *   pgguard mark <image>            set the NTFS SYSTEM attribute (ntfs3's
- *                                   system.ntfs_attrib), for sys_immutable
  *   pgguard status                  denials per hook
  *   pgguard try <path>              test helper: every operation the guard
  *                                   covers, one "<op> <result>" line each
@@ -321,16 +319,6 @@ int main(int argc, char **argv)
 
 		if (bpf_map_delete_elem(images_fd(), &k))
 			die(argv[2]);
-		return 0;
-	}
-	if (!strcmp(cmd, "mark") && argc == 3) {
-		__u32 a = 0;
-
-		if (getxattr(argv[2], "system.ntfs_attrib", &a, sizeof(a)) != sizeof(a))
-			die("system.ntfs_attrib (ntfs3 only)");
-		a |= 0x4;	/* FILE_ATTRIBUTE_SYSTEM */
-		if (setxattr(argv[2], "system.ntfs_attrib", &a, sizeof(a), 0))
-			die("set system.ntfs_attrib");
 		return 0;
 	}
 	if (!strcmp(cmd, "status"))

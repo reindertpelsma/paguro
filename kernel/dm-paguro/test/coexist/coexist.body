@@ -24,11 +24,10 @@ insmod /dm-paguro.ko && ok "insmod" || bad "insmod"
 # ---- building a volume ---------------------------------------------------------
 # populate <ntfs-dev> <frag 0|1|built> <disk-image-dev> <bare-image-dev>
 # ("built": the host already wrote the images, fragmented, through ntfs-3g)
-# The free space is shaped through ntfs3 (with frag=1: filled with 1 MiB
-# files, three of every four freed, so only 3 MiB holes remain); the images are then
-# written by libntfs-3g's ntfscp. Not by ntfs3: ntfs3 creates MFT records in
-# the NTFS 3.0 layout (update sequence at 0x2A, no self record number),
-# which the core refuses (INTERFACES 10.1a) -- see README "Findings".
+# Otherwise the images are written through ntfs3 itself (with frag=1 into
+# 3 MiB holes: a volume filled with 1 MiB files, three of every four freed).
+# ntfs3 writes the records it creates in the NTFS 3.0 layout, which the
+# core accepts (INTERFACES 10.1a).
 # Sets ID1/ID2 ("rec seq") and NX1/NX2 (extent counts).
 populate() {
     if [ "$2" != built ]; then
@@ -40,14 +39,10 @@ populate() {
         rm -f /mnt/p/pad/$i
         j=0; while [ $j -lt $i ]; do [ $((j % 4)) = 3 ] || rm /mnt/p/pad/$j; j=$((j + 1)); done
     fi
+    dd if="$3" of=/mnt/p/paguro/disk.vhd bs=1M 2>/dev/null &&
+        dd if="$4" of=/mnt/p/paguro/bare.img bs=1M 2>/dev/null ||
+        { bad "write the images through ntfs3"; umount /mnt/p; return 1; }
     umount /mnt/p
-    for f in "$3 disk.vhd" "$4 bare.img"; do
-        set -- $f
-        dd if="$1" of=/tmp/img bs=1M 2>/dev/null &&
-            ntfscp -f "$dev" /tmp/img "/paguro/$2" > /dev/null 2>/tmp/ntfscp.err ||
-            { bad "ntfscp $2: $(cat /tmp/ntfscp.err)"; rm -f /tmp/img; return 1; }
-        rm -f /tmp/img
-    done
     fi
     mount -t ntfs3 "$dev" /mnt/p || { bad "ntfs3 remounts $dev"; return 1; }
     rm -rf /mnt/p/pad
@@ -225,10 +220,8 @@ run() {
 }
 
 # ---- growth: extend through ntfs3 on view C, PG_GROW, reload, resize2fs -----
-# ntfs3 writes new MFT records in the NTFS 3.0 layout, which the core refuses
-# (INTERFACES 10.1a): if the extension needs one (an attribute list, when the
-# free space is fragmented), PG_GROW must refuse it and make the claim read-
-# only -- checked here with the ext4 unmounted first (XFAIL, see README).
+# Into fragmented space ntfs3 has to add extension records (NTFS 3.0 layout,
+# accepted since INTERFACES 10.1a as amended): that growth must pass too.
 # growth <tag> <record 0|1> <seed> <holes 0|1>: with holes=0 the earlier
 # fill is deleted first (free space back in one piece, mostly); with holes=1
 # the extension goes into whatever holes the stress left.
@@ -243,19 +236,7 @@ growth() {
         sync && ok "$gtag: bare.img extended by 64 MiB through ntfs3 on view C" || bad "$gtag: extend"
     paguro-harness ntfs-map "$VDEV" $ID2 > /tmp/map.post.2
     cp /tmp/map.pre.1 /tmp/map.post.1
-    if grep -q "^error 12 " /tmp/map.post.2; then
-        umount /mnt/r2
-        set -- $(pgctl grow "$C2")
-        [ $(($2 & 1)) = 1 ] && [ "$8" = 12 ] &&
-            echo "XFAIL: $gtag: ntfs3 gave bare.img an NTFS 3.0-layout extension record; PG_GROW refused it (RecordLayout) and the claim is read-only" ||
-            bad "$gtag: grow over an NTFS 3.0 record: $*"
-        e2fsck -fn /dev/mapper/pa2 > /dev/null 2>&1 && ok "$gtag: the refused claim's view A still reads a clean ext4" ||
-            bad "$gtag: e2fsck after the refused growth"
-        rm -f /tmp/map.post.2
-        umount_rest() { umount /mnt/e1; umount /mnt/r1; umount /mnt/c; }
-        umount_rest
-        return
-    fi
+    grep -q "^error" /tmp/map.post.2 && bad "$gtag: the grown file does not parse: $(cat /tmp/map.post.2)"
     set -- $(pgctl grow "$C2")
     [ "$2" = 0 ] && [ "$4" = $((old + 131072)) ] && ok "$gtag: PG_GROW accepted ($old -> $4)" ||
         { bad "$gtag: grow: $*"; umount_all; return; }

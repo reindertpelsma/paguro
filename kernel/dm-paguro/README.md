@@ -73,14 +73,18 @@ Invariants, function by function:
 - `pg_ntfs_boot` — `NTFS    `, 0x55AA, 512/4096-byte sectors, power-of-two
   cluster ≤ 2 MiB, 1–4 KiB power-of-two records, `$MFT` LCN inside the
   volume; the volume size is whole clusters and cannot wrap.
-- `read_record` — reads through a run map below a byte limit; NTFS 3.1
-  update-sequence layout only; every sector's USN checked before fixup;
+- `read_record` — reads through a run map below a byte limit; the update
+  sequence at 0x30 (NTFS 3.1) or 0x2A (NTFS 3.0, which ntfs3 writes for the
+  records it creates), nothing else; every sector's USN checked before fixup;
   afterwards `bytes_in_use ≤ record size` and the attribute offset is inside
-  it, and the record's self-number matches.
+  it and past the array, and (3.1 only, which has one) the record's
+  self-number matches.
 - `attr_at` — the single place attribute headers are trusted: afterwards the
   header, name and any resident value lie inside the attribute and the
   attribute inside `bytes_in_use`; every walk advances ≥ 0x18 bytes.
-- `segment` — sparse/encrypted/compressed refused; segments must start at the
+- `segment` — sparse/encrypted/compressed refused (on segments after the
+  first only the compressed bit itself counts: ntfs3 fills the rest of the
+  compression mask of segments it adds from a stale pointer); segments must start at the
   next VCN (no gap, no overlap); `highest_vcn` must match the decoded runs;
   every run inside the volume. Keeps: runs so far map VCNs `0..vcn` exactly.
 - `load_list` — attribute list ≤ 64 KiB, non-resident lists fully initialised
@@ -232,8 +236,9 @@ and its image map in bpffs and refuses (`EPERM`) unlinking or renaming those
 pins, unmounting that bpffs (`sb_umount`), a link fd by id (`bpf`), and any
 new fd for its maps outside the exempt cgroup (`bpf_map`). The test: every
 operation through the path, the 8.3 alias, the hard link, a file handle and
-the stream name is refused with `EACCES`/`EPERM`/`EBUSY`, never `EIO` —
-with `sys_immutable` and the `SYSTEM` attribute, and by the BPF layer alone;
+the stream name is refused with `EACCES`/`EBUSY` (the stream name: `ENOENT`),
+never `EIO`; the exempt growth cgroup can append; view C is never mounted
+with `discard`;
 `find`, `du`, `tar`, `rm -rf` of the parent, a churn, ENOSPC, `fstrim` and a
 remount cause no guard hit in `PG_STATUS`; `rm` of the pins, `umount` (also
 `-l`) of the bpffs and `bpftool link detach` (by id and by pin) all fail.
@@ -282,26 +287,27 @@ random addresses are all refused, and nothing is registered or leaked.
 
 - **ntfs3 writes MFT records in the NTFS 3.0 layout** (update sequence at
   0x2A, no self record number), on NTFS 3.1 volumes; Windows and ntfs-3g use
-  0x30. The core refuses that layout (INTERFACES §10.1a), so a file created
-  by ntfs3 cannot be claimed, and an image grown by ntfs3 into fragmented free
-  space (which needs an extension record) makes `PG_GROW` refuse and the claim
-  read-only. The tests write images with libntfs-3g (`ntfscp`) and grow into
-  freed contiguous space; the fragmented case is checked as the refusal.
-  Accepting the 3.0 layout needs a decision in §10.1a (the self-number check
-  would be lost for those records; sequence and base-reference checks stay).
-- **A refused `PG_GROW` on a mounted, read-write view A** turns every later
-  write into `EIO` at once (the claim is read-only): ext4 aborts its journal.
-  Fail-safe, but the growth service should unmount or remount read-only first,
-  or the module keep the old map writable when only the *new* part is
-  unparseable.
+  0x30. Both are now accepted (INTERFACES §10.1a); fixture `vol_ntfs3.img` is
+  written by ntfs3 in a VM (`test/fixtures/ntfs/ntfs3-vm.sh`), including a
+  file grown into fragmented space whose `$DATA` spans extension records.
+- **ntfs3 writes garbage into the flags of `$DATA` segments it adds**
+  (seen: 0x0020, a compression-method bit): `ni_insert_nonresident` is passed
+  `attr_b->flags` after `ni_create_attr_list` has moved the base attribute,
+  so the pointer is stale. The core ignores those bits on segments after the
+  first (the compressed bit and the compression unit still refuse). Worth an
+  upstream report.
+- **A refused `PG_GROW` keeps the claim writable** when the old extents are
+  intact (INTERFACES §10.2): new extents colliding with a reserved range or
+  another claim just refuse the growth; the claim goes read-only only if the
+  derived map moved or shrank the old extents, or no map could be derived at
+  all (then nothing shows the old ones are intact). vm-test checks a mounted
+  view A keeps working across a refused growth.
 - **Fixed VHDs never passed the cross-check** before `pg_claim_truncate`:
   ntfs3's FIEMAP ends at EOF, the derived map at the end of the cluster.
-- The mounted ntfs3 has **no `ads=` option** (Linux 7.0); ntfs3 has no stream
-  names in paths anyway (the ADS name is `ENOENT`). ntfs3 has no `FITRIM`.
-- `sys_immutable` + `SYSTEM` also stops the exempt growth service from
-  appending (`EPERM`): growth needs the attribute cleared first. And it makes
-  the volume's root directory immutable too (NTFS marks it `SYSTEM|HIDDEN`):
-  nothing new can be created at the top level of view C.
+- ntfs3 has no stream names in paths (the ADS name is `ENOENT`) and no
+  `FITRIM`. The declarative backstop (`SYSTEM` + `sys_immutable`, `ads=0`)
+  was dropped (INTERFACES §10.4): it also blocked the growth service's
+  appends and made the volume root immutable.
 - Payload check, deviations from INTERFACES §3.2 wording: the backup GPT
   header is looked for at the primary's alternate LBA, which may be before the
   last LBA (a grown disk whose backup has not moved yet); a GPT's LBAs are in

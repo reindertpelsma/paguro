@@ -21,22 +21,18 @@ guard() {
         mount -t ntfs3 $GDEV /mnt/p && ln "/mnt/p/paguro/Paguro Root Disk.img" /mnt/p/paguro/hardlink.img &&
             for i in 1 2 3; do echo $i > /mnt/p/paguro/sub/f$i; done && umount /mnt/p
     fi
-    # The declarative backstop: the SYSTEM attribute, set before the guard.
-    mount -t ntfs3 $GDEV /mnt/p || { bad "guard: ntfs3"; return; }
-    IMG="/mnt/p/paguro/Paguro Root Disk.img"
-    GID=$(pgctl ident "$IMG")
-    pgguard mark "$IMG" && ok "guard: NTFS SYSTEM attribute set on the image" || bad "guard: SYSTEM attribute"
+    mount -t ntfs3 -o ro $GDEV /mnt/p || { bad "guard: ntfs3"; return; }
+    GID=$(pgctl ident "/mnt/p/paguro/Paguro Root Disk.img")
     umount /mnt/p
     GN=$(blockdev --getsz $GDEV)
     GV=$(pgctl add $GDEV $GDEV 2>/dev/null) || { bad "guard: volume add: $GV"; return; }
     set -- $GID; GC=$(pgctl claim "$GV" "$1" "$2" 2>/dev/null) || { bad "guard: claim: $GC"; return; }
     dmc gvc --table "0 $GN paguro-volume $GV c" || { bad "guard: view C"; return; }
-    if mount -t ntfs3 -o sys_immutable,ads=0 /dev/mapper/gvc /mnt/c 2>/dev/null; then
-        ok "guard: view C mounted sys_immutable,ads=0"
-    else
-        mount -t ntfs3 -o sys_immutable /dev/mapper/gvc /mnt/c || { bad "guard: mount view C"; return; }
-        echo "SKIP: guard: this ntfs3 has no ads= option; view C mounted sys_immutable only"
-    fi
+    # The BPF-LSM program is the layer, the range test the floor; view C
+    # is never mounted with discard (INTERFACES 10.4).
+    mount -t ntfs3 /dev/mapper/gvc /mnt/c || { bad "guard: mount view C"; return; }
+    grep " /mnt/c " /proc/mounts | grep -q discard && bad "guard: view C mounted with discard" ||
+        ok "guard: view C mounted without discard"
     IMG="/mnt/c/paguro/Paguro Root Disk.img"
     pgctl crosscheck "$GC" "$IMG" > /dev/null || bad "guard: cross-check"
     mount -t cgroup2 none /sys/fs/cgroup && mkdir -p /sys/fs/cgroup/growth
@@ -45,7 +41,7 @@ guard() {
         ok "guard: $(cat /tmp/guard.out | tail -1)" || { bad "guard: load"; cat /tmp/guard.out; return; }
     g0=$(vstat "$GV" guard)
 
-    # Every way to the image: EACCES/EPERM/EBUSY, never EIO, never success.
+    # Every way to the image: EACCES/EBUSY, never EIO, never success.
     for k in 1 2 3; do
         case $k in
             1) p=$IMG ;;
@@ -55,7 +51,7 @@ guard() {
         [ -e "$p" ] || { bad "guard: $p does not resolve"; continue; }
         pgguard try "$p" > /tmp/try.out
         n=$(wc -l < /tmp/try.out)
-        badl=$(grep -vE " (EACCES|EPERM|EBUSY)$" /tmp/try.out | tr '\n' ',')
+        badl=$(grep -vE " (EACCES|EBUSY)$" /tmp/try.out | tr '\n' ',')
         [ -z "$badl" ] && [ "$n" -ge 14 ] &&
             ok "guard: $n operations via ${p#/mnt/c/} refused ($(awk '{print $2}' /tmp/try.out | sort | uniq -c | tr -s ' \n' ' '))" ||
             bad "guard: via $p: $badl"
@@ -77,8 +73,6 @@ guard() {
     rm -rf /mnt/c/paguro > /tmp/rm.out 2>&1
     grep -q "I/O error" /tmp/rm.out && bad "guard: rm -rf met EIO" ||
         { [ -e "$IMG" ] && ok "guard: rm -rf of the parent leaves the image ($(head -1 /tmp/rm.out))" || bad "guard: rm -rf removed the image"; }
-    mkdir /mnt/c/pg-top 2>/dev/null && rmdir /mnt/c/pg-top ||
-        info "guard: sys_immutable makes the volume root (SYSTEM|HIDDEN on NTFS) immutable: no new top-level entries"
     pgstress tree /mnt/c/paguro/gchurn 71 "$(ops 3000)" /tmp/m.g > /tmp/g.out 2>&1 &&
         ok "guard: mass create/delete beside the image" || { bad "guard: churn"; tail -3 /tmp/g.out; }
     pgstress fill /mnt/c/paguro/gfill 73 /tmp/m.gf > /tmp/g.out 2>&1 &&
@@ -114,16 +108,14 @@ guard() {
     touch /mnt/c/paguro/gx
     sh -c 'echo $$ > /sys/fs/cgroup/growth/cgroup.procs && exec pgguard add /mnt/c/paguro/gx 7' > /tmp/g.out 2>&1 &&
         ok "guard: the exempt cgroup can change the image list" || { bad "guard: exempt add"; cat /tmp/g.out; }
-    out=$(sh -c 'echo $$ > /sys/fs/cgroup/growth/cgroup.procs; exec dd if=/dev/zero of="$1" bs=1M count=1 oflag=append conv=notrunc' sh "$IMG" 2>&1)
-    info "guard: exempt append to the image: ${out##*: } (sys_immutable applies to everyone)"
-    pgguard try "$IMG" | grep -qvE " (EACCES|EPERM|EBUSY)$" && bad "guard: weakened after the attempts" ||
-        ok "guard: still in force after every removal attempt"
-    # The BPF layer alone (without sys_immutable, which answers EPERM first).
-    umount /mnt/c && mount -t ntfs3 /dev/mapper/gvc /mnt/c || bad "guard: remount without sys_immutable"
+    # The growth service may append (a cluster ntfs3 gives it is not yet
+    # claimed); everyone else still meets the guard.
+    sh -c 'echo $$ > /sys/fs/cgroup/growth/cgroup.procs; exec dd if=/dev/zero of="$1" bs=1M count=1 oflag=append conv=notrunc' sh "$IMG" > /tmp/g.out 2>&1 &&
+        ok "guard: the exempt cgroup appends to the image" || { bad "guard: exempt append"; cat /tmp/g.out; }
     pgguard try "$IMG" > /tmp/try.out
     badl=$(grep -vE " (EACCES|EBUSY)$" /tmp/try.out | tr '\n' ',')
-    [ -z "$badl" ] && ok "guard: the BPF layer alone refuses all $(wc -l < /tmp/try.out) ($(awk '{print $2}' /tmp/try.out | sort | uniq -c | tr -s ' \n' ' '))" ||
-        bad "guard: BPF layer alone: $badl"
+    [ -z "$badl" ] && ok "guard: still in force after every removal attempt: $(wc -l < /tmp/try.out) refused" ||
+        bad "guard: weakened: $badl"
     g2=$(vstat "$GV" guard)
     [ "$g2" = "$g0" ] && ok "guard: still zero guard hits" || bad "guard: $((g2 - g0)) guard hits"
     pgguard status | tr '\n' ' ' | sed 's/^/INFO: guard denials: /'; echo
