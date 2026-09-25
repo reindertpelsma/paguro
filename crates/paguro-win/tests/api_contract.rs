@@ -346,6 +346,7 @@ fn responses_match_the_schema_and_the_fixtures() {
         .map(|d| {
             d.filter_map(|e| e.ok())
                 .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".json"))
                 .collect()
         })
         .unwrap_or_default();
