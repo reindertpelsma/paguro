@@ -39,20 +39,26 @@ pub fn export(ctx: &Ctx<'_>, output: Option<&str>) -> CmdResult {
     Ok(r)
 }
 
-/// The modaliases an export presents (the synthetic sysfs's view).
-pub fn modalias(ctx: &Ctx<'_>, input: &str) -> CmdResult {
-    let b = ctx
-        .api
-        .read_file(input, MAX_EXPORT)?
-        .ok_or_else(|| CmdError::not_found(format!("{input}: no such file")))?;
-    let h: HostHardware =
-        serde_json::from_slice(&b).map_err(|e| CmdError::refused(format!("{input}: {e}")))?;
+/// The modaliases an export presents (the synthetic sysfs's view). The
+/// export travels as JSON: front ends read the file, the service never
+/// opens a caller's path.
+pub fn modalias(_ctx: &Ctx<'_>, hardware: &serde_json::Value) -> CmdResult {
+    let h: HostHardware = serde_json::from_value(hardware.clone())
+        .map_err(|e| CmdError::refused(format!("not a host-hardware export: {e}")))?;
     if h.version != hw::VERSION {
         return Err(CmdError::refused(format!(
-            "{input}: unknown version {}",
+            "unknown host-hardware version {}",
             h.version
         )));
     }
     let m = hw::modaliases(&h);
     Ok(Report::new(json!({ "modaliases": m })).lines(m.clone()))
+}
+
+/// Read an export file for [`modalias`] (front-end side).
+pub fn read_export(api: &dyn crate::api::WinApi, input: &str) -> Result<serde_json::Value, CmdError> {
+    let b = api
+        .read_file(input, MAX_EXPORT)?
+        .ok_or_else(|| CmdError::not_found(format!("{input}: no such file")))?;
+    serde_json::from_slice(&b).map_err(|e| CmdError::refused(format!("{input}: {e}")))
 }

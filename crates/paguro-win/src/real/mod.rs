@@ -1054,6 +1054,14 @@ impl WinApi for RealApi {
         })
     }
 
+    fn run_interactive(&self, program: &str, args: &[&str]) -> ApiResult<i32> {
+        let st = Command::new(program)
+            .args(args)
+            .status()
+            .map_err(|e| io_err("CreateProcessW", program, e))?;
+        Ok(st.code().unwrap_or(-1))
+    }
+
     fn restart(&self) -> ApiResult<()> {
         // SAFETY: plain arguments; SeShutdownPrivilege was enabled at start.
         unsafe {
@@ -1083,6 +1091,12 @@ impl WinApi for RealApi {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs())
+    }
+
+    fn uptime_secs(&self) -> u64 {
+        // SAFETY: no arguments.
+        let ms = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+        ms / 1000
     }
 
     fn program_data(&self) -> String {

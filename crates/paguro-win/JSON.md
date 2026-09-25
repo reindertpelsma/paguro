@@ -1,8 +1,16 @@
 # `paguro --json` — schema `paguro-cli/1`
 
 Every command prints exactly one JSON document on stdout with `--json`
-(prompts and progress go to stderr). The PowerShell module
-(`windows/PaguroTools`) and the future GUI consume only this.
+(prompts and progress go to stderr). Each command is one method of the
+Windows API (INTERFACES.md §11.7): `data` below is that method's `result.data`,
+whose schema is `windows/api/paguro-api.json`. The PowerShell module and the
+GUI call the API over `\\.\pipe\paguro` and never parse this output.
+
+**Direct or through the service.** When the paguro service is installed,
+`paguro.exe` sends the request to it and renders its answer; with `--direct`
+(or without a service) it runs the same method in-process. The output is the
+same either way. `paguro service install|uninstall|start|stop` always run
+in-process.
 
 ## Envelope
 
@@ -22,6 +30,9 @@ problems, an install journal).
 **Versioning.** `schema` changes only when a field is removed or changes
 meaning; new fields may appear in `paguro-cli/1` at any time, so consumers
 ignore unknown fields. A consumer that sees another schema refuses.
+
+**A secret that is needed and not given** (the service never prompts):
+`error.code` `refused` with `error.data` {`needs_input`: `linux_passphrase`\|`pin`\|`mok_password`, `param`, `prompt`, `confirm`}. `paguro.exe` then asks on the console (or reads `--passphrase-stdin`) and calls again.
 
 **Secrets never appear**: not the VMK, the passphrase, `S` (`PaguroSetup`),
 `B`, or any private key. The single intended exception is the one-time
@@ -66,10 +77,20 @@ others are informational.
 | `esp repair` | `restored[]` (as `files[]`) |
 | `mok enroll` | `sha256`, `enrolled`, `requested`, `one_time_password` (generated only) |
 | `mok status` | `machine_key`, `enrolled`, `pending_request`, `mok_list_entries` |
-| `preflight`, `restart-linux`, `repair` | `checks[]` {`id`, `state` (`ok`\|`repaired`\|`would_repair`\|`warn`\|`fail`\|`skipped`), `detail`}, `action` ({`action`: `restart`} or {`action`: `stage_setup_tpm`, `reason`: `firmware`\|`secure_boot_databases`\|`loader`\|`loader_reported`}; `null` when a check failed), `entry`, `secure_boot`; `restart-linux` adds `pin_bypass` ({`file`, `deadline_clock_ms`} or {`skipped`}), `staged`, `boot_next`, `restarting`; `repair` adds `staged` or `bootstrap` |
+| `preflight`, `restart-linux`, `repair` | `checks[]` {`id`, `state` (`ok`\|`repaired`\|`would_repair`\|`warn`\|`fail`\|`skipped`), `detail`}, `action` ({`action`: `restart`} or {`action`: `stage_setup_tpm`, `reason`: `firmware`\|`secure_boot_databases`\|`loader`\|`loader_reported`}; `null` when a check failed), `entry`, `secure_boot`; `restart-linux` adds `pin_bypass` ({`file`, `deadline_clock_ms`} or {`skipped`}), `staged`, `boot_next`, `boot_target` (with `--entry`), `restarting`; `repair` adds `staged` or `bootstrap` |
 | `stage-setup` | `volume`, `seal`, `variable`, `vmk_source` |
-| `install` | the journal: `version`, `operation`, `key`, `args`, `started_unix`, `updated_unix`, `steps[]` {`id`, `state` (`pending`\|`done`\|`skipped`\|`failed`\|`awaiting_reboot`), `at_unix`, `detail`} (`--dry-run`: `args`, `steps[]` {`id`, `state`}) |
+| `install` | the journal: `version`, `operation`, `key`, `args`, `started_unix`, `updated_unix`, `steps[]` {`id`, `state` (`pending`\|`done`\|`skipped`\|`failed`\|`awaiting_reboot`\|`awaiting_user`), `at_unix`, `detail`}; `install --shell` adds `shell[]` (`--dry-run`: `args`, `steps[]` {`id`, `state`}) |
 | `uninstall` | `journal` (as above), `finished` (`--dry-run`: `steps[]`, `delete_images`, `skip_final_boot`) |
+| `service info` | `api_version`, `version`, `service`, `pipe`, `caller` (`user`, `admin`, `elevated`, `pid`), `methods[]` (what this caller may call) |
+| `checks list` | `ready`, `checks[]` {`id` (`uefi`\|`wsl2`\|`disk_space`\|`bitlocker`\|`tpm`\|`secure_boot`\|`microsoft_uefi_ca`\|`fast_startup`), `state` (`ok`\|`warn`\|`fail`), `detail`, `fix` ({`automatic`, `instruction`} or `null`)} |
+| `checks fix` | `id`, `changed`, `plan` (`command[]`), `check` (after) |
+| `distro list` | `distributions[]` {`name`, `kind` (`image`\|`wsl`), `default`, `path`, `size`, `exists`, `bootable`, `volume`, `wsl_state`, `wsl_version`} |
+| `distro rename`, `distro remove` | as `config set`; `remove` adds `removed`, `image`, `image_deleted` |
+| `distro enter`, `distro leave` | `path`, `attached`/`detached`, `command[]` (the shell the front end runs) |
+| `protection options` | `asked`, `target`, `windows` (`off`\|`tpm_pin`\|`tpm_startup_key`\|`tpm_only`\|`no_tpm`), `tpm_present`, `choices[]` {`id`, `offered`, `recommended`, `reason`}, `pin_bypass_default`, `keyboards[]` {`id`, `name`}, `keyboard_suggested`, `current` |
+| `protection set` | `choice`, `keyboard`, `pin_bypass`, `config` (as `config set`), `pending[]` (stubs) |
+| `protection check` | `ok`, `keyboard`, `length`, `refused[]` {`char`, `position`, `reason`} (also the error `data` when refused) |
+| `secure-boot status` | `secure_boot`, `setup_mode`, `microsoft_uefi_ca`, `mok`, `mokmanager_next_boot`, `machine_key_enrolled`, `enrolment_needed`, `db_change_needed`, `bitlocker_suspend_needed` |
 
 Pre-flight check ids: `uefi`, `elevated`, `esp`, `esp_files`, `boot_entry`,
 `config`, `images`, `mok`, `tpm`.

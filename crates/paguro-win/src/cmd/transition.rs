@@ -556,7 +556,29 @@ fn write_bypass(ctx: &Ctx<'_>, pf: &Preflight, esp_vol: &Volume) -> Result<Value
     Ok(json!({ "file": p, "deadline_clock_ms": deadline }))
 }
 
-pub fn restart_linux(ctx: &Ctx<'_>) -> CmdResult {
+/// `PaguroBootTarget`'s value for `entry` (INTERFACES.md §5): a
+/// `[Boot.*]` name of `paguro.ini`, or `disk:<Boot#### hex>`.
+pub fn boot_target(pf: &Preflight, entry: &str) -> Result<Vec<u8>, CmdError> {
+    if let Some(hex) = entry.strip_prefix("disk:") {
+        if hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(format!("disk:{}", hex.to_ascii_uppercase()).into_bytes());
+        }
+        return Err(CmdError::new(Exit::Usage, "a dedicated-disk entry is disk:<4 hex digits of its Boot####>"));
+    }
+    let known = pf
+        .config
+        .as_ref()
+        .and_then(|f| f.parsed.as_ref().ok())
+        .is_some_and(|c| c.entries.iter().any(|e| e.name == entry));
+    if !known {
+        return Err(CmdError::not_found(format!("no [Boot.{entry}] entry in paguro.ini")));
+    }
+    Ok(entry.as_bytes().to_vec())
+}
+
+pub const BOOT_TARGET_VAR: &str = "PaguroBootTarget";
+
+pub fn restart_linux(ctx: &Ctx<'_>, entry: Option<&str>, yes: bool) -> CmdResult {
     let pf = run_preflight(ctx, true)?;
     let mut data = serde_json::to_value(&pf).map_err(|e| CmdError::internal(e.to_string()))?;
     let Some(action) = pf.action else {
@@ -593,6 +615,10 @@ pub fn restart_linux(ctx: &Ctx<'_>) -> CmdResult {
         Action::Restart if ctx.dry_run => {
             r = r.line("would write the PIN bypass");
         }
+        Action::Restart if crate::cmd::protection::load(ctx).is_some_and(|p| !p.pin_bypass) => {
+            extra.insert("pin_bypass".into(), json!({ "skipped": "the PIN bypass is off (protection settings)" }));
+            r = r.line("no PIN bypass (turned off): the loader will ask for the PIN");
+        }
         Action::Restart => match write_bypass(ctx, &pf, &esp_vol) {
             Ok(v) => {
                 extra.insert("pin_bypass".into(), v);
@@ -606,17 +632,37 @@ pub fn restart_linux(ctx: &Ctx<'_>) -> CmdResult {
             }
         },
     }
+    let entry_arg = entry;
     let entry = pf
         .entry
         .clone()
         .ok_or_else(|| CmdError::internal("no boot entry"))?;
     let n = bootent::parse_number(&entry)?;
+    // The chosen entry, staged last with BootNext: a one-shot (§5).
+    let default = pf
+        .config
+        .as_ref()
+        .and_then(|f| f.parsed.as_ref().ok())
+        .map(|c| c.default.clone());
+    let target = match entry_choice(entry_arg, default.as_deref()) {
+        Some(e) => Some(boot_target(&pf, e)?),
+        None => None,
+    };
     if !ctx.dry_run {
+        match &target {
+            Some(t) => ctx.api.fw_set(BOOT_TARGET_VAR, &paguro_core::guid::PAGURO_VENDOR, t, attr::NV_BS_RT)?,
+            None => ctx.api.fw_delete(BOOT_TARGET_VAR, &paguro_core::guid::PAGURO_VENDOR)?,
+        }
         bootent::set_boot_next(ctx.api, n)?;
+    }
+    if let Some(t) = &target {
+        let t = String::from_utf8_lossy(t).into_owned();
+        r = r.line(format!("boots {t} once (PaguroBootTarget)"));
+        extra.insert("boot_target".into(), json!(t));
     }
     r = r.line(format!("BootNext = {n:04X}"));
     extra.insert("boot_next".into(), json!(format!("{n:04X}")));
-    let restart = ctx.yes && !ctx.dry_run;
+    let restart = yes && !ctx.dry_run;
     extra.insert("restarting".into(), json!(restart));
     if let Some(o) = data.as_object_mut() {
         o.extend(extra);
@@ -632,6 +678,11 @@ pub fn restart_linux(ctx: &Ctx<'_>) -> CmdResult {
             ),
         )
     }
+}
+
+/// The entry to stage: none when it is the default anyway.
+fn entry_choice<'e>(entry: Option<&'e str>, default: Option<&str>) -> Option<&'e str> {
+    entry.filter(|e| Some(*e) != default)
 }
 
 /// `paguro repair` (INTERFACES.md §11.2, DESIGN.md §7): ESP files and the

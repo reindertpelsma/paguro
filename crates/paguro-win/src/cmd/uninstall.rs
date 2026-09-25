@@ -376,7 +376,23 @@ fn run_step(
     o: &Opts,
     lines: &mut Vec<String>,
 ) -> Result<(), CmdError> {
-    match step(ctx, id, j, o) {
+    let ids = steps();
+    let total = ids.len();
+    let index = ids.iter().position(|s| *s == id).unwrap_or(0);
+    ctx.step("uninstall", index, total, id, "running", "");
+    let r = step(ctx, id, j, o);
+    match &r {
+        Ok((st, detail)) => ctx.step(
+            "uninstall",
+            index,
+            total,
+            id,
+            serde_json::to_value(st).ok().and_then(|v| v.as_str().map(String::from)).as_deref().unwrap_or("done"),
+            detail,
+        ),
+        Err(e) => ctx.step("uninstall", index, total, id, "failed", &e.message),
+    }
+    match r {
         Ok((st, detail)) => {
             lines.push(format!("{id}: {detail}"));
             j.set(ctx.api, id, st, detail);
@@ -397,7 +413,7 @@ fn run_step(
     }
 }
 
-pub fn uninstall(ctx: &Ctx<'_>, delete_images: bool, skip_final_boot: bool) -> CmdResult {
+pub fn uninstall(ctx: &Ctx<'_>, delete_images: bool, skip_final_boot: bool, yes: bool) -> CmdResult {
     let o = Opts {
         delete_images,
         skip_final_boot,
@@ -411,7 +427,7 @@ pub fn uninstall(ctx: &Ctx<'_>, delete_images: bool, skip_final_boot: bool) -> C
         return Ok(Report::new(json!({ "steps": steps, "delete_images": delete_images, "skip_final_boot": skip_final_boot }))
             .lines(self::steps().iter().map(|s| format!("would run: {s}"))));
     }
-    if !ctx.yes {
+    if !yes {
         return Err(CmdError::refused(
             "uninstall removes paguro from this machine: pass --yes (or --dry-run to see the plan)",
         ));

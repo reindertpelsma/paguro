@@ -4,7 +4,7 @@
 use paguro_core::guid::Guid;
 use serde_json::json;
 
-use crate::cfgfile::{self, OwnedConfig, OwnedEfi, OwnedEntry, parse_bool, resolve_windows_path};
+use crate::cfgfile::{self, OwnedConfig, OwnedEfi, OwnedEntry, resolve_windows_path};
 use crate::ctx::Ctx;
 use crate::out::{CmdError, CmdResult, Exit, Report, guid_text};
 
@@ -79,6 +79,8 @@ pub fn validate(ctx: &Ctx<'_>) -> CmdResult {
 
 /// `paguro config set` arguments; every field optional.
 #[derive(Clone, Debug, Default)]
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct SetArgs {
     pub entry: Option<String>,
     pub volume: Option<String>,
@@ -88,11 +90,12 @@ pub struct SetArgs {
     pub efi_file: Option<String>,
     pub default: Option<String>,
     pub remove_entry: Option<String>,
-    pub tpm: Option<String>,
-    pub setup_tpm: Option<String>,
-    pub passphrase: Option<String>,
+    pub tpm: Option<bool>,
+    pub setup_tpm: Option<bool>,
+    pub passphrase: Option<bool>,
     pub theme: Option<String>,
     pub mode: Option<String>,
+    pub keyboard: Option<String>,
 }
 
 fn is_windows_path(p: &str) -> bool {
@@ -117,6 +120,18 @@ fn resolve(ctx: &Ctx<'_>, p: &str, volume: &mut Option<Guid>) -> Result<String, 
     } else {
         Ok(p.to_string())
     }
+}
+
+/// A `[UI] keyboard` name (INTERFACES.md §13.5).
+pub fn keyboard(name: &str) -> Result<paguro_core::config::Keyboard, CmdError> {
+    paguro_core::config::Keyboard::ALL
+        .iter()
+        .copied()
+        .find(|k| k.name().eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            let all: Vec<&str> = paguro_core::config::Keyboard::ALL.iter().map(|k| k.name()).collect();
+            CmdError::new(Exit::Usage, format!("unknown keyboard {name:?} (one of {})", all.join(", ")))
+        })
 }
 
 /// Apply `a` to `c` (pure but for path resolution).
@@ -247,8 +262,7 @@ pub fn apply(ctx: &Ctx<'_>, c: &mut OwnedConfig, a: &SetArgs) -> Result<Vec<Stri
         (&a.setup_tpm, &mut c.setup_tpm, "SetupTPM"),
         (&a.passphrase, &mut c.passphrase, "Passphrase"),
     ] {
-        if let Some(v) = flag {
-            let b = parse_bool(v)?;
+        if let Some(b) = *flag {
             if *field != b {
                 changes.push(format!("[{name}] enabled = {}", u8::from(b)));
             }
@@ -263,10 +277,26 @@ pub fn apply(ctx: &Ctx<'_>, c: &mut OwnedConfig, a: &SetArgs) -> Result<Vec<Stri
         c.mode = m.clone();
         changes.push(format!("[UI] mode = {m}"));
     }
+    if let Some(k) = &a.keyboard {
+        let k = keyboard(k)?;
+        if c.keyboard != k.name() {
+            changes.push(format!("[UI] keyboard = {}", k.name()));
+        }
+        c.keyboard = k.name().into();
+    }
     Ok(changes)
 }
 
 pub fn set(ctx: &Ctx<'_>, a: &SetArgs) -> CmdResult {
+    edit(ctx, |c| apply(ctx, c, a))
+}
+
+/// Read `paguro.ini` (or start from an empty one), apply `f`, and write the
+/// result with the §3.3 protocol. `f` returns the changes it made, in words.
+pub fn edit(
+    ctx: &Ctx<'_>,
+    f: impl FnOnce(&mut OwnedConfig) -> Result<Vec<String>, CmdError>,
+) -> CmdResult {
     let esp = ctx.esp()?;
     let found = cfgfile::read(ctx.api, &esp)?;
     let mut c = match &found {
@@ -277,7 +307,7 @@ pub fn set(ctx: &Ctx<'_>, a: &SetArgs) -> CmdResult {
         })?,
         None => OwnedConfig::empty(),
     };
-    let changes = apply(ctx, &mut c, a)?;
+    let changes = f(&mut c)?;
     let bytes = c.to_bytes()?;
     let unchanged = found
         .as_ref()

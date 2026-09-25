@@ -193,11 +193,37 @@ pub struct BitLocker {
     pub encryption_method: u32,
     /// `GetKeyProtectors` types (1 TPM, 3 numerical password, 8 password…).
     pub protector_types: Vec<u32>,
+    /// `GetConversionStatus`'s `EncryptionFlags` (bit 0: used space only);
+    /// `None` where the OS does not report it.
+    pub encryption_flags: Option<u32>,
 }
+
+/// `KeyProtectorType` values of `Win32_EncryptableVolume`.
+pub mod protector {
+    pub const TPM: u32 = 1;
+    pub const EXTERNAL_KEY: u32 = 2;
+    pub const NUMERICAL_PASSWORD: u32 = 3;
+    pub const TPM_PIN: u32 = 4;
+    pub const TPM_STARTUP_KEY: u32 = 5;
+    pub const TPM_PIN_STARTUP_KEY: u32 = 6;
+    pub const PASSPHRASE: u32 = 8;
+}
+
+/// `EncryptionFlags` bit: only used space was encrypted.
+pub const ENCRYPTION_FLAG_USED_SPACE_ONLY: u32 = 0x1;
 
 impl BitLocker {
     pub fn is_encrypted(&self) -> bool {
         self.conversion_status != 0
+    }
+    /// Encrypted, but its protectors are suspended (the key is in the clear
+    /// on the volume until they are resumed).
+    pub fn is_suspended(&self) -> bool {
+        self.conversion_status == 1 && self.protection_status == 0
+    }
+    pub fn used_space_only(&self) -> Option<bool> {
+        self.encryption_flags
+            .map(|f| f & ENCRYPTION_FLAG_USED_SPACE_ONLY != 0)
     }
 }
 
@@ -298,12 +324,17 @@ pub trait WinApi {
 
     // -- processes ----------------------------------------------------------
     fn run(&self, program: &str, args: &[&str], stdin: Option<&[u8]>) -> ApiResult<Output>;
+    /// A program attached to this process's console (an interactive shell);
+    /// its exit status. Only a front end calls this, never the service.
+    fn run_interactive(&self, program: &str, args: &[&str]) -> ApiResult<i32>;
     /// A restart (never a shutdown: DESIGN.md §4.6).
     fn restart(&self) -> ApiResult<()>;
 
     // -- environment --------------------------------------------------------
     fn random(&self, buf: &mut [u8]) -> ApiResult<()>;
     fn now_unix(&self) -> u64;
+    /// Seconds since this boot of Windows (`GetTickCount64`).
+    fn uptime_secs(&self) -> u64;
     /// `%ProgramData%` (`C:\ProgramData`).
     fn program_data(&self) -> String;
     /// `%SystemDrive%` (`C:`).

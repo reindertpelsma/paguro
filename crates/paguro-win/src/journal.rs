@@ -33,6 +33,9 @@ pub enum StepState {
     Failed,
     /// Done up to a reboot; the next run finishes it.
     AwaitingReboot,
+    /// Waiting for the user to do something by hand (`install --shell`);
+    /// the next run with `--finish` checks it.
+    AwaitingUser,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

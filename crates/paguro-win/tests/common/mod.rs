@@ -81,6 +81,7 @@ pub fn with_bitlocker(m: &MockApi) {
             encryption_percentage: 100,
             encryption_method: 6,
             protector_types: vec![1, 3],
+            encryption_flags: Some(0),
         },
     );
     m.recovery

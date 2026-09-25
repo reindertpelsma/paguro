@@ -36,7 +36,7 @@ pub const PASSWORD_LEN: usize = 10;
 /// MokManager's password length range, in UTF-16 units (shim `MokAuth`).
 const MOK_PASSWORD_UNITS: core::ops::RangeInclusive<usize> = 1..=256;
 /// Most bytes read for `--password-stdin`.
-const MAX_PASSWORD_STDIN: usize = 1024;
+pub const MAX_PASSWORD_STDIN: usize = 1024;
 /// Values of one random byte (rejection sampling range).
 const BYTE_VALUES: usize = 256;
 
@@ -190,7 +190,9 @@ pub fn enroll(ctx: &Ctx<'_>, cert: &str, password_stdin: bool) -> CmdResult {
                 .line("this certificate is already enrolled (MokListRT)"),
         );
     }
-    let (password, generated) = if password_stdin {
+    let (password, generated) = if let Some(p) = ctx.given(crate::ctx::Secret::MokPassword) {
+        (p.clone(), false)
+    } else if password_stdin {
         let raw = ctx.api.read_stdin(MAX_PASSWORD_STDIN)?;
         let s = std::str::from_utf8(&raw)
             .map_err(|_| CmdError::refused("the password is not UTF-8"))?;

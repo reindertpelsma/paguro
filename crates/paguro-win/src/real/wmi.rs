@@ -242,6 +242,7 @@ pub fn bitlocker(drive: &str) -> ApiResult<Option<BitLocker>> {
         encryption_percentage: get_u32(&conv, "EncryptionPercentage")?,
         encryption_method: get_u32(&meth, "EncryptionMethod")?,
         protector_types: types,
+        encryption_flags: get_u32(&conv, "EncryptionFlags").ok(),
     }))
 }
 

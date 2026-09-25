@@ -26,6 +26,7 @@ pub mod keys;
 pub mod mock;
 pub mod out;
 pub mod preflight;
+pub mod rpc;
 #[cfg(windows)]
 pub mod real;
 pub mod tpmwin;

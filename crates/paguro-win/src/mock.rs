@@ -110,6 +110,9 @@ pub struct MockApi {
     /// Every process started, as `program arg arg…`.
     pub commands: RefCell<Vec<String>>,
     pub restarted: Cell<bool>,
+    pub uptime: Cell<u64>,
+    /// Interactive programs started (`run_interactive`).
+    pub interactive: RefCell<Vec<String>>,
 }
 
 fn key(path: &str) -> String {
@@ -159,6 +162,8 @@ impl MockApi {
             mutations: RefCell::default(),
             commands: RefCell::default(),
             restarted: Cell::new(false),
+            uptime: Cell::new(600),
+            interactive: RefCell::default(),
         }
     }
 
@@ -248,6 +253,76 @@ impl MockApi {
             model: "Mock NVMe 1TB".into(),
             size: 1_000_204_886_016,
         });
+        m
+    }
+
+    /// [`MockApi::standard`] plus what a machine with paguro installed has:
+    /// BitLocker (TPM + recovery password) on C:, a TPM, the ESP files, one
+    /// image and its `paguro.ini` entry, WSL2 with an Ubuntu distribution,
+    /// Fast Startup on. The service's `--mock` mode serves it, and the API
+    /// fixtures and GUI tests are made from it.
+    pub fn demo() -> Self {
+        let m = Self::standard();
+        m.bitlocker.borrow_mut().insert(
+            "c:".into(),
+            BitLocker {
+                protection_status: 1,
+                conversion_status: 1,
+                encryption_percentage: 100,
+                encryption_method: 7,
+                protector_types: vec![protector::TPM, protector::NUMERICAL_PASSWORD],
+                encryption_flags: Some(0),
+            },
+        );
+        // A TPM that answers nothing: present, but every command fails.
+        m.set_tpm(|_| Err(ApiError::unsupported("Tbsip_Submit_Command", "mock TPM")));
+        let vhd = "C:\\paguro\\debian.vhd";
+        let size: u64 = 32 << 30;
+        let mut f = MockFile::zeros(size + 512);
+        f.write_at(size, &fixed_vhd_footer(size));
+        m.put_mock_file(vhd, f);
+        m.set_runner(|prog, args| {
+            let line = std::iter::once(prog)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let out = |status: i32, stdout: &str| {
+                Some(Output {
+                    status,
+                    stdout: stdout.into(),
+                    stderr: String::new(),
+                })
+            };
+            if line == "wsl.exe --list --verbose" {
+                out(0, "  NAME      STATE           VERSION\r\n* Ubuntu    Stopped         2\r\n")
+            } else if line.starts_with("reg.exe query") {
+                out(0, "\r\nHKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power\r\n    HiberbootEnabled    REG_DWORD    0x1\r\n")
+            } else if line == "sc.exe query paguro" {
+                out(1060, "")
+            } else {
+                out(0, "")
+            }
+        });
+        let ctx = crate::ctx::Ctx::new(&m);
+        for (f, tag) in [("shimx64.efi", "shim"), ("mmx64.efi", "mm"), ("paguro.efi", "loader")] {
+            m.put_file(&format!("C:\\paguro\\in\\{f}"), format!("MZ{tag}").as_bytes());
+        }
+        let _ = crate::cmd::esp::install(
+            &ctx,
+            "C:\\paguro\\in\\shimx64.efi",
+            "C:\\paguro\\in\\mmx64.efi",
+            "C:\\paguro\\in\\paguro.efi",
+        );
+        let _ = crate::cmd::config::set(
+            &ctx,
+            &crate::cmd::config::SetArgs {
+                entry: Some("debian".into()),
+                root: Some(vhd.into()),
+                ..Default::default()
+            },
+        );
+        m.mutations.borrow_mut().clear();
+        m.commands.borrow_mut().clear();
         m
     }
 
@@ -709,6 +784,15 @@ impl WinApi for MockApi {
         }))
     }
 
+    fn run_interactive(&self, program: &str, args: &[&str]) -> ApiResult<i32> {
+        let line = std::iter::once(program)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.interactive.borrow_mut().push(line);
+        Ok(0)
+    }
+
     fn restart(&self) -> ApiResult<()> {
         self.mutated("restart".into());
         self.restarted.set(true);
@@ -728,6 +812,10 @@ impl WinApi for MockApi {
 
     fn now_unix(&self) -> u64 {
         self.now.get()
+    }
+
+    fn uptime_secs(&self) -> u64 {
+        self.uptime.get()
     }
 
     fn program_data(&self) -> String {

@@ -35,6 +35,7 @@ use crate::journal::{Journal, StepState};
 use crate::keys;
 use crate::out::{At, CmdError, CmdResult, Exit, Report, guid_text};
 
+
 pub const STEPS: [&str; 9] = [
     "host",
     "hw-export",
@@ -47,16 +48,69 @@ pub const STEPS: [&str; 9] = [
     "bootstrap",
 ];
 
-#[derive(Clone, Debug, Default)]
+/// Where the system comes from (INTERFACES.md §11.4, §11.8 item 2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// A script run as root inside WSL2 (the scripted fallback).
+    #[default]
+    Script,
+    /// The distribution's ISO and its own installer in a WSL2 container.
+    Iso,
+    /// An existing WSL2 distribution, made bootable on the metal.
+    Wsl,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct InstallArgs {
     pub distro: String,
     pub path: String,
     pub size: String,
+    pub source: Source,
     pub script: Option<String>,
+    pub iso: Option<String>,
+    pub wsl_distro: Option<String>,
+    /// Manual mode: stop after attaching the disk and hand over a root shell.
+    pub shell: bool,
+    /// Manual mode, second half: check what the user built and complete.
+    pub finish: bool,
     pub shim: Option<String>,
     pub mm: Option<String>,
     pub loader: Option<String>,
     pub mok_cert: Option<String>,
+    /// Restart at the end.
+    pub yes: bool,
+}
+
+/// What `--finish` checks, and whether each could be checked (INTERFACES
+/// §11.7 "manual" mode).
+fn finish_checks(ctx: &Ctx<'_>, a: &InstallArgs) -> Result<(Vec<Value>, Vec<String>), CmdError> {
+    let mut checks = Vec::new();
+    let mut missing = Vec::new();
+    match disk::inspect_path(ctx.api, &a.path) {
+        Ok(i) => {
+            let ok = i.problems.is_empty();
+            if !ok {
+                missing.push(format!("the disk file: {}", i.problems.join("; ")));
+            }
+            checks.push(json!({ "id": "disk", "state": if ok { "ok" } else { "fail" }, "detail": i.problems }));
+            let kind = i.json.at("efi_fs").at("kind").as_str().unwrap_or("none").to_string();
+            let esp_ok = kind == "gpt_esp" || kind == "superfloppy";
+            if !esp_ok {
+                missing.push("a nested ESP with the bootloader (no GPT ESP or FAT32 found on the disk)".into());
+            }
+            checks.push(json!({ "id": "nested_esp", "state": if esp_ok { "ok" } else { "fail" }, "detail": kind }));
+        }
+        Err(e) => {
+            missing.push(format!("the disk file: {}", e.message));
+            checks.push(json!({ "id": "disk", "state": "fail", "detail": e.message }));
+        }
+    }
+    for id in ["paguro_package", "initramfs_dm_paguro", "bootloader_settings"] {
+        checks.push(json!({ "id": id, "state": "unverified", "detail": "STUB: checked from inside the image by the Linux side, which is not built yet" }));
+    }
+    Ok((checks, missing))
 }
 
 /// `C:\a\b.sh` → `/mnt/c/a/b.sh` (WSL's default automount).
@@ -165,6 +219,24 @@ fn step(
             run_ok(ctx, "wsl.exe", &["--mount", "--vhd", &a.path, "--bare"])?;
             Ok((StepState::Done, "attached to WSL2 as a bare disk".into()))
         }
+        "build" if a.finish => {
+            let (_, missing) = finish_checks(ctx, a)?;
+            if missing.is_empty() {
+                Ok((StepState::Done, "finished by hand; the disk checks passed (package, initramfs and bootloader checks are STUB: unverified)".into()))
+            } else {
+                Err(CmdError::check_failed(format!("not finished: missing {}", missing.join("; ")), json!({ "missing": missing })))
+            }
+        }
+        "build" if a.shell => Ok((
+            StepState::AwaitingUser,
+            format!("the disk is attached to WSL2: install by hand in the shell, then run `paguro install {} --path {} --finish`", a.distro, a.path),
+        )),
+        "build" if a.source == Source::Iso => Err(CmdError::refused(
+            "STUB: the distribution's ISO in a WSL2 container (INTERFACES §11.4 step 4) is Linux-side work that is not built yet; use --shell to install by hand, or --script",
+        ).with_data(json!({ "stub": true }))),
+        "build" if a.source == Source::Wsl => Err(CmdError::refused(
+            "STUB: making a WSL2 distribution bootable (its rootfs copied into the image, INTERFACES §11.4) is Linux-side work that is not built yet",
+        ).with_data(json!({ "stub": true }))),
         "build" => match &a.script {
             None => Ok((
                 StepState::Skipped,
@@ -228,41 +300,93 @@ pub fn install(ctx: &Ctx<'_>, a: &InstallArgs) -> CmdResult {
             "the distribution name must match [A-Za-z0-9_-]{1,32}",
         ));
     }
+    if a.shell && a.finish {
+        return Err(CmdError::new(Exit::Usage, "--shell and --finish are the two halves of a manual install: one at a time"));
+    }
+    match a.source {
+        Source::Iso if a.iso.is_none() => return Err(CmdError::new(Exit::Usage, "--iso needs the ISO file")),
+        Source::Wsl if a.wsl_distro.is_none() => return Err(CmdError::new(Exit::Usage, "--from-wsl needs the WSL distribution's name")),
+        _ => {}
+    }
+    let size = if a.size.is_empty() { "32G" } else { a.size.as_str() };
+    let a = &InstallArgs { size: size.into(), ..a.clone() };
     let args = json!({
         "distro": a.distro, "path": a.path, "size": a.size, "script": a.script,
-        "mok_cert": a.mok_cert,
+        "mok_cert": a.mok_cert, "source": a.source, "iso": a.iso, "wsl_distro": a.wsl_distro,
     });
+    let existing = Journal::load(ctx.api, "install", &a.distro)?;
+    if a.finish && existing.as_ref().and_then(|j| j.state("build")) != Some(StepState::AwaitingUser) {
+        return Err(CmdError::refused(format!(
+            "nothing to finish: start with `paguro install {} --path … --shell`",
+            a.distro
+        )));
+    }
+    if !a.finish && !a.shell && existing.as_ref().and_then(|j| j.state("build")) == Some(StepState::AwaitingUser) {
+        return Err(CmdError::refused(format!(
+            "this install waits for the manual step: `paguro install {} --path {} --finish` (or --shell again)",
+            a.distro, a.path
+        )));
+    }
     if ctx.dry_run {
-        let existing = Journal::load(ctx.api, "install", &a.distro)?;
         let steps: Vec<Value> = STEPS
             .iter()
             .map(|id| {
                 json!({ "id": id, "state": existing.as_ref().and_then(|j| j.state(id)).unwrap_or(StepState::Pending) })
             })
             .collect();
-        return Ok(Report::new(json!({ "args": args, "steps": steps }))
+        let mut data = json!({ "args": args, "steps": steps });
+        if a.finish {
+            let (checks, missing) = finish_checks(ctx, a)?;
+            if let Some(o) = data.as_object_mut() {
+                o.insert("finish_checks".into(), json!(checks));
+                o.insert("missing".into(), json!(missing));
+            }
+        }
+        return Ok(Report::new(data)
             .lines(STEPS.iter().map(|s| format!("would run: {s}"))));
     }
-    let mut j = match Journal::load(ctx.api, "install", &a.distro)? {
+    let mut j = match existing {
         Some(j) => j,
         None => Journal::new(ctx.api, "install", &a.distro, args, &STEPS),
     };
     let mut lines = Vec::new();
-    for id in STEPS {
+    let total = STEPS.len();
+    for (i, id) in STEPS.into_iter().enumerate() {
         if let Some(StepState::Done | StepState::Skipped) = j.state(id) {
             lines.push(format!("{id}: already done"));
+            ctx.step("install", i, total, id, "done", "already done");
             continue;
         }
+        ctx.step("install", i, total, id, "running", "");
         match step(ctx, a, id, &j) {
+            Ok((StepState::AwaitingUser, detail)) => {
+                lines.push(format!("{id}: {detail}"));
+                j.set(ctx.api, id, StepState::AwaitingUser, detail.clone());
+                j.save(ctx.api)?;
+                ctx.step("install", i, total, id, "awaiting_user", &detail);
+                let mut data = serde_json::to_value(&j).unwrap_or(Value::Null);
+                if let Some(o) = data.as_object_mut() {
+                    o.insert("shell".into(), json!(crate::cmd::distro::SHELL));
+                }
+                return Ok(Report::new(data)
+                    .lines(lines)
+                    .line(format!("shell: {}", crate::cmd::distro::SHELL.join(" ")))
+                    .warn("STUB: a plain root shell in WSL2 with the disk attached bare; the installer's container with /target mounted (INTERFACES §11.7) is Linux-side work")
+                    .exit(Exit::Pending));
+            }
             Ok((st, detail)) => {
                 lines.push(format!("{id}: {detail}"));
+                ctx.step("install", i, total, id, state_name(st), &detail);
                 j.set(ctx.api, id, st, detail);
                 j.save(ctx.api)?;
             }
             Err(e) => {
+                ctx.step("install", i, total, id, "failed", &e.message);
                 j.set(ctx.api, id, StepState::Failed, e.message.clone());
-                // Never leave the disk attached to WSL behind a failure.
-                if j.state("wsl-mount") == Some(StepState::Done)
+                // Never leave the disk attached to WSL behind a failure
+                // (except while the user works on it by hand).
+                if !a.finish
+                    && j.state("wsl-mount") == Some(StepState::Done)
                     && j.state("wsl-unmount") != Some(StepState::Done)
                     && ctx
                         .api
@@ -276,8 +400,14 @@ pub fn install(ctx: &Ctx<'_>, a: &InstallArgs) -> CmdResult {
                         "unmounted after a failure",
                     );
                 }
+                if a.finish && id == "build" {
+                    j.set(ctx.api, id, StepState::AwaitingUser, e.message.clone());
+                }
                 j.save(ctx.api)?;
-                let data = serde_json::to_value(&j).unwrap_or(Value::Null);
+                let mut data = serde_json::to_value(&j).unwrap_or(Value::Null);
+                if let (Some(o), Some(d)) = (data.as_object_mut(), &e.data) {
+                    o.insert("failure".into(), d.clone());
+                }
                 return Err(CmdError::new(e.exit, format!("install step {id} failed: {} (fix it and run the same command again to resume)", e.message)).with_data(data));
             }
         }
@@ -286,11 +416,22 @@ pub fn install(ctx: &Ctx<'_>, a: &InstallArgs) -> CmdResult {
     let mut r = Report::new(data)
         .lines(lines)
         .line("installed. The install is not finished until Linux has booted once (it seals itself on that boot).");
-    if ctx.yes {
+    if a.yes {
         ctx.api.restart()?;
         r = r.line("restarting");
     }
     Ok(r)
+}
+
+fn state_name(s: StepState) -> &'static str {
+    match s {
+        StepState::Pending => "pending",
+        StepState::Done => "done",
+        StepState::Skipped => "skipped",
+        StepState::Failed => "failed",
+        StepState::AwaitingReboot => "awaiting_reboot",
+        StepState::AwaitingUser => "awaiting_user",
+    }
 }
 
 #[cfg(test)]
