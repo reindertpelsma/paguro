@@ -1,0 +1,53 @@
+{
+  "method": "config.validate",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "config.validate",
+    "params": {}
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "file": {
+          "config": {
+            "default": "debian",
+            "entries": [
+              {
+                "efi": {
+                  "disk": "\\paguro\\debian.vhd",
+                  "kind": "disk",
+                  "path": "\\EFI\\BOOT\\BOOTX64.EFI"
+                },
+                "name": "debian",
+                "root": "\\paguro\\debian.vhd",
+                "volume": "6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8"
+              }
+            ],
+            "keyboard": "us",
+            "mode": "auto",
+            "passphrase": false,
+            "setup_tpm": true,
+            "theme": "dark",
+            "tpm": true
+          },
+          "error": null,
+          "firmware_hash": "8c1773436e2421fd6ac42ab53657102560528e02caf5690a90c9f347c2b7f920",
+          "hash_matches": true,
+          "sha256": "8c1773436e2421fd6ac42ab53657102560528e02caf5690a90c9f347c2b7f920",
+          "valid": true
+        },
+        "problems": []
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "paguro.ini is valid and its firmware hash matches"
+      ],
+      "warnings": []
+    }
+  }
+}

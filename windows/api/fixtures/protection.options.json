@@ -1,0 +1,97 @@
+{
+  "method": "protection.options",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "protection.options",
+    "params": {
+      "klid": "00000407",
+      "target": "image"
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "asked": true,
+        "choices": [
+          {
+            "id": "tpm_pin",
+            "offered": true,
+            "reason": "matched to BitLocker: the TPM and a PIN typed at boot",
+            "recommended": true
+          },
+          {
+            "id": "passphrase",
+            "offered": true,
+            "reason": "a passphrase typed at boot; no TPM involved",
+            "recommended": false
+          },
+          {
+            "id": "tpm_only",
+            "offered": true,
+            "reason": "Windows itself unlocks with the TPM alone, so Linux may too",
+            "recommended": false
+          },
+          {
+            "id": "unprotected",
+            "offered": false,
+            "reason": "an image inside Windows' BitLocker volume is always protected by it",
+            "recommended": false
+          }
+        ],
+        "current": null,
+        "keyboard_suggested": "de",
+        "keyboards": [
+          {
+            "id": "us",
+            "name": "English (US)"
+          },
+          {
+            "id": "uk",
+            "name": "English (UK)"
+          },
+          {
+            "id": "de",
+            "name": "German"
+          },
+          {
+            "id": "fr",
+            "name": "French"
+          },
+          {
+            "id": "es",
+            "name": "Spanish"
+          },
+          {
+            "id": "be",
+            "name": "Belgian (AZERTY)"
+          },
+          {
+            "id": "ch-de",
+            "name": "Swiss German"
+          },
+          {
+            "id": "nl-intl",
+            "name": "US International (Dutch)"
+          }
+        ],
+        "pin_bypass_default": true,
+        "target": "image",
+        "tpm_present": true,
+        "windows": "tpm_only"
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "tpm_pin      recommended   matched to BitLocker: the TPM and a PIN typed at boot",
+        "passphrase   offered       a passphrase typed at boot; no TPM involved",
+        "tpm_only     offered       Windows itself unlocks with the TPM alone, so Linux may too",
+        "unprotected  not offered   an image inside Windows' BitLocker volume is always protected by it"
+      ],
+      "warnings": []
+    }
+  }
+}

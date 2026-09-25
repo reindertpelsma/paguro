@@ -1,0 +1,234 @@
+{
+  "method": "install",
+  "notifications": [
+    {
+      "jsonrpc": "2.0",
+      "method": "progress",
+      "params": {
+        "detail": "",
+        "id": 1,
+        "index": 0,
+        "operation": "install",
+        "state": "running",
+        "step": "host",
+        "total": 9
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "progress",
+      "params": {
+        "detail": "UEFI, administrator, WSL2 present",
+        "id": 1,
+        "index": 0,
+        "operation": "install",
+        "state": "done",
+        "step": "host",
+        "total": 9
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "progress",
+      "params": {
+        "detail": "",
+        "id": 1,
+        "index": 1,
+        "operation": "install",
+        "state": "running",
+        "step": "hw-export",
+        "total": 9
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "progress",
+      "params": {
+        "detail": "C:\\ProgramData\\paguro\\host-hardware.json",
+        "id": 1,
+        "index": 1,
+        "operation": "install",
+        "state": "done",
+        "step": "hw-export",
+        "total": 9
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "progress",
+      "params": {
+        "detail": "",
+        "id": 1,
+        "index": 2,
+        "operation": "install",
+        "state": "running",
+        "step": "disk",
+        "total": 9
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "progress",
+      "params": {
+        "detail": "C:\\paguro\\fedora.vhd (32G)",
+        "id": 1,
+        "index": 2,
+        "operation": "install",
+        "state": "done",
+        "step": "disk",
+        "total": 9
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "progress",
+      "params": {
+        "detail": "",
+        "id": 1,
+        "index": 3,
+        "operation": "install",
+        "state": "running",
+        "step": "wsl-mount",
+        "total": 9
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "progress",
+      "params": {
+        "detail": "attached to WSL2 as a bare disk",
+        "id": 1,
+        "index": 3,
+        "operation": "install",
+        "state": "done",
+        "step": "wsl-mount",
+        "total": 9
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "progress",
+      "params": {
+        "detail": "",
+        "id": 1,
+        "index": 4,
+        "operation": "install",
+        "state": "running",
+        "step": "build",
+        "total": 9
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "progress",
+      "params": {
+        "detail": "STUB: the distribution's ISO in a WSL2 container (INTERFACES §11.4 step 4) is Linux-side work that is not built yet; use --shell to install by hand, or --script",
+        "id": 1,
+        "index": 4,
+        "operation": "install",
+        "state": "failed",
+        "step": "build",
+        "total": 9
+      }
+    }
+  ],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "install",
+    "params": {
+      "distro": "fedora",
+      "iso": "C:\\iso\\fedora.iso",
+      "path": "C:\\paguro\\fedora.vhd",
+      "source": "iso"
+    }
+  },
+  "response": {
+    "error": {
+      "code": -32003,
+      "data": {
+        "code": "refused",
+        "data": {
+          "args": {
+            "distro": "fedora",
+            "iso": "C:\\iso\\fedora.iso",
+            "mok_cert": null,
+            "path": "C:\\paguro\\fedora.vhd",
+            "script": null,
+            "size": "32G",
+            "source": "iso",
+            "wsl_distro": null
+          },
+          "failure": {
+            "stub": true
+          },
+          "key": "fedora",
+          "operation": "install",
+          "started_unix": 1760000000,
+          "steps": [
+            {
+              "at_unix": 1760000000,
+              "detail": "UEFI, administrator, WSL2 present",
+              "id": "host",
+              "state": "done"
+            },
+            {
+              "at_unix": 1760000000,
+              "detail": "C:\\ProgramData\\paguro\\host-hardware.json",
+              "id": "hw-export",
+              "state": "done"
+            },
+            {
+              "at_unix": 1760000000,
+              "detail": "C:\\paguro\\fedora.vhd (32G)",
+              "id": "disk",
+              "state": "done"
+            },
+            {
+              "at_unix": 1760000000,
+              "detail": "unmounted after a failure",
+              "id": "wsl-mount",
+              "state": "pending"
+            },
+            {
+              "at_unix": 1760000000,
+              "detail": "STUB: the distribution's ISO in a WSL2 container (INTERFACES §11.4 step 4) is Linux-side work that is not built yet; use --shell to install by hand, or --script",
+              "id": "build",
+              "state": "failed"
+            },
+            {
+              "at_unix": 0,
+              "detail": "",
+              "id": "wsl-unmount",
+              "state": "pending"
+            },
+            {
+              "at_unix": 0,
+              "detail": "",
+              "id": "esp",
+              "state": "pending"
+            },
+            {
+              "at_unix": 0,
+              "detail": "",
+              "id": "mok",
+              "state": "pending"
+            },
+            {
+              "at_unix": 0,
+              "detail": "",
+              "id": "bootstrap",
+              "state": "pending"
+            }
+          ],
+          "updated_unix": 1760000000,
+          "version": 1
+        },
+        "exit": 3
+      },
+      "message": "install step build failed: STUB: the distribution's ISO in a WSL2 container (INTERFACES §11.4 step 4) is Linux-side work that is not built yet; use --shell to install by hand, or --script (fix it and run the same command again to resume)"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "method": "efi.vars.delete",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "efi.vars.delete",
+    "params": {
+      "dry_run": true,
+      "name": "PaguroSetup"
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "deleted": true,
+        "name": "PaguroSetup"
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "PaguroSetup deleted"
+      ],
+      "warnings": []
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "method": "distro.list",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "distro.list",
+    "params": {}
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "distributions": [
+          {
+            "bootable": true,
+            "default": true,
+            "exists": true,
+            "kind": "image",
+            "name": "debian",
+            "path": "C:\\paguro\\debian.vhd",
+            "size": 34359738880,
+            "volume": "6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8",
+            "wsl_state": null,
+            "wsl_version": null
+          },
+          {
+            "bootable": false,
+            "default": false,
+            "exists": true,
+            "kind": "wsl",
+            "name": "Ubuntu",
+            "path": null,
+            "size": null,
+            "volume": null,
+            "wsl_state": "Stopped",
+            "wsl_version": 2
+          }
+        ]
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "* debian               image     32 GB C:\\paguro\\debian.vhd",
+        "  Ubuntu               wsl           - "
+      ],
+      "warnings": []
+    }
+  }
+}

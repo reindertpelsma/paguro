@@ -1,0 +1,24 @@
+{
+  "method": "stage-setup",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "stage-setup",
+    "params": {
+      "dry_run": true
+    }
+  },
+  "response": {
+    "error": {
+      "code": -32004,
+      "data": {
+        "code": "not_found",
+        "exit": 4
+      },
+      "message": "CreateFileW: PhysicalDrive0"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

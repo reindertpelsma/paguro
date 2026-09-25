@@ -1,0 +1,27 @@
+{
+  "method": "esp.repair",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "esp.repair",
+    "params": {
+      "dry_run": true
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "restored": []
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "nothing to repair"
+      ],
+      "warnings": []
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "method": "efi.bootnext",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "efi.bootnext",
+    "params": {
+      "clear": true,
+      "dry_run": true,
+      "entry": null
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "boot_next": null
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "BootNext cleared"
+      ],
+      "warnings": []
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "method": "secure-boot.status",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "secure-boot.status",
+    "params": {}
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "bitlocker_suspend_needed": false,
+        "db_change_needed": false,
+        "enrolment_needed": true,
+        "machine_key_enrolled": false,
+        "microsoft_uefi_ca": null,
+        "mok": {
+          "enrolled": false,
+          "machine_key": null,
+          "mok_list_entries": 0,
+          "pending_request": false
+        },
+        "mokmanager_next_boot": false,
+        "secure_boot": true,
+        "setup_mode": false
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "Secure Boot is on: paguro's machine key is enrolled once, through MokManager"
+      ],
+      "warnings": []
+    }
+  }
+}

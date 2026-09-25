@@ -1,0 +1,85 @@
+{
+  "method": "checks.list",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "checks.list",
+    "params": {}
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "checks": [
+          {
+            "detail": "The computer starts in UEFI mode, which paguro needs.",
+            "fix": null,
+            "id": "uefi",
+            "state": "ok"
+          },
+          {
+            "detail": "WSL2 is installed: distributions are installed inside it.",
+            "fix": null,
+            "id": "wsl2",
+            "state": "ok"
+          },
+          {
+            "detail": "200 GB free on C:, enough for a Linux image.",
+            "fix": null,
+            "id": "disk_space",
+            "state": "ok"
+          },
+          {
+            "detail": "BitLocker is on: Linux is protected the same way as Windows.",
+            "fix": null,
+            "id": "bitlocker",
+            "state": "ok"
+          },
+          {
+            "detail": "A TPM is present: Linux can unlock with it, like Windows.",
+            "fix": null,
+            "id": "tpm",
+            "state": "ok"
+          },
+          {
+            "detail": "Secure Boot is on: every step of starting Linux is verified.",
+            "fix": null,
+            "id": "secure_boot",
+            "state": "ok"
+          },
+          {
+            "detail": "The Secure Boot database could not be read.",
+            "fix": null,
+            "id": "microsoft_uefi_ca",
+            "state": "warn"
+          },
+          {
+            "detail": "Fast Startup is on: Windows' drive stays half-open, so Linux can only read it.",
+            "fix": {
+              "automatic": true,
+              "instruction": "Turn Fast Startup off (HiberbootEnabled = 0)."
+            },
+            "id": "fast_startup",
+            "state": "warn"
+          }
+        ],
+        "ready": true
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "uefi               ok    The computer starts in UEFI mode, which paguro needs.",
+        "wsl2               ok    WSL2 is installed: distributions are installed inside it.",
+        "disk_space         ok    200 GB free on C:, enough for a Linux image.",
+        "bitlocker          ok    BitLocker is on: Linux is protected the same way as Windows.",
+        "tpm                ok    A TPM is present: Linux can unlock with it, like Windows.",
+        "secure_boot        ok    Secure Boot is on: every step of starting Linux is verified.",
+        "microsoft_uefi_ca  warn  The Secure Boot database could not be read.",
+        "fast_startup       warn  Fast Startup is on: Windows' drive stays half-open, so Linux can only read it."
+      ],
+      "warnings": []
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "method": "efi.vars.get",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "efi.vars.get",
+    "params": {
+      "name": "PaguroConfigHash"
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "attributes": 7,
+        "name": "PaguroConfigHash",
+        "note": "SHA-256 of paguro.ini",
+        "present": true,
+        "size": 32,
+        "size_ok": true,
+        "value": "8c1773436e2421fd6ac42ab53657102560528e02caf5690a90c9f347c2b7f920"
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "8c1773436e2421fd6ac42ab53657102560528e02caf5690a90c9f347c2b7f920"
+      ],
+      "warnings": []
+    }
+  }
+}

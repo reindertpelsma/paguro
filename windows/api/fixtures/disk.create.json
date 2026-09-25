@@ -1,0 +1,32 @@
+{
+  "method": "disk.create",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "disk.create",
+    "params": {
+      "dry_run": true,
+      "path": "C:\\paguro\\new.vhd",
+      "size": "1G"
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "format": "fixed_vhd",
+        "path": "C:\\paguro\\new.vhd",
+        "size": 1073741824,
+        "volume": "\\\\?\\Volume{aaaaaaaa-0000-0000-0000-000000000002}\\"
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "would create a 1073741824-byte fixed VHD at C:\\paguro\\new.vhd"
+      ],
+      "warnings": []
+    }
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "method": "config.set",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "config.set",
+    "params": {
+      "default": "debian",
+      "dry_run": true,
+      "efi": null,
+      "efi_disk": null,
+      "efi_file": null,
+      "entry": "debian",
+      "keyboard": "de",
+      "mode": "auto",
+      "passphrase": false,
+      "remove_entry": null,
+      "root": "C:\\paguro\\debian.vhd",
+      "setup_tpm": true,
+      "theme": "dark",
+      "tpm": true,
+      "volume": null
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "changes": [
+          "[UI] theme = dark",
+          "[UI] mode = auto",
+          "[UI] keyboard = de"
+        ],
+        "config": {
+          "default": "debian",
+          "entries": [
+            {
+              "efi": {
+                "disk": "\\paguro\\debian.vhd",
+                "kind": "disk",
+                "path": "\\EFI\\BOOT\\BOOTX64.EFI"
+              },
+              "name": "debian",
+              "root": "\\paguro\\debian.vhd",
+              "volume": "6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8"
+            }
+          ],
+          "keyboard": "de",
+          "mode": "auto",
+          "passphrase": false,
+          "setup_tpm": true,
+          "theme": "dark",
+          "tpm": true
+        },
+        "sha256": "5490c4ada8f418a643eccc6a8430d2c224f6605e4332202783a57ff40694ccee",
+        "written": false
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "[UI] theme = dark",
+        "[UI] mode = auto",
+        "[UI] keyboard = de"
+      ],
+      "warnings": [
+        "the configuration changed, so PCR 12 will too: the TPM seal no longer matches. Run `paguro stage-setup` before restarting into Linux, or the loader asks for the recovery path"
+      ]
+    }
+  }
+}

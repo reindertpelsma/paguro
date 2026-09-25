@@ -1,0 +1,3426 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reindertpelsma/paguro/blob/main/windows/api/paguro-api.json",
+  "title": "paguro Windows API",
+  "description": "The one API of the Windows side (INTERFACES.md §11.7): JSON-RPC 2.0 over the named pipe \\\\.\\pipe\\paguro, one message per line (UTF-8, LF, at most 4 MiB). `methods` names every method with its access, CLI command, cmdlets, params and result; `$defs` holds the types. Rust (crates/paguro-win/src/rpc.rs) is checked against this file by tests/api_contract.rs; the C# types are generated from it (windows/api/codegen). A method's `params` are its own plus `$defs/CommonParams`. Errors: code -32000 - exit (JSON.md), data per `$defs/ErrorData`; a missing secret is data.data per `$defs/NeedsInput`.",
+  "version": "1.0",
+  "x-pipe": "\\\\.\\pipe\\paguro",
+  "x-access": {
+    "read": "anyone the pipe admits (the interactive user)",
+    "admin": "a member of Administrators, elevated or not",
+    "elevated": "an elevated administrator (raw expert tools)"
+  },
+  "methods": {
+    "service.info": {
+      "summary": "The API version and what this caller may call.",
+      "cli_example": [
+        "service",
+        "info"
+      ],
+      "access": "read",
+      "cli": "paguro service info",
+      "cmdlets": [
+        "Get-PaguroService"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ServiceInfo"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "status": {
+      "summary": "Everything at once.",
+      "cli_example": [
+        "status"
+      ],
+      "access": "read",
+      "cli": "paguro status",
+      "cmdlets": [
+        "Get-PaguroStatus"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Status"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "checks.list": {
+      "summary": "The installer's checks (§11.8 item 1).",
+      "cli_example": [
+        "checks",
+        "list"
+      ],
+      "access": "read",
+      "cli": "paguro checks list",
+      "cmdlets": [
+        "Get-PaguroCheck"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ChecksList"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "checks.fix": {
+      "summary": "Fix one check where Windows allows it.",
+      "cli_example": [
+        "checks",
+        "fix",
+        "wsl2"
+      ],
+      "access": "admin",
+      "cli": "paguro checks fix <id>",
+      "cmdlets": [
+        "Repair-PaguroCheck"
+      ],
+      "params": {
+        "$ref": "#/$defs/CheckFixParams"
+      },
+      "result": {
+        "$ref": "#/$defs/CheckFixResult"
+      },
+      "examples": [
+        {
+          "id": "fast_startup",
+          "dry_run": true
+        }
+      ],
+      "dry_run_read": true
+    },
+    "hw.export": {
+      "summary": "The host hardware export (§11.5); front ends write the file.",
+      "cli_example": [
+        "hw",
+        "export"
+      ],
+      "access": "read",
+      "cli": "paguro hw export [-o FILE]",
+      "cmdlets": [
+        "Export-PaguroHardware"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/HostHardware"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "hw.modalias": {
+      "summary": "What an export presents to the installer; front ends read the file.",
+      "cli_example": [
+        "hw",
+        "modalias",
+        "host-hardware.json"
+      ],
+      "access": "read",
+      "cli": "paguro hw modalias FILE",
+      "cmdlets": [
+        "Get-PaguroModalias"
+      ],
+      "params": {
+        "$ref": "#/$defs/ModaliasParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Modaliases"
+      },
+      "examples": [
+        {
+          "hardware": {
+            "version": 1,
+            "cpu": {
+              "vendor": "GenuineIntel",
+              "family": 6,
+              "model": 170,
+              "stepping": 4
+            },
+            "dmi": {
+              "sys_vendor": "X",
+              "product_name": "Y",
+              "board_vendor": "X",
+              "board_name": "Z",
+              "bios_vendor": "B",
+              "bios_version": "1"
+            },
+            "pci": [
+              {
+                "vendor": "10de",
+                "device": "28a0",
+                "subvendor": "1043",
+                "subdevice": "1f3a",
+                "class": "030000"
+              }
+            ],
+            "usb": [],
+            "acpi": [
+              "PNP0C50"
+            ],
+            "storage": []
+          }
+        }
+      ]
+    },
+    "disk.create": {
+      "summary": "Create a fixed, fully allocated VHD.",
+      "cli_example": [
+        "disk",
+        "create",
+        "--size",
+        "1G",
+        "--path",
+        "C:\\x.vhd"
+      ],
+      "access": "admin",
+      "cli": "paguro disk create --size S --path P",
+      "cmdlets": [
+        "New-PaguroDisk"
+      ],
+      "params": {
+        "$ref": "#/$defs/DiskCreateParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DiskInfo"
+      },
+      "examples": [
+        {
+          "path": "C:\\paguro\\new.vhd",
+          "size": "1G",
+          "dry_run": true
+        }
+      ]
+    },
+    "disk.inspect": {
+      "summary": "Format, extents and UEFI file system of a disk file.",
+      "cli_example": [
+        "disk",
+        "inspect",
+        "C:\\x.vhd"
+      ],
+      "access": "admin",
+      "cli": "paguro disk inspect P",
+      "cmdlets": [
+        "Get-PaguroDisk"
+      ],
+      "params": {
+        "$ref": "#/$defs/PathParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DiskInfo"
+      },
+      "examples": [
+        {
+          "path": "C:\\paguro\\debian.vhd"
+        }
+      ]
+    },
+    "config.show": {
+      "summary": "paguro.ini.",
+      "cli_example": [
+        "config",
+        "show"
+      ],
+      "access": "read",
+      "cli": "paguro config show",
+      "cmdlets": [
+        "Get-PaguroConfig"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ConfigFile"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "config.validate": {
+      "summary": "Parse and check paguro.ini.",
+      "cli_example": [
+        "config",
+        "validate"
+      ],
+      "access": "read",
+      "cli": "paguro config validate",
+      "cmdlets": [
+        "Test-PaguroConfig"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ConfigValidation"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "config.set": {
+      "summary": "Change entries or settings.",
+      "cli_example": [
+        "config",
+        "set",
+        "--keyboard",
+        "de"
+      ],
+      "access": "admin",
+      "cli": "paguro config set …",
+      "cmdlets": [
+        "Set-PaguroConfig"
+      ],
+      "params": {
+        "$ref": "#/$defs/ConfigSetParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ConfigChange"
+      },
+      "examples": [
+        {
+          "entry": "debian",
+          "volume": null,
+          "root": "C:\\paguro\\debian.vhd",
+          "efi_disk": null,
+          "efi": null,
+          "efi_file": null,
+          "default": "debian",
+          "remove_entry": null,
+          "tpm": true,
+          "setup_tpm": true,
+          "passphrase": false,
+          "theme": "dark",
+          "mode": "auto",
+          "keyboard": "de",
+          "dry_run": true
+        }
+      ]
+    },
+    "efi.vars.list": {
+      "summary": "paguro's firmware variables.",
+      "cli_example": [
+        "efi",
+        "vars",
+        "list"
+      ],
+      "access": "read",
+      "cli": "paguro efi vars list",
+      "cmdlets": [
+        "Get-PaguroFirmwareVariable"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/VariableList"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "efi.vars.get": {
+      "summary": "One firmware variable.",
+      "cli_example": [
+        "efi",
+        "vars",
+        "get",
+        "PaguroSetup"
+      ],
+      "access": "read",
+      "cli": "paguro efi vars get NAME",
+      "cmdlets": [
+        "Get-PaguroFirmwareVariable"
+      ],
+      "params": {
+        "$ref": "#/$defs/NameParams"
+      },
+      "result": {
+        "$ref": "#/$defs/FirmwareVariable"
+      },
+      "examples": [
+        {
+          "name": "PaguroConfigHash"
+        }
+      ]
+    },
+    "efi.vars.set": {
+      "summary": "Expert: write a variable.",
+      "cli_example": [
+        "efi",
+        "vars",
+        "set",
+        "PaguroTpmBroken",
+        "01"
+      ],
+      "access": "elevated",
+      "cli": "paguro efi vars set NAME HEX",
+      "cmdlets": [
+        "Set-PaguroFirmwareVariable"
+      ],
+      "params": {
+        "$ref": "#/$defs/VarSetParams"
+      },
+      "result": {
+        "$ref": "#/$defs/FirmwareVariable"
+      },
+      "examples": [
+        {
+          "name": "PaguroTpmBroken",
+          "hex": "01",
+          "dry_run": true
+        }
+      ]
+    },
+    "efi.vars.delete": {
+      "summary": "Expert: delete a variable.",
+      "cli_example": [
+        "efi",
+        "vars",
+        "delete",
+        "PaguroSetup"
+      ],
+      "access": "elevated",
+      "cli": "paguro efi vars delete NAME",
+      "cmdlets": [
+        "Remove-PaguroFirmwareVariable"
+      ],
+      "params": {
+        "$ref": "#/$defs/NameParams"
+      },
+      "result": {
+        "$ref": "#/$defs/FirmwareVariable"
+      },
+      "examples": [
+        {
+          "name": "PaguroSetup",
+          "dry_run": true
+        }
+      ]
+    },
+    "efi.boot-entry.list": {
+      "summary": "Boot#### entries.",
+      "cli_example": [
+        "efi",
+        "boot-entry",
+        "list"
+      ],
+      "access": "read",
+      "cli": "paguro efi boot-entry list",
+      "cmdlets": [
+        "Get-PaguroBootEntry"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/BootEntryList"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "efi.boot-entry.create": {
+      "summary": "Create or repair paguro's entry.",
+      "cli_example": [
+        "efi",
+        "boot-entry",
+        "create"
+      ],
+      "access": "elevated",
+      "cli": "paguro efi boot-entry create",
+      "cmdlets": [
+        "New-PaguroBootEntry"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/BootEntryChange"
+      },
+      "examples": [
+        {
+          "dry_run": true
+        }
+      ]
+    },
+    "efi.boot-entry.delete": {
+      "summary": "Delete a boot entry.",
+      "cli_example": [
+        "efi",
+        "boot-entry",
+        "delete",
+        "0001"
+      ],
+      "access": "elevated",
+      "cli": "paguro efi boot-entry delete ENTRY",
+      "cmdlets": [
+        "Remove-PaguroBootEntry"
+      ],
+      "params": {
+        "$ref": "#/$defs/EntryParams"
+      },
+      "result": {
+        "$ref": "#/$defs/BootEntryChange"
+      },
+      "examples": [
+        {
+          "entry": "0001",
+          "dry_run": true
+        }
+      ]
+    },
+    "efi.bootnext": {
+      "summary": "Set or clear BootNext.",
+      "cli_example": [
+        "efi",
+        "bootnext",
+        "--clear"
+      ],
+      "access": "elevated",
+      "cli": "paguro efi bootnext [ENTRY] [--clear]",
+      "cmdlets": [
+        "Set-PaguroBootNext"
+      ],
+      "params": {
+        "$ref": "#/$defs/BootNextParams"
+      },
+      "result": {
+        "$ref": "#/$defs/BootEntryChange"
+      },
+      "examples": [
+        {
+          "entry": null,
+          "clear": true,
+          "dry_run": true
+        }
+      ]
+    },
+    "esp.install": {
+      "summary": "Install shim, MokManager, paguro.efi.",
+      "cli_example": [
+        "esp",
+        "install",
+        "--shim",
+        "a",
+        "--mm",
+        "b",
+        "--loader",
+        "c"
+      ],
+      "access": "elevated",
+      "cli": "paguro esp install --shim --mm --loader",
+      "cmdlets": [
+        "Install-PaguroEsp"
+      ],
+      "params": {
+        "$ref": "#/$defs/EspInstallParams"
+      },
+      "result": {
+        "$ref": "#/$defs/EspState"
+      },
+      "examples": [
+        {
+          "shim": "C:\\paguro\\in\\shimx64.efi",
+          "mm": "C:\\paguro\\in\\mmx64.efi",
+          "loader": "C:\\paguro\\in\\paguro.efi",
+          "dry_run": true
+        }
+      ]
+    },
+    "esp.verify": {
+      "summary": "Check the ESP files.",
+      "cli_example": [
+        "esp",
+        "verify"
+      ],
+      "access": "read",
+      "cli": "paguro esp verify",
+      "cmdlets": [
+        "Test-PaguroEsp"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/EspState"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "esp.repair": {
+      "summary": "Restore the ESP files.",
+      "cli_example": [
+        "esp",
+        "repair"
+      ],
+      "access": "admin",
+      "cli": "paguro esp repair",
+      "cmdlets": [
+        "Repair-PaguroEsp"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/EspState"
+      },
+      "examples": [
+        {
+          "dry_run": true
+        }
+      ]
+    },
+    "mok.enroll": {
+      "summary": "Request MOK enrolment.",
+      "cli_example": [
+        "mok",
+        "enroll",
+        "--cert",
+        "c.der"
+      ],
+      "access": "elevated",
+      "cli": "paguro mok enroll --cert C",
+      "cmdlets": [
+        "Register-PaguroMok"
+      ],
+      "params": {
+        "$ref": "#/$defs/MokEnrollParams"
+      },
+      "result": {
+        "$ref": "#/$defs/MokEnroll"
+      },
+      "examples": [
+        {
+          "cert": "C:\\paguro\\mok.der",
+          "dry_run": true
+        }
+      ]
+    },
+    "mok.status": {
+      "summary": "The machine key's state.",
+      "cli_example": [
+        "mok",
+        "status"
+      ],
+      "access": "read",
+      "cli": "paguro mok status [--cert C]",
+      "cmdlets": [
+        "Get-PaguroMok"
+      ],
+      "params": {
+        "$ref": "#/$defs/MokStatusParams"
+      },
+      "result": {
+        "$ref": "#/$defs/MokStatus"
+      },
+      "examples": [
+        {
+          "cert": null
+        }
+      ],
+      "gated": [
+        "cert"
+      ]
+    },
+    "preflight": {
+      "summary": "Everything the next Linux boot depends on.",
+      "cli_example": [
+        "preflight"
+      ],
+      "access": "read",
+      "cli": "paguro preflight [--repair]",
+      "cmdlets": [
+        "Test-PaguroPreflight"
+      ],
+      "params": {
+        "$ref": "#/$defs/PreflightParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Preflight"
+      },
+      "examples": [
+        {
+          "repair": false
+        }
+      ],
+      "gated": [
+        "repair"
+      ]
+    },
+    "restart-linux": {
+      "summary": "Pre-flight, PIN bypass or setupTPM, BootNext, restart.",
+      "cli_example": [
+        "restart-linux",
+        "--entry",
+        "debian"
+      ],
+      "access": "admin",
+      "cli": "paguro restart-linux [--entry E] [--yes]",
+      "cmdlets": [
+        "Restart-PaguroLinux",
+        "Start-PaguroLinux"
+      ],
+      "params": {
+        "$ref": "#/$defs/RestartLinuxParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Preflight"
+      },
+      "examples": [
+        {
+          "yes": false,
+          "entry": null,
+          "dry_run": true
+        }
+      ],
+      "dry_run_read": true
+    },
+    "stage-setup": {
+      "summary": "Stage a one-shot setupTPM (needs linux_passphrase).",
+      "cli_example": [
+        "stage-setup"
+      ],
+      "access": "admin",
+      "cli": "paguro stage-setup",
+      "cmdlets": [
+        "Request-PaguroSetupTpm"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/StageSetup"
+      },
+      "examples": [
+        {
+          "dry_run": true
+        }
+      ],
+      "dry_run_read": true
+    },
+    "repair": {
+      "summary": "Repair ESP files and entry; stage or bootstrap.",
+      "cli_example": [
+        "repair"
+      ],
+      "access": "admin",
+      "cli": "paguro repair [--stage] [--bootstrap]",
+      "cmdlets": [
+        "Repair-Paguro"
+      ],
+      "params": {
+        "$ref": "#/$defs/RepairParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Preflight"
+      },
+      "examples": [
+        {
+          "stage": false,
+          "bootstrap": false,
+          "dry_run": true
+        }
+      ],
+      "dry_run_read": true
+    },
+    "install": {
+      "summary": "Build an image through WSL2 and make it bootable (§11.4).",
+      "cli_example": [
+        "install",
+        "fedora",
+        "--path",
+        "C:\\f.vhd",
+        "--iso",
+        "f.iso"
+      ],
+      "access": "admin",
+      "cli": "paguro install DISTRO --path P [--iso I|--from-wsl W|--script S] [--shell|--finish]",
+      "cmdlets": [
+        "Install-PaguroDistro",
+        "Enter-PaguroInstaller"
+      ],
+      "params": {
+        "$ref": "#/$defs/InstallParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Journal"
+      },
+      "examples": [
+        {
+          "distro": "fedora",
+          "path": "C:\\paguro\\fedora.vhd",
+          "size": "32G",
+          "source": "iso",
+          "script": null,
+          "iso": "C:\\iso\\fedora.iso",
+          "wsl_distro": null,
+          "shell": false,
+          "finish": false,
+          "shim": null,
+          "mm": null,
+          "loader": null,
+          "mok_cert": null,
+          "yes": false,
+          "dry_run": true
+        },
+        {
+          "distro": "fedora",
+          "path": "C:\\paguro\\fedora.vhd",
+          "source": "iso",
+          "iso": "C:\\iso\\fedora.iso"
+        }
+      ],
+      "progress": true,
+      "stub": "the ISO-in-container and from-WSL builds (Linux side); the --finish package/initramfs/bootloader checks"
+    },
+    "uninstall": {
+      "summary": "Remove paguro (DESIGN §6b); dry_run gives the summary.",
+      "cli_example": [
+        "uninstall"
+      ],
+      "access": "admin",
+      "cli": "paguro uninstall [--yes] [--delete-images] [--skip-final-boot]",
+      "cmdlets": [
+        "Uninstall-Paguro"
+      ],
+      "params": {
+        "$ref": "#/$defs/UninstallParams"
+      },
+      "result": {
+        "$ref": "#/$defs/UninstallResult"
+      },
+      "examples": [
+        {
+          "yes": false,
+          "delete_images": false,
+          "skip_final_boot": false,
+          "dry_run": true
+        }
+      ],
+      "dry_run_read": true,
+      "progress": true
+    },
+    "distro.list": {
+      "summary": "Bootable images and WSL2 distributions.",
+      "cli_example": [
+        "distro",
+        "list"
+      ],
+      "access": "read",
+      "cli": "paguro distro list",
+      "cmdlets": [
+        "Get-PaguroDistribution"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DistroList"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "distro.rename": {
+      "summary": "Rename an entry.",
+      "cli_example": [
+        "distro",
+        "rename",
+        "a",
+        "b"
+      ],
+      "access": "admin",
+      "cli": "paguro distro rename NAME NEW",
+      "cmdlets": [
+        "Rename-PaguroDistribution"
+      ],
+      "params": {
+        "$ref": "#/$defs/DistroRenameParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ConfigChange"
+      },
+      "examples": [
+        {
+          "name": "debian",
+          "new_name": "deb",
+          "dry_run": true
+        }
+      ]
+    },
+    "distro.remove": {
+      "summary": "Remove an entry (and its image).",
+      "cli_example": [
+        "distro",
+        "remove",
+        "a"
+      ],
+      "access": "admin",
+      "cli": "paguro distro remove NAME [--delete-image --yes]",
+      "cmdlets": [
+        "Remove-PaguroDistribution"
+      ],
+      "params": {
+        "$ref": "#/$defs/DistroRemoveParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ConfigChange"
+      },
+      "examples": [
+        {
+          "name": "debian",
+          "delete_image": true,
+          "yes": false,
+          "dry_run": true
+        }
+      ]
+    },
+    "distro.grow": {
+      "summary": "Grow an image.",
+      "cli_example": [
+        "distro",
+        "grow",
+        "a",
+        "--size",
+        "64G"
+      ],
+      "access": "admin",
+      "cli": "paguro distro grow NAME --size S",
+      "cmdlets": [
+        "Resize-PaguroDistribution"
+      ],
+      "params": {
+        "$ref": "#/$defs/DistroGrowParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ConfigChange"
+      },
+      "examples": [
+        {
+          "name": "debian",
+          "size": "64G"
+        }
+      ],
+      "stub": "growing needs the Linux side (DESIGN §5.6)"
+    },
+    "distro.enter": {
+      "summary": "Attach an image to WSL2 for a root shell.",
+      "cli_example": [
+        "distro",
+        "enter",
+        "a"
+      ],
+      "access": "admin",
+      "cli": "paguro distro enter [NAME] [--path P]",
+      "cmdlets": [
+        "Enter-PaguroDistro"
+      ],
+      "params": {
+        "$ref": "#/$defs/DistroTargetParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DistroAttach"
+      },
+      "examples": [
+        {
+          "name": "debian",
+          "path": null,
+          "dry_run": true
+        }
+      ],
+      "stub": "a root shell in the default WSL2 distribution, not yet the privileged container"
+    },
+    "distro.leave": {
+      "summary": "Detach it.",
+      "cli_example": [
+        "distro",
+        "leave",
+        "a"
+      ],
+      "access": "admin",
+      "cli": "paguro distro leave [NAME] [--path P]",
+      "cmdlets": [
+        "Dismount-PaguroDistro"
+      ],
+      "params": {
+        "$ref": "#/$defs/DistroTargetParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DistroAttach"
+      },
+      "examples": [
+        {
+          "name": null,
+          "path": "C:\\paguro\\debian.vhd",
+          "dry_run": true
+        }
+      ]
+    },
+    "protection.options": {
+      "summary": "The protection choices offered here (DESIGN §8d).",
+      "cli_example": [
+        "protection",
+        "options"
+      ],
+      "access": "read",
+      "cli": "paguro protection options",
+      "cmdlets": [
+        "Get-PaguroProtection"
+      ],
+      "params": {
+        "$ref": "#/$defs/ProtectionOptionsParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ProtectionOptions"
+      },
+      "examples": [
+        {
+          "target": "image",
+          "klid": "00000407"
+        }
+      ]
+    },
+    "protection.set": {
+      "summary": "Choose how Linux unlocks.",
+      "cli_example": [
+        "protection",
+        "set",
+        "tpm_pin",
+        "--keyboard",
+        "de"
+      ],
+      "access": "admin",
+      "cli": "paguro protection set CHOICE --keyboard K",
+      "cmdlets": [
+        "Set-PaguroProtection"
+      ],
+      "params": {
+        "$ref": "#/$defs/ProtectionSetParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ProtectionSet"
+      },
+      "examples": [
+        {
+          "choice": "tpm_pin",
+          "target": "image",
+          "keyboard": "de",
+          "pin_bypass": true,
+          "pin": "4711",
+          "dry_run": true
+        }
+      ],
+      "stub": "mixing the PIN into the TPM seal (no TPM + PIN rung in INTERFACES §3–§4 yet)"
+    },
+    "protection.check": {
+      "summary": "Can this PIN or passphrase be typed at boot?",
+      "cli_example": [
+        "protection",
+        "check"
+      ],
+      "access": "read",
+      "cli": "paguro protection check --keyboard K",
+      "cmdlets": [
+        "Test-PaguroSecret"
+      ],
+      "params": {
+        "$ref": "#/$defs/ProtectionCheckParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SecretCheck"
+      },
+      "examples": [
+        {
+          "keyboard": "fr",
+          "pin": "azerty"
+        }
+      ]
+    },
+    "secure-boot.status": {
+      "summary": "What the Secure Boot step will do.",
+      "cli_example": [
+        "secure-boot",
+        "status"
+      ],
+      "access": "read",
+      "cli": "paguro secure-boot status",
+      "cmdlets": [
+        "Get-PaguroSecureBoot"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SecureBootStatus"
+      },
+      "examples": [
+        {}
+      ]
+    }
+  },
+  "notifications": {
+    "progress": {
+      "params": {
+        "$ref": "#/$defs/Progress"
+      }
+    }
+  },
+  "$defs": {
+    "CommonParams": {
+      "type": "object",
+      "description": "Parameters every method takes, beside its own.",
+      "properties": {
+        "dry_run": {
+          "type": "boolean",
+          "description": "Report what would change; change nothing."
+        },
+        "esp": {
+          "type": "string",
+          "description": "The EFI System Partition (\\\\?\\Volume{…}\\) when there are several."
+        },
+        "linux_passphrase": {
+          "type": "string",
+          "description": "The Linux passphrase, when the method needs it (stage-setup, repair, install). Never logged or echoed.",
+          "x-secret": true
+        },
+        "pin": {
+          "type": "string",
+          "description": "The PIN or passphrase chosen on the protection screen (protection.set/check).",
+          "x-secret": true
+        },
+        "mok_password": {
+          "type": "string",
+          "description": "MokManager's one-time password, when the caller chooses it (mok.enroll).",
+          "x-secret": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "description": "A successful call's result.",
+      "properties": {
+        "data": {
+          "description": "The method's data: its `result` schema."
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "lines": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The human-readable text `paguro.exe` prints."
+        },
+        "exit": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "pending"
+          ],
+          "description": "`pending`: half done by design; resume by calling again."
+        },
+        "dry_run": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "data",
+        "warnings",
+        "lines",
+        "exit",
+        "dry_run"
+      ]
+    },
+    "ErrorData": {
+      "type": "object",
+      "description": "`error.data` of a failed call.",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "internal",
+            "usage",
+            "refused",
+            "not_found",
+            "platform",
+            "check_failed",
+            "needs_elevation"
+          ]
+        },
+        "exit": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The CLI exit code (JSON.md)."
+        },
+        "data": {
+          "description": "Structured detail: failing checks, a journal, or `needs_input`."
+        }
+      },
+      "required": [
+        "code",
+        "exit"
+      ]
+    },
+    "NeedsInput": {
+      "type": "object",
+      "description": "`error.data.data` when a secret is missing: ask the user, then call again with it.",
+      "properties": {
+        "needs_input": {
+          "type": "string",
+          "enum": [
+            "linux_passphrase",
+            "pin",
+            "mok_password"
+          ]
+        },
+        "param": {
+          "type": "string",
+          "description": "The parameter to set."
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "confirm": {
+          "type": "boolean",
+          "description": "Ask twice (nothing can verify it)."
+        }
+      },
+      "required": [
+        "needs_input",
+        "param",
+        "prompt",
+        "confirm"
+      ]
+    },
+    "Progress": {
+      "type": "object",
+      "description": "`progress` notification params: one step of a long operation.",
+      "properties": {
+        "id": {
+          "description": "The request's id."
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "install",
+            "uninstall"
+          ]
+        },
+        "step": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "running",
+            "pending",
+            "done",
+            "skipped",
+            "failed",
+            "awaiting_reboot",
+            "awaiting_user"
+          ]
+        },
+        "index": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "0-based."
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "step",
+        "state",
+        "index",
+        "total"
+      ]
+    },
+    "Caller": {
+      "type": "object",
+      "description": "The pipe client as the service identified it.",
+      "properties": {
+        "user": {
+          "type": "string"
+        },
+        "admin": {
+          "type": "boolean",
+          "description": "Member of Administrators, elevated or not."
+        },
+        "elevated": {
+          "type": "boolean"
+        },
+        "pid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "user",
+        "admin",
+        "elevated"
+      ]
+    },
+    "ServiceInfo": {
+      "type": "object",
+      "description": "service.info",
+      "properties": {
+        "api_version": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "service": {
+          "type": "boolean",
+          "description": "Answered by the service (false: paguro.exe in direct mode)."
+        },
+        "pipe": {
+          "type": "string"
+        },
+        "caller": {
+          "$ref": "#/$defs/Caller"
+        },
+        "methods": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The methods this caller may call."
+        }
+      },
+      "required": [
+        "api_version",
+        "service",
+        "caller",
+        "methods"
+      ]
+    },
+    "CheckFix": {
+      "type": "object",
+      "description": "How a check is fixed.",
+      "properties": {
+        "automatic": {
+          "type": "boolean",
+          "description": "`checks.fix` does it."
+        },
+        "instruction": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "automatic",
+        "instruction"
+      ]
+    },
+    "SystemCheck": {
+      "type": "object",
+      "description": "One installer check (INTERFACES §11.8 item 1).",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "uefi",
+            "wsl2",
+            "disk_space",
+            "bitlocker",
+            "tpm",
+            "secure_boot",
+            "microsoft_uefi_ca",
+            "fast_startup"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "warn",
+            "fail"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "description": "One sentence for a non-expert."
+        },
+        "fix": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckFix"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "detail"
+      ]
+    },
+    "ChecksList": {
+      "type": "object",
+      "description": "checks.list",
+      "properties": {
+        "ready": {
+          "type": "boolean",
+          "description": "No check failed."
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SystemCheck"
+          }
+        }
+      },
+      "required": [
+        "ready",
+        "checks"
+      ]
+    },
+    "CheckFixResult": {
+      "type": "object",
+      "description": "checks.fix",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "plan": {},
+        "check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SystemCheck"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "changed"
+      ]
+    },
+    "Cpu": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "vendor": {
+          "type": "string"
+        },
+        "family": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "model": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "stepping": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "Dmi": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "sys_vendor": {
+          "type": "string"
+        },
+        "product_name": {
+          "type": "string"
+        },
+        "board_vendor": {
+          "type": "string"
+        },
+        "board_name": {
+          "type": "string"
+        },
+        "bios_vendor": {
+          "type": "string"
+        },
+        "bios_version": {
+          "type": "string"
+        }
+      }
+    },
+    "PciDevice": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "vendor": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "subvendor": {
+          "type": "string"
+        },
+        "subdevice": {
+          "type": "string"
+        },
+        "class": {
+          "type": "string"
+        }
+      }
+    },
+    "UsbDevice": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "vendor": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "class": {
+          "type": "string"
+        }
+      }
+    },
+    "StorageDevice": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "bus": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "HostHardware": {
+      "type": "object",
+      "description": "host-hardware.json (INTERFACES §11.5).",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "cpu": {
+          "$ref": "#/$defs/Cpu"
+        },
+        "dmi": {
+          "$ref": "#/$defs/Dmi"
+        },
+        "pci": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PciDevice"
+          }
+        },
+        "usb": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UsbDevice"
+          }
+        },
+        "acpi": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "storage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StorageDevice"
+          }
+        }
+      },
+      "required": [
+        "version",
+        "cpu",
+        "dmi",
+        "pci",
+        "usb",
+        "acpi",
+        "storage"
+      ]
+    },
+    "Modaliases": {
+      "type": "object",
+      "description": "hw.modalias",
+      "properties": {
+        "modaliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "modaliases"
+      ]
+    },
+    "EfiFs": {
+      "type": "object",
+      "description": "The UEFI file system on a disk.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "gpt_esp",
+            "superfloppy",
+            "none"
+          ]
+        },
+        "offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "length": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "DiskInfo": {
+      "type": "object",
+      "description": "disk.create / disk.inspect",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "len": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "allocated": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "fixed_vhd",
+            "raw"
+          ]
+        },
+        "payload_len": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vhd_footer_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attributes": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "sparse": {
+          "type": "boolean"
+        },
+        "compressed": {
+          "type": "boolean"
+        },
+        "encrypted": {
+          "type": "boolean"
+        },
+        "file_id": {
+          "type": "string"
+        },
+        "mft_record": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "mft_sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cluster_size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fragments": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "holes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "clusters": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "efi_fs": {
+          "$ref": "#/$defs/EfiFs"
+        },
+        "volume": {
+          "type": "string"
+        },
+        "problems": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "disk.create --dry-run: the payload size."
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "EfiLocation": {
+      "type": "object",
+      "description": "Where an entry's UEFI image is.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "disk",
+            "file"
+          ]
+        },
+        "disk": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "ConfigEntry": {
+      "type": "object",
+      "description": "A [Boot.*] entry.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "volume": {
+          "type": "string",
+          "description": "GPT partition GUID."
+        },
+        "root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "efi": {
+          "$ref": "#/$defs/EfiLocation"
+        }
+      },
+      "required": [
+        "name",
+        "volume",
+        "efi"
+      ]
+    },
+    "Config": {
+      "type": "object",
+      "description": "paguro.ini, parsed.",
+      "properties": {
+        "default": {
+          "type": "string"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConfigEntry"
+          }
+        },
+        "tpm": {
+          "type": "boolean"
+        },
+        "setup_tpm": {
+          "type": "boolean"
+        },
+        "passphrase": {
+          "type": "boolean"
+        },
+        "theme": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "keyboard": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "default",
+        "entries",
+        "tpm",
+        "setup_tpm",
+        "passphrase"
+      ]
+    },
+    "ConfigFile": {
+      "type": "object",
+      "description": "config.show",
+      "properties": {
+        "sha256": {
+          "type": "string"
+        },
+        "firmware_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hash_matches": {
+          "type": "boolean"
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "config": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Config"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sha256",
+        "hash_matches",
+        "valid"
+      ]
+    },
+    "ConfigValidation": {
+      "type": "object",
+      "description": "config.validate",
+      "properties": {
+        "file": {
+          "$ref": "#/$defs/ConfigFile"
+        },
+        "problems": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "file",
+        "problems"
+      ]
+    },
+    "ConfigChange": {
+      "type": "object",
+      "description": "config.set, distro.rename, distro.remove",
+      "properties": {
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "config": {
+          "$ref": "#/$defs/Config"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "written": {
+          "type": "boolean"
+        },
+        "removed": {
+          "type": "string"
+        },
+        "image": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "changes",
+        "config",
+        "sha256",
+        "written"
+      ]
+    },
+    "FirmwareVariable": {
+      "type": "object",
+      "description": "One of paguro's firmware variables.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "size_ok": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "attributes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Hex; null for key material."
+        },
+        "note": {
+          "type": "string"
+        },
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "VariableList": {
+      "type": "object",
+      "description": "efi.vars.list",
+      "properties": {
+        "variables": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FirmwareVariable"
+          }
+        }
+      },
+      "required": [
+        "variables"
+      ]
+    },
+    "FirmwareBootEntry": {
+      "type": "object",
+      "description": "A Boot#### entry.",
+      "properties": {
+        "number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "partition": {},
+        "in_boot_order": {
+          "type": "boolean"
+        },
+        "ours": {
+          "type": "boolean"
+        },
+        "bootstrap": {
+          "type": "boolean"
+        },
+        "well_formed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "number",
+        "name"
+      ]
+    },
+    "BootEntryList": {
+      "type": "object",
+      "description": "efi.boot-entry.list",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FirmwareBootEntry"
+          }
+        },
+        "boot_order": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "boot_next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "entries",
+        "boot_order"
+      ]
+    },
+    "BootEntryChange": {
+      "type": "object",
+      "description": "efi.boot-entry.create / delete, efi.bootnext",
+      "properties": {
+        "entry": {},
+        "changed": {
+          "type": "boolean"
+        },
+        "deleted": {
+          "type": "boolean"
+        },
+        "boot_next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "EspFile": {
+      "type": "object",
+      "description": "One ESP file.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "missing",
+            "modified"
+          ]
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "len": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "expected_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "actual_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "SealFile": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "well_formed": {
+          "type": "boolean"
+        },
+        "deadline": {}
+      }
+    },
+    "SealDir": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "volume": {
+          "type": "string"
+        },
+        "seals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SealFile"
+          }
+        }
+      }
+    },
+    "EspState": {
+      "type": "object",
+      "description": "esp.install / verify / repair",
+      "properties": {
+        "esp": {
+          "type": "string"
+        },
+        "directory": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EspFile"
+          }
+        },
+        "store": {
+          "type": "string"
+        },
+        "volumes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SealDir"
+          }
+        },
+        "restored": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EspFile"
+          }
+        }
+      }
+    },
+    "MokEnroll": {
+      "type": "object",
+      "description": "mok.enroll",
+      "properties": {
+        "sha256": {
+          "type": "string"
+        },
+        "enrolled": {
+          "type": "boolean"
+        },
+        "requested": {
+          "type": "boolean"
+        },
+        "one_time_password": {
+          "type": "string",
+          "description": "Generated only: to be typed at MokManager; worthless after the next boot."
+        }
+      },
+      "required": [
+        "sha256",
+        "enrolled",
+        "requested"
+      ]
+    },
+    "MokStatus": {
+      "type": "object",
+      "description": "mok.status",
+      "properties": {
+        "machine_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enrolled": {
+          "type": "boolean"
+        },
+        "pending_request": {
+          "type": "boolean"
+        },
+        "mok_list_entries": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "enrolled",
+        "pending_request"
+      ]
+    },
+    "PreflightCheck": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "repaired",
+            "would_repair",
+            "warn",
+            "fail",
+            "skipped"
+          ]
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "detail"
+      ]
+    },
+    "PreflightAction": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "restart",
+            "stage_setup_tpm"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ]
+    },
+    "Preflight": {
+      "type": "object",
+      "description": "preflight, restart-linux, repair",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PreflightCheck"
+          }
+        },
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreflightAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "entry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secure_boot": {
+          "type": "boolean"
+        },
+        "pin_bypass": {
+          "description": "restart-linux: {file, deadline_clock_ms} or {skipped}."
+        },
+        "staged": {},
+        "bootstrap": {},
+        "boot_next": {
+          "type": "string"
+        },
+        "boot_target": {
+          "type": "string",
+          "description": "restart-linux: the entry booted once (PaguroBootTarget)."
+        },
+        "restarting": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "checks",
+        "secure_boot"
+      ]
+    },
+    "StageSetup": {
+      "type": "object",
+      "description": "stage-setup",
+      "properties": {
+        "volume": {
+          "type": "string"
+        },
+        "seal": {
+          "type": "string"
+        },
+        "variable": {
+          "type": "string"
+        },
+        "vmk_source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "volume",
+        "seal",
+        "variable"
+      ]
+    },
+    "JournalStep": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "done",
+            "skipped",
+            "failed",
+            "awaiting_reboot",
+            "awaiting_user"
+          ]
+        },
+        "at_unix": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "state"
+      ]
+    },
+    "Journal": {
+      "type": "object",
+      "description": "install / uninstall (a --dry-run has args and steps only).",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "args": {},
+        "started_unix": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "updated_unix": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JournalStep"
+          }
+        },
+        "shell": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "install --shell: the shell the front end runs."
+        },
+        "failure": {},
+        "finish_checks": {
+          "type": "array",
+          "items": {}
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "steps"
+      ]
+    },
+    "UninstallResult": {
+      "type": "object",
+      "description": "uninstall",
+      "properties": {
+        "journal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Journal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "finished": {
+          "type": "boolean"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JournalStep"
+          }
+        },
+        "delete_images": {
+          "type": "boolean"
+        },
+        "skip_final_boot": {
+          "type": "boolean"
+        }
+      }
+    },
+    "Distribution": {
+      "type": "object",
+      "description": "A bootable image or a WSL2 distribution.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "image",
+            "wsl"
+          ]
+        },
+        "default": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Bytes."
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "bootable": {
+          "type": "boolean"
+        },
+        "volume": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wsl_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wsl_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "default",
+        "exists",
+        "bootable"
+      ]
+    },
+    "DistroList": {
+      "type": "object",
+      "description": "distro.list",
+      "properties": {
+        "distributions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Distribution"
+          }
+        }
+      },
+      "required": [
+        "distributions"
+      ]
+    },
+    "DistroAttach": {
+      "type": "object",
+      "description": "distro.enter / leave",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "attached": {
+          "type": "boolean"
+        },
+        "detached": {
+          "type": "boolean"
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The shell the front end runs."
+        },
+        "stub": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "ProtectionOffer": {
+      "type": "object",
+      "description": "One row of the protection screen.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "tpm_pin",
+            "passphrase",
+            "tpm_only",
+            "unprotected"
+          ]
+        },
+        "offered": {
+          "type": "boolean"
+        },
+        "recommended": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "offered",
+        "recommended",
+        "reason"
+      ]
+    },
+    "KeyboardLayout": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "ProtectionSaved": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "choice": {
+          "type": "string"
+        },
+        "pin_bypass": {
+          "type": "boolean"
+        },
+        "keyboard": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "choice",
+        "pin_bypass",
+        "keyboard"
+      ]
+    },
+    "ProtectionOptions": {
+      "type": "object",
+      "description": "protection.options",
+      "properties": {
+        "asked": {
+          "type": "boolean",
+          "description": "Windows uses BitLocker, so the question is asked."
+        },
+        "target": {
+          "type": "string",
+          "enum": [
+            "image",
+            "disk"
+          ]
+        },
+        "windows": {
+          "type": "string",
+          "enum": [
+            "off",
+            "tpm_pin",
+            "tpm_startup_key",
+            "tpm_only",
+            "no_tpm"
+          ]
+        },
+        "tpm_present": {
+          "type": "boolean"
+        },
+        "choices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProtectionOffer"
+          }
+        },
+        "pin_bypass_default": {
+          "type": "boolean"
+        },
+        "keyboards": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeyboardLayout"
+          }
+        },
+        "keyboard_suggested": {
+          "type": "string"
+        },
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProtectionSaved"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "asked",
+        "windows",
+        "choices",
+        "keyboards",
+        "keyboard_suggested",
+        "pin_bypass_default"
+      ]
+    },
+    "ProtectionSet": {
+      "type": "object",
+      "description": "protection.set",
+      "properties": {
+        "choice": {
+          "type": "string"
+        },
+        "keyboard": {
+          "type": "string"
+        },
+        "pin_bypass": {
+          "type": "boolean"
+        },
+        "config": {
+          "$ref": "#/$defs/ConfigChange"
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What is not done yet (stubs)."
+        }
+      },
+      "required": [
+        "choice",
+        "keyboard",
+        "pin_bypass",
+        "pending"
+      ]
+    },
+    "RefusedChar": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "char": {
+          "type": "string"
+        },
+        "position": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "char",
+        "position",
+        "reason"
+      ]
+    },
+    "SecretCheck": {
+      "type": "object",
+      "description": "protection.check (also the error data when refused)",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "keyboard": {
+          "type": "string"
+        },
+        "length": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "refused": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RefusedChar"
+          }
+        }
+      },
+      "required": [
+        "ok",
+        "keyboard",
+        "refused"
+      ]
+    },
+    "SecureBootStatus": {
+      "type": "object",
+      "description": "secure-boot.status",
+      "properties": {
+        "secure_boot": {
+          "type": "boolean"
+        },
+        "setup_mode": {
+          "type": "boolean"
+        },
+        "microsoft_uefi_ca": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mok": {},
+        "mokmanager_next_boot": {
+          "type": "boolean"
+        },
+        "machine_key_enrolled": {
+          "type": "boolean"
+        },
+        "enrolment_needed": {
+          "type": "boolean"
+        },
+        "db_change_needed": {
+          "type": "boolean"
+        },
+        "bitlocker_suspend_needed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "secure_boot",
+        "mokmanager_next_boot",
+        "enrolment_needed",
+        "db_change_needed",
+        "bitlocker_suspend_needed"
+      ]
+    },
+    "Status": {
+      "type": "object",
+      "description": "status: one section per area; a section that failed is {error}.",
+      "properties": {
+        "elevated": {
+          "type": "boolean"
+        },
+        "uefi": {
+          "type": "boolean"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "volumes": {},
+        "firmware": {},
+        "esp": {},
+        "config": {},
+        "images": {},
+        "mok": {},
+        "tpm": {},
+        "wsl": {},
+        "minifilter": {},
+        "preflight": {}
+      },
+      "required": [
+        "elevated",
+        "uefi",
+        "arch"
+      ]
+    },
+    "NoParams": {
+      "type": "object",
+      "description": "No parameters beyond the common ones.",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "CheckFixParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "ModaliasParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "hardware": {
+          "$ref": "#/$defs/HostHardware"
+        }
+      },
+      "required": [
+        "hardware"
+      ],
+      "additionalProperties": false
+    },
+    "DiskCreateParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "path": {
+          "type": "string",
+          "x-path": true
+        },
+        "size": {
+          "type": "string",
+          "description": "32G, 512M, or bytes."
+        }
+      },
+      "required": [
+        "path",
+        "size"
+      ],
+      "additionalProperties": false
+    },
+    "PathParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "path": {
+          "type": "string",
+          "x-path": true
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "ConfigSetParams": {
+      "type": "object",
+      "description": "Omitted fields are unchanged.",
+      "properties": {
+        "entry": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The [Boot.NAME] entry to add or change."
+        },
+        "volume": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "efi_disk": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "efi": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "efi_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "default": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remove_entry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tpm": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "setup_tpm": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "passphrase": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "[Passphrase] enabled (the opt-in rung)."
+        },
+        "theme": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keyboard": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "NameParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "VarSetParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "hex": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "hex"
+      ],
+      "additionalProperties": false
+    },
+    "EntryParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "entry": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entry"
+      ],
+      "additionalProperties": false
+    },
+    "BootNextParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "entry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "clear": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "EspInstallParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "shim": {
+          "type": "string",
+          "x-path": true
+        },
+        "mm": {
+          "type": "string",
+          "x-path": true
+        },
+        "loader": {
+          "type": "string",
+          "x-path": true
+        }
+      },
+      "required": [
+        "shim",
+        "mm",
+        "loader"
+      ],
+      "additionalProperties": false
+    },
+    "MokEnrollParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "cert": {
+          "type": "string",
+          "x-path": true
+        }
+      },
+      "required": [
+        "cert"
+      ],
+      "additionalProperties": false
+    },
+    "MokStatusParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "cert": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PreflightParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "repair": {
+          "type": "boolean",
+          "description": "Also fix what can be fixed (administrators)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "RestartLinuxParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "yes": {
+          "type": "boolean",
+          "description": "Actually restart."
+        },
+        "entry": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Boot this [Boot.*] entry once instead of the default, or disk:<Boot#### hex>."
+        }
+      },
+      "additionalProperties": false
+    },
+    "RepairParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "stage": {
+          "type": "boolean"
+        },
+        "bootstrap": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "InstallParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "distro": {
+          "type": "string",
+          "description": "[A-Za-z0-9_-]{1,32}"
+        },
+        "path": {
+          "type": "string",
+          "x-path": true
+        },
+        "size": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "script",
+            "iso",
+            "wsl"
+          ]
+        },
+        "script": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "iso": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wsl_distro": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shell": {
+          "type": "boolean",
+          "description": "Manual mode: stop with the disk attached and hand over a root shell."
+        },
+        "finish": {
+          "type": "boolean",
+          "description": "Manual mode, second half: check and complete."
+        },
+        "shim": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mm": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "loader": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mok_cert": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "yes": {
+          "type": "boolean",
+          "description": "Restart at the end."
+        }
+      },
+      "required": [
+        "distro",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "UninstallParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "yes": {
+          "type": "boolean"
+        },
+        "delete_images": {
+          "type": "boolean"
+        },
+        "skip_final_boot": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "DistroRenameParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "new_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "new_name"
+      ],
+      "additionalProperties": false
+    },
+    "DistroRemoveParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "delete_image": {
+          "type": "boolean"
+        },
+        "yes": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "DistroGrowParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "size"
+      ],
+      "additionalProperties": false
+    },
+    "DistroTargetParams": {
+      "type": "object",
+      "description": "A distribution name or a .vhd/.vhdx path.",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProtectionOptionsParams": {
+      "type": "object",
+      "description": "",
+      "properties": {
+        "target": {
+          "type": "string",
+          "enum": [
+            "image",
+            "disk"
+          ]
+        },
+        "klid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The front end's keyboard layout (Windows KLID, 00000407)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProtectionSetParams": {
+      "type": "object",
+      "description": "The secret itself travels as `pin`.",
+      "properties": {
+        "choice": {
+          "type": "string",
+          "enum": [
+            "tpm_pin",
+            "passphrase",
+            "tpm_only",
+            "unprotected"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "enum": [
+            "image",
+            "disk"
+          ]
+        },
+        "keyboard": {
+          "type": "string"
+        },
+        "pin_bypass": {
+          "type": "boolean",
+          "description": "Restart into Linux skips the PIN (default on)."
+        }
+      },
+      "required": [
+        "choice"
+      ],
+      "additionalProperties": false
+    },
+    "ProtectionCheckParams": {
+      "type": "object",
+      "description": "The secret travels as `pin`.",
+      "properties": {
+        "keyboard": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "keyboard"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

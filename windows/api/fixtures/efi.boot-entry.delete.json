@@ -1,0 +1,25 @@
+{
+  "method": "efi.boot-entry.delete",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "efi.boot-entry.delete",
+    "params": {
+      "dry_run": true,
+      "entry": "0001"
+    }
+  },
+  "response": {
+    "error": {
+      "code": -32004,
+      "data": {
+        "code": "not_found",
+        "exit": 4
+      },
+      "message": "Boot0001 does not exist"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

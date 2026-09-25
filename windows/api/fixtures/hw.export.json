@@ -1,0 +1,52 @@
+{
+  "method": "hw.export",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "hw.export",
+    "params": {}
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "acpi": [],
+        "cpu": {
+          "family": 0,
+          "model": 0,
+          "stepping": 0,
+          "vendor": ""
+        },
+        "dmi": {
+          "bios_vendor": "",
+          "bios_version": "",
+          "board_name": "",
+          "board_vendor": "",
+          "product_name": "",
+          "sys_vendor": ""
+        },
+        "pci": [],
+        "storage": [
+          {
+            "bus": "nvme",
+            "model": "Mock NVMe 1TB",
+            "size": 1000204886016
+          }
+        ],
+        "usb": [],
+        "version": 1
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "  — 0 PCI, 0 USB, 0 ACPI, 1 disk(s)",
+        "{\n  \"acpi\": [],\n  \"cpu\": {\n    \"family\": 0,\n    \"model\": 0,\n    \"stepping\": 0,\n    \"vendor\": \"\"\n  },\n  \"dmi\": {\n    \"bios_vendor\": \"\",\n    \"bios_version\": \"\",\n    \"board_name\": \"\",\n    \"board_vendor\": \"\",\n    \"product_name\": \"\",\n    \"sys_vendor\": \"\"\n  },\n  \"pci\": [],\n  \"storage\": [\n    {\n      \"bus\": \"nvme\",\n      \"model\": \"Mock NVMe 1TB\",\n      \"size\": 1000204886016\n    }\n  ],\n  \"usb\": [],\n  \"version\": 1\n}"
+      ],
+      "warnings": [
+        "SMBIOS unavailable: the dmi fields are empty"
+      ]
+    }
+  }
+}

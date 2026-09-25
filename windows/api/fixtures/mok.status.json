@@ -1,0 +1,30 @@
+{
+  "method": "mok.status",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "mok.status",
+    "params": {
+      "cert": null
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "enrolled": false,
+        "machine_key": null,
+        "mok_list_entries": 0,
+        "pending_request": false
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "no machine key recorded"
+      ],
+      "warnings": []
+    }
+  }
+}

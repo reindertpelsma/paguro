@@ -1,0 +1,53 @@
+{
+  "method": "disk.inspect",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "disk.inspect",
+    "params": {
+      "path": "C:\\paguro\\debian.vhd"
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "allocated": 34359742464,
+        "attributes": 32,
+        "cluster_size": 4096,
+        "clusters": 8388609,
+        "compressed": false,
+        "efi_fs": {
+          "kind": "none",
+          "reason": "Unrecognised"
+        },
+        "encrypted": false,
+        "file_id": "00000000000000000000000000000000",
+        "format": "fixed_vhd",
+        "fragments": 1,
+        "holes": 0,
+        "len": 34359738880,
+        "mft_record": 0,
+        "mft_sequence": 0,
+        "path": "C:\\paguro\\debian.vhd",
+        "payload_len": 34359738368,
+        "problems": [],
+        "sparse": false,
+        "vhd_footer_error": null,
+        "volume": "\\\\?\\Volume{aaaaaaaa-0000-0000-0000-000000000002}\\"
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "C:\\paguro\\debian.vhd",
+        "  fixed_vhd , 34359738368 bytes payload, 1 fragment(s), cluster 4096 bytes",
+        "  MFT record 0 seq 0",
+        "  UEFI file system: none",
+        "  usable as a paguro disk"
+      ],
+      "warnings": []
+    }
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "method": "protection.set",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "protection.set",
+    "params": {
+      "choice": "tpm_pin",
+      "dry_run": true,
+      "keyboard": "de",
+      "pin": "4711",
+      "pin_bypass": true,
+      "target": "image"
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "choice": "tpm_pin",
+        "config": {
+          "changes": [
+            "[UI] keyboard = de"
+          ],
+          "config": {
+            "default": "debian",
+            "entries": [
+              {
+                "efi": {
+                  "disk": "\\paguro\\debian.vhd",
+                  "kind": "disk",
+                  "path": "\\EFI\\BOOT\\BOOTX64.EFI"
+                },
+                "name": "debian",
+                "root": "\\paguro\\debian.vhd",
+                "volume": "6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8"
+              }
+            ],
+            "keyboard": "de",
+            "mode": "auto",
+            "passphrase": false,
+            "setup_tpm": true,
+            "theme": "dark",
+            "tpm": true
+          },
+          "sha256": "5490c4ada8f418a643eccc6a8430d2c224f6605e4332202783a57ff40694ccee",
+          "written": false
+        },
+        "keyboard": "de",
+        "pending": [
+          "STUB: mixing the PIN into the TPM seal needs the TPM + PIN rung, which INTERFACES §3–§4 do not define yet; until then the TPM rung unlocks without the PIN"
+        ],
+        "pin_bypass": true
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "[UI] keyboard = de",
+        "protection: tpm_pin (keyboard German)"
+      ],
+      "warnings": [
+        "the configuration changed, so PCR 12 will too: the TPM seal no longer matches. Run `paguro stage-setup` before restarting into Linux, or the loader asks for the recovery path",
+        "STUB: mixing the PIN into the TPM seal needs the TPM + PIN rung, which INTERFACES §3–§4 do not define yet; until then the TPM rung unlocks without the PIN"
+      ]
+    }
+  }
+}

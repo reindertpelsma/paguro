@@ -1,0 +1,30 @@
+{
+  "method": "distro.grow",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "distro.grow",
+    "params": {
+      "name": "debian",
+      "size": "64G"
+    }
+  },
+  "response": {
+    "error": {
+      "code": -32003,
+      "data": {
+        "code": "refused",
+        "data": {
+          "name": "debian",
+          "size": "64G",
+          "stub": true
+        },
+        "exit": 3
+      },
+      "message": "STUB: growing debian to 64G needs the Linux side (DESIGN §5.6: the new extents are claimed and verified by Linux), which is not built yet"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

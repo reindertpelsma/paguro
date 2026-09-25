@@ -1,0 +1,27 @@
+{
+  "method": "distro.remove",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "distro.remove",
+    "params": {
+      "delete_image": true,
+      "dry_run": true,
+      "name": "debian",
+      "yes": false
+    }
+  },
+  "response": {
+    "error": {
+      "code": -32003,
+      "data": {
+        "code": "refused",
+        "exit": 3
+      },
+      "message": "a configuration needs at least one [Boot.*] entry"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

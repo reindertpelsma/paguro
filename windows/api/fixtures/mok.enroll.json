@@ -1,0 +1,25 @@
+{
+  "method": "mok.enroll",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "mok.enroll",
+    "params": {
+      "cert": "C:\\paguro\\mok.der",
+      "dry_run": true
+    }
+  },
+  "response": {
+    "error": {
+      "code": -32004,
+      "data": {
+        "code": "not_found",
+        "exit": 4
+      },
+      "message": "C:\\paguro\\mok.der: no such file"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

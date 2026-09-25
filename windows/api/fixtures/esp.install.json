@@ -1,0 +1,54 @@
+{
+  "method": "esp.install",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "esp.install",
+    "params": {
+      "dry_run": true,
+      "loader": "C:\\paguro\\in\\paguro.efi",
+      "mm": "C:\\paguro\\in\\mmx64.efi",
+      "shim": "C:\\paguro\\in\\shimx64.efi"
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "directory": "\\\\?\\Volume{aaaaaaaa-0000-0000-0000-000000000001}\\EFI\\paguro",
+        "esp": "\\\\?\\Volume{aaaaaaaa-0000-0000-0000-000000000001}\\",
+        "files": [
+          {
+            "len": 6,
+            "name": "shimx64.efi",
+            "sha256": "ba417bd182f165e34b331b2a21cf37c060935da70026a5cb3c2a8f36c9d1f58e"
+          },
+          {
+            "len": 4,
+            "name": "mmx64.efi",
+            "sha256": "122e916b7f235eb12dd1c70a046b8885a1315e65955007d6366bfbb7c757b495"
+          },
+          {
+            "len": 8,
+            "name": "paguro.efi",
+            "sha256": "cc92e84d07a02bb987571286c9498c150615779ceaa8e14a7b8b31e0b66971fa"
+          },
+          {
+            "len": 8,
+            "name": "grubx64.efi",
+            "sha256": "cc92e84d07a02bb987571286c9498c150615779ceaa8e14a7b8b31e0b66971fa"
+          }
+        ],
+        "store": "C:\\ProgramData\\paguro\\esp"
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "would install 4 files in \\EFI\\paguro\\ and recorded their hashes"
+      ],
+      "warnings": []
+    }
+  }
+}

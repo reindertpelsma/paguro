@@ -1,0 +1,42 @@
+{
+  "method": "efi.boot-entry.list",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "efi.boot-entry.list",
+    "params": {}
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "boot_next": null,
+        "boot_order": [
+          "0000"
+        ],
+        "entries": [
+          {
+            "active": true,
+            "bootstrap": false,
+            "description": "Windows Boot Manager",
+            "in_boot_order": true,
+            "name": "Boot0000",
+            "number": 0,
+            "ours": false,
+            "partition": null,
+            "path": "\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+            "well_formed": true
+          }
+        ]
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "Boot0000* Windows Boot Manager     \\EFI\\Microsoft\\Boot\\bootmgfw.efi"
+      ],
+      "warnings": []
+    }
+  }
+}

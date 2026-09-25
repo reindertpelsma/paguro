@@ -1,0 +1,36 @@
+{
+  "method": "distro.enter",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "distro.enter",
+    "params": {
+      "dry_run": true,
+      "name": "debian",
+      "path": null
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "attached": false,
+        "command": [
+          "wsl.exe",
+          "--user",
+          "root"
+        ],
+        "path": "C:\\paguro\\debian.vhd",
+        "stub": "a root shell in the default WSL2 distribution with the disk attached bare (lsblk shows it); the privileged chroot-ready container (INTERFACES §11.7) is Linux-side work"
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "would attach C:\\paguro\\debian.vhd to WSL2"
+      ],
+      "warnings": []
+    }
+  }
+}

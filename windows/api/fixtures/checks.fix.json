@@ -1,0 +1,44 @@
+{
+  "method": "checks.fix",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "checks.fix",
+    "params": {
+      "dry_run": true,
+      "id": "fast_startup"
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "changed": false,
+        "id": "fast_startup",
+        "plan": {
+          "command": [
+            "reg.exe",
+            "add",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power",
+            "/v",
+            "HiberbootEnabled",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "0",
+            "/f"
+          ],
+          "id": "fast_startup"
+        }
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "would run: Turn Fast Startup off (HiberbootEnabled = 0)."
+      ],
+      "warnings": []
+    }
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "method": "service.info",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "service.info",
+    "params": {}
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "api_version": "1.0",
+        "caller": {
+          "admin": true,
+          "elevated": true,
+          "pid": null,
+          "user": "contract"
+        },
+        "methods": [
+          "service.info",
+          "status",
+          "checks.list",
+          "checks.fix",
+          "hw.export",
+          "hw.modalias",
+          "disk.create",
+          "disk.inspect",
+          "config.show",
+          "config.validate",
+          "config.set",
+          "efi.vars.list",
+          "efi.vars.get",
+          "efi.vars.set",
+          "efi.vars.delete",
+          "efi.boot-entry.list",
+          "efi.boot-entry.create",
+          "efi.boot-entry.delete",
+          "efi.bootnext",
+          "esp.install",
+          "esp.verify",
+          "esp.repair",
+          "mok.enroll",
+          "mok.status",
+          "preflight",
+          "restart-linux",
+          "stage-setup",
+          "repair",
+          "install",
+          "uninstall",
+          "distro.list",
+          "distro.rename",
+          "distro.remove",
+          "distro.grow",
+          "distro.enter",
+          "distro.leave",
+          "protection.options",
+          "protection.set",
+          "protection.check",
+          "secure-boot.status"
+        ],
+        "pipe": "\\\\.\\pipe\\paguro",
+        "service": true,
+        "version": "0.0.0"
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "paguro API 1.0 (service), caller contract (elevated administrator)"
+      ],
+      "warnings": []
+    }
+  }
+}

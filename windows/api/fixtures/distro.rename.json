@@ -1,0 +1,56 @@
+{
+  "method": "distro.rename",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "distro.rename",
+    "params": {
+      "dry_run": true,
+      "name": "debian",
+      "new_name": "deb"
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "changes": [
+          "renamed [Boot.debian] to [Boot.deb]"
+        ],
+        "config": {
+          "default": "deb",
+          "entries": [
+            {
+              "efi": {
+                "disk": "\\paguro\\debian.vhd",
+                "kind": "disk",
+                "path": "\\EFI\\BOOT\\BOOTX64.EFI"
+              },
+              "name": "deb",
+              "root": "\\paguro\\debian.vhd",
+              "volume": "6c0a1b2c-3d4e-5f60-7182-93a4b5c6d7e8"
+            }
+          ],
+          "keyboard": "us",
+          "mode": "auto",
+          "passphrase": false,
+          "setup_tpm": true,
+          "theme": "dark",
+          "tpm": true
+        },
+        "sha256": "5a2d8107dbe1ee8482f90215e2fa1a91019a644d9dcfb9de811b5413aefca8cb",
+        "written": false
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "renamed [Boot.debian] to [Boot.deb]"
+      ],
+      "warnings": [
+        "the configuration changed, so PCR 12 will too: the TPM seal no longer matches. Run `paguro stage-setup` before restarting into Linux, or the loader asks for the recovery path"
+      ]
+    }
+  }
+}

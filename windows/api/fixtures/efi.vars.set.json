@@ -1,0 +1,30 @@
+{
+  "method": "efi.vars.set",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "efi.vars.set",
+    "params": {
+      "dry_run": true,
+      "hex": "01",
+      "name": "PaguroTpmBroken"
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "name": "PaguroTpmBroken",
+        "value": "01"
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "PaguroTpmBroken = 01"
+      ],
+      "warnings": []
+    }
+  }
+}

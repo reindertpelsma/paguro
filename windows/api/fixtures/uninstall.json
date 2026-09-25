@@ -1,0 +1,77 @@
+{
+  "method": "uninstall",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "uninstall",
+    "params": {
+      "delete_images": false,
+      "dry_run": true,
+      "skip_final_boot": false,
+      "yes": false
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "delete_images": false,
+        "skip_final_boot": false,
+        "steps": [
+          {
+            "id": "inventory",
+            "state": "pending"
+          },
+          {
+            "id": "windows-tasks",
+            "state": "pending"
+          },
+          {
+            "id": "driver-disable",
+            "state": "pending"
+          },
+          {
+            "id": "final-boot",
+            "state": "pending"
+          },
+          {
+            "id": "boot-entries",
+            "state": "pending"
+          },
+          {
+            "id": "esp",
+            "state": "pending"
+          },
+          {
+            "id": "driver-remove",
+            "state": "pending"
+          },
+          {
+            "id": "images",
+            "state": "pending"
+          },
+          {
+            "id": "store",
+            "state": "pending"
+          }
+        ]
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "would run: inventory",
+        "would run: windows-tasks",
+        "would run: driver-disable",
+        "would run: final-boot",
+        "would run: boot-entries",
+        "would run: esp",
+        "would run: driver-remove",
+        "would run: images",
+        "would run: store"
+      ],
+      "warnings": []
+    }
+  }
+}

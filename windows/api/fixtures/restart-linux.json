@@ -1,0 +1,87 @@
+{
+  "method": "restart-linux",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "restart-linux",
+    "params": {
+      "dry_run": true,
+      "entry": null,
+      "yes": false
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "action": {
+          "action": "restart"
+        },
+        "boot_next": "0001",
+        "checks": [
+          {
+            "detail": "UEFI firmware",
+            "id": "uefi",
+            "state": "ok"
+          },
+          {
+            "detail": "administrator",
+            "id": "elevated",
+            "state": "ok"
+          },
+          {
+            "detail": "shim, MokManager and paguro.efi match the install",
+            "id": "esp_files",
+            "state": "ok"
+          },
+          {
+            "detail": "Boot0001 → \\EFI\\paguro\\shim",
+            "id": "boot_entry",
+            "state": "would_repair"
+          },
+          {
+            "detail": "paguro.ini matches PaguroConfigHash",
+            "id": "config",
+            "state": "ok"
+          },
+          {
+            "detail": "[Boot.debian]: 1 file(s) present and contiguous-mappable",
+            "id": "images",
+            "state": "ok"
+          },
+          {
+            "detail": "no machine key recorded",
+            "id": "mok",
+            "state": "skipped"
+          },
+          {
+            "detail": "no record of the last Linux boot: the TPM result cannot be predicted",
+            "id": "tpm",
+            "state": "warn"
+          }
+        ],
+        "entry": "Boot0001",
+        "restarting": false,
+        "secure_boot": true
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "uefi           ok           UEFI firmware",
+        "elevated       ok           administrator",
+        "esp_files      ok           shim, MokManager and paguro.efi match the install",
+        "boot_entry     wouldrepair  Boot0001 → \\EFI\\paguro\\shim",
+        "config         ok           paguro.ini matches PaguroConfigHash",
+        "images         ok           [Boot.debian]: 1 file(s) present and contiguous-mappable",
+        "mok            skipped      no machine key recorded",
+        "tpm            warn         no record of the last Linux boot: the TPM result cannot be predicted",
+        "would write the PIN bypass",
+        "BootNext = 0001",
+        "ready: restart with `paguro restart-linux --yes` (or restart Windows normally)"
+      ],
+      "warnings": []
+    }
+  }
+}

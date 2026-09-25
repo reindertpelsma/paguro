@@ -1,0 +1,85 @@
+{
+  "method": "efi.vars.list",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "efi.vars.list",
+    "params": {}
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "variables": [
+          {
+            "attributes": null,
+            "name": "PaguroB",
+            "note": "boot-services only: never visible to an OS",
+            "present": false,
+            "size": null,
+            "size_ok": null,
+            "value": null
+          },
+          {
+            "attributes": 7,
+            "name": "PaguroConfigHash",
+            "note": "SHA-256 of paguro.ini",
+            "present": true,
+            "size": 32,
+            "size_ok": true,
+            "value": "8c1773436e2421fd6ac42ab53657102560528e02caf5690a90c9f347c2b7f920"
+          },
+          {
+            "attributes": null,
+            "name": "PaguroSetup",
+            "note": "S, one-shot setupTPM secret: written by `paguro stage-setup` only",
+            "present": false,
+            "size": null,
+            "size_ok": null,
+            "value": null
+          },
+          {
+            "attributes": null,
+            "name": "PaguroTpmBroken",
+            "note": "set by the loader when the TPM seal failed",
+            "present": false,
+            "size": null,
+            "size_ok": null,
+            "value": null
+          },
+          {
+            "attributes": null,
+            "name": "PaguroUninstall",
+            "note": "uninstall request: the loader deletes PaguroB on the next boot",
+            "present": false,
+            "size": null,
+            "size_ok": null,
+            "value": null
+          },
+          {
+            "attributes": null,
+            "name": "PaguroBootstrap",
+            "note": "first-boot payload (wrapped VMK): written by install / repair --bootstrap, deleted by the loader",
+            "present": false,
+            "size": null,
+            "size_ok": null,
+            "value": null
+          }
+        ]
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "PaguroB            absent",
+        "PaguroConfigHash   8c1773436e2421fd6ac42ab53657102560528e02caf5690a90c9f347c2b7f920",
+        "PaguroSetup        absent",
+        "PaguroTpmBroken    absent",
+        "PaguroUninstall    absent",
+        "PaguroBootstrap    absent"
+      ],
+      "warnings": []
+    }
+  }
+}

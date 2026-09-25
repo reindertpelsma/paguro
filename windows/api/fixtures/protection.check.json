@@ -1,0 +1,31 @@
+{
+  "method": "protection.check",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "protection.check",
+    "params": {
+      "keyboard": "fr",
+      "pin": "azerty"
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "keyboard": "fr",
+        "length": 6,
+        "ok": true,
+        "refused": []
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "every character can be typed at boot (French)"
+      ],
+      "warnings": []
+    }
+  }
+}

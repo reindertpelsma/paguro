@@ -1,0 +1,28 @@
+{
+  "method": "efi.boot-entry.create",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "efi.boot-entry.create",
+    "params": {
+      "dry_run": true
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "changed": true,
+        "entry": "Boot0001"
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "Boot0001: paguro entry written, in BootOrder"
+      ],
+      "warnings": []
+    }
+  }
+}

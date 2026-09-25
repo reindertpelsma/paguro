@@ -1,0 +1,30 @@
+{
+  "method": "distro.leave",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "distro.leave",
+    "params": {
+      "dry_run": true,
+      "name": null,
+      "path": "C:\\paguro\\debian.vhd"
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "detached": false,
+        "path": "C:\\paguro\\debian.vhd"
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "would detach C:\\paguro\\debian.vhd from WSL2"
+      ],
+      "warnings": []
+    }
+  }
+}

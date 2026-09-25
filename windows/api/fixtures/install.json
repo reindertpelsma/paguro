@@ -1,0 +1,96 @@
+{
+  "method": "install",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "install",
+    "params": {
+      "distro": "fedora",
+      "dry_run": true,
+      "finish": false,
+      "iso": "C:\\iso\\fedora.iso",
+      "loader": null,
+      "mm": null,
+      "mok_cert": null,
+      "path": "C:\\paguro\\fedora.vhd",
+      "script": null,
+      "shell": false,
+      "shim": null,
+      "size": "32G",
+      "source": "iso",
+      "wsl_distro": null,
+      "yes": false
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "args": {
+          "distro": "fedora",
+          "iso": "C:\\iso\\fedora.iso",
+          "mok_cert": null,
+          "path": "C:\\paguro\\fedora.vhd",
+          "script": null,
+          "size": "32G",
+          "source": "iso",
+          "wsl_distro": null
+        },
+        "steps": [
+          {
+            "id": "host",
+            "state": "pending"
+          },
+          {
+            "id": "hw-export",
+            "state": "pending"
+          },
+          {
+            "id": "disk",
+            "state": "pending"
+          },
+          {
+            "id": "wsl-mount",
+            "state": "pending"
+          },
+          {
+            "id": "build",
+            "state": "pending"
+          },
+          {
+            "id": "wsl-unmount",
+            "state": "pending"
+          },
+          {
+            "id": "esp",
+            "state": "pending"
+          },
+          {
+            "id": "mok",
+            "state": "pending"
+          },
+          {
+            "id": "bootstrap",
+            "state": "pending"
+          }
+        ]
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "would run: host",
+        "would run: hw-export",
+        "would run: disk",
+        "would run: wsl-mount",
+        "would run: build",
+        "would run: wsl-unmount",
+        "would run: esp",
+        "would run: mok",
+        "would run: bootstrap"
+      ],
+      "warnings": []
+    }
+  }
+}

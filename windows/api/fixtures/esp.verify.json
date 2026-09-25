@@ -1,0 +1,55 @@
+{
+  "method": "esp.verify",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "esp.verify",
+    "params": {}
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "files": [
+          {
+            "actual_sha256": "ba417bd182f165e34b331b2a21cf37c060935da70026a5cb3c2a8f36c9d1f58e",
+            "expected_sha256": "ba417bd182f165e34b331b2a21cf37c060935da70026a5cb3c2a8f36c9d1f58e",
+            "name": "shimx64.efi",
+            "state": "ok"
+          },
+          {
+            "actual_sha256": "122e916b7f235eb12dd1c70a046b8885a1315e65955007d6366bfbb7c757b495",
+            "expected_sha256": "122e916b7f235eb12dd1c70a046b8885a1315e65955007d6366bfbb7c757b495",
+            "name": "mmx64.efi",
+            "state": "ok"
+          },
+          {
+            "actual_sha256": "cc92e84d07a02bb987571286c9498c150615779ceaa8e14a7b8b31e0b66971fa",
+            "expected_sha256": "cc92e84d07a02bb987571286c9498c150615779ceaa8e14a7b8b31e0b66971fa",
+            "name": "paguro.efi",
+            "state": "ok"
+          },
+          {
+            "actual_sha256": "cc92e84d07a02bb987571286c9498c150615779ceaa8e14a7b8b31e0b66971fa",
+            "expected_sha256": "cc92e84d07a02bb987571286c9498c150615779ceaa8e14a7b8b31e0b66971fa",
+            "name": "grubx64.efi",
+            "state": "ok"
+          }
+        ],
+        "volumes": []
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "shimx64.efi      Ok",
+        "mmx64.efi        Ok",
+        "paguro.efi       Ok",
+        "grubx64.efi      Ok",
+        "the ESP matches what was installed"
+      ],
+      "warnings": []
+    }
+  }
+}
