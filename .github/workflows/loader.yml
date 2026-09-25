@@ -97,7 +97,9 @@ jobs:
 
   bde:
     name: BitLocker reader = libbde = dislocker (INTERFACES §12.2)
-    runs-on: ubuntu-24.04
+    # 26.04 for the oracles: 24.04's libbde (20190102) cannot open XTS-256
+    # or partially encrypted volumes, and its dislocker crashes on several.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

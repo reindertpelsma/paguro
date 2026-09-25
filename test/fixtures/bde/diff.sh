@@ -18,6 +18,9 @@
 # metadata-level fixtures `cargo test` uses) from the live oracles.
 #
 # Needs: libbde-utils, dislocker, ntfs-3g, FUSE, xz, cargo, curl (optional).
+# The oracles must be Ubuntu 26.04's or newer (libbde 20240502, dislocker
+# 0.7.3+git20250907): 24.04's libbde 20190102 cannot open XTS-256 or
+# partially encrypted volumes and its dislocker crashes on several of these.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -42,15 +45,24 @@ pass() { echo "  ok   $*"; }
 fail() { echo "  FAIL $*"; fails=$((fails + 1)); }
 sha() { sha256sum < "$1" | cut -c1-64; }
 
-# bdeinfo's view, normalised to the manifest's key=value lines.
+# bdeinfo's view, normalised to the manifest's key=value lines. The volume
+# fields come out in ours_fields' order whatever order bdeinfo prints them
+# in (20190102, Ubuntu 24.04's, prints the method before the identifier;
+# 20240502 after); protectors keep bdeinfo's order, which is the metadata's.
 bdeinfo_fields() { # image [bdeinfo key options...]
   local img=$1; shift
   bdeinfo "$@" "$img" </dev/null 2>/dev/null | awk -F'\t+: ' '
-    /Volume identifier/ {print "volume_id=" $2}
-    /Encryption method/ {print "method=" $2}
-    /^\tDescription/ {print "description=" $2}
+    /Volume identifier/ {vid=$2; hv=1}
+    /Encryption method/ {meth=$2; hm=1}
+    /^\tDescription/ {desc=$2; hd=1}
     /^\tIdentifier/ {id=$2}
-    /^\tType/ {print "protector=" $2 " " id}' || true
+    /^\tType/ {prot = prot "protector=" $2 " " id "\n"}
+    END {
+      if (hv) print "volume_id=" vid
+      if (hm) print "method=" meth
+      if (hd) print "description=" desc
+      printf "%s", prot
+    }' || true
 }
 ours_fields() { # image
   "$R" --input "$1" --info | awk -F'\t: ' '
