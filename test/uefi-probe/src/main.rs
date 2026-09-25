@@ -20,12 +20,28 @@ use alloc::string::String;
 use core::fmt::Write;
 
 use paguro_core::guid::HANDOFF_TABLE;
-use paguro_core::handoff::{self, MAX_LEN};
+use paguro_core::handoff::{self, HEADER_LEN, MAX_LEN};
 use uefi::boot;
 use uefi::prelude::*;
 use uefi::proto::device_path::text::{AllowShortcuts, DisplayOnly};
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::file::{File, FileAttribute, FileMode};
+
+/// The handoff blob's header (INTERFACES.md §1), layout only: never
+/// instantiated, only measured with `offset_of!`.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct HandoffHeader {
+    magic: [u8; 8],
+    total_len: u32,
+    record_count: u16,
+    reserved: u16,
+}
+const TOTAL_LEN_AT: usize = core::mem::offset_of!(HandoffHeader, total_len);
+const _: () = assert!(core::mem::size_of::<HandoffHeader>() == HEADER_LEN && TOTAL_LEN_AT == 8);
+
+/// Room for `\probe.txt`.
+const PROBE_TXT_MAX: usize = 512;
 
 macro_rules! say {
     ($($t:tt)*) => {{
@@ -71,7 +87,7 @@ fn own_fat(h: Handle) {
         say!("\\probe.txt is not a file");
         return;
     };
-    let mut buf = [0u8; 512];
+    let mut buf = [0u8; PROBE_TXT_MAX];
     match f.read(&mut buf) {
         Ok(n) => {
             let text = core::str::from_utf8(buf.get(..n).unwrap_or(&[])).unwrap_or("(not UTF-8)");
@@ -95,12 +111,12 @@ fn handoff() {
     // SAFETY: paguro published a blob starting with the 16-byte header; the
     // total length is read from it and bounded before the whole is read.
     let blob = unsafe {
-        let hdr = core::slice::from_raw_parts(p, 16);
+        let hdr = core::slice::from_raw_parts(p, HEADER_LEN);
         let total = hdr
-            .get(8..12)
+            .get(TOTAL_LEN_AT..TOTAL_LEN_AT + size_of::<u32>())
             .and_then(|b| b.try_into().ok())
             .map_or(0, |b| u32::from_le_bytes(b) as usize);
-        if !(16..=MAX_LEN).contains(&total) {
+        if !(HEADER_LEN..=MAX_LEN).contains(&total) {
             say!("handoff length {total} out of range");
             return;
         }
