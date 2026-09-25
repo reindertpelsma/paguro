@@ -120,6 +120,11 @@ public abstract class PaguroCmdlet : PSCmdlet
 
     SecureString? Ask(NeedsInput ni)
     {
+        // Nobody to ask (a script, CI, a redirected stdin): fail with the
+        // needs_input error instead of reading from a pipe that has no answer.
+        if (Console.IsInputRedirected || !Environment.UserInteractive
+            || Environment.GetCommandLineArgs().Any(a => a.Equals("-NonInteractive", StringComparison.OrdinalIgnoreCase)))
+            return null;
         try
         {
             Host.UI.Write($"{ni.Prompt}: ");
