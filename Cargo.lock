@@ -656,8 +656,11 @@ dependencies = [
 name = "paguro-initrd"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "paguro-core",
  "paguro-crypto",
+ "sha2",
+ "zeroize",
 ]
 
 [[package]]
