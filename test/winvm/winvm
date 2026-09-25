@@ -1,0 +1,717 @@
+#!/usr/bin/env python3
+"""winvm: a local Windows 11 test VM for paguro (QEMU/KVM, OVMF, swtpm).
+
+See README.md next to this file. State lives in $WINVM_DIR (default
+/data/paguro-work/winvm), never in the repo: the Windows image is an
+evaluation copy for local testing only and must not be committed or uploaded.
+"""
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+WINVM_DIR = os.environ.get("WINVM_DIR", "/data/paguro-work/winvm")
+RUN = os.path.join(WINVM_DIR, "run")
+KEY = os.path.join(WINVM_DIR, "keys", "id_ed25519")
+SSH_PORT = int(os.environ.get("WINVM_SSH_PORT", "2222"))
+MEM = os.environ.get("WINVM_MEM", "8G")      # hard cap: 8G / 4 vCPUs
+CPUS = os.environ.get("WINVM_CPUS", "4")
+SCOPE_MEMORY_MAX = "10G"
+
+# Windows 11 Enterprise 25H2 evaluation, x64 en-US: the Evaluation Center's
+# en-US link (fwlink 2334167 -> aka.ms/Win11E-ISO-25H2-en-us) and the SHA-256
+# from Microsoft's published Verify-Download-Win11-Enterprise.pdf.
+ISO_URL = ("https://software-static.download.prss.microsoft.com/dbazure/"
+           "888969d5-f34g-4e03-ac9d-1f9786c66749/26200.6584.250915-1905."
+           "25h2_ge_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso")
+ISO_SHA256 = "a61adeab895ef5a4db436e0a7011c92a2ff17bb0357f58b13bbc4062e535e7b9"
+
+# Installers put on the config ISO (host-side download, pinned by hash).
+PAYLOAD = [
+    ("dotnet-sdk-8.0.425-win-x64.exe",
+     "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.425/dotnet-sdk-8.0.425-win-x64.exe",
+     "sha512", "ebe1eb4d0d8c30cb7863586e9580bd51bfca8bbd0eece636941bd72e3136834c"
+               "6f82ffa0ad4d395d7a9996ecb045d2a3882035d3feeec8c99547d73cc66c9d97"),
+    ("OpenSSH-Win64.msi",
+     "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64-v10.0.0.0.msi",
+     "sha256", "ddec9c53864280759cf9f74791cefd387100e3946aa849a1c138a4ed1b96b7d9"),
+    # aka.ms "latest" link: not pinned by hash (Microsoft-signed, checked by Windows)
+    ("windowsappruntimeinstall-x64.exe",
+     "https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe", None, None),
+]
+
+OVMF_CODE_SB = "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd"
+OVMF_CODE_NOSB = "/usr/share/OVMF/OVMF_CODE_4M.fd"
+OVMF_VARS_MS = "/usr/share/OVMF/OVMF_VARS_4M.ms.fd"
+
+BASE = os.path.join(WINVM_DIR, "base.qcow2")
+BASE_VARS = os.path.join(WINVM_DIR, "base-vars.fd")
+# swtpm's AppArmor profile only lets it write under $HOME (and libvirt paths),
+# so its sockets, logs and the (tiny) TPM state live there, not in $WINVM_DIR.
+TPM_DIR = os.environ.get("WINVM_TPM_DIR", os.path.expanduser("~/.cache/winvm-swtpm"))
+BASE_TPM = os.path.join(TPM_DIR, "base-tpm")
+RUN_TPM = os.path.join(TPM_DIR, "run")
+
+
+def die(msg, code=1):
+    print(f"winvm: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def log(msg):
+    print(f"[winvm {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+# ---------------------------------------------------------------- QMP
+
+class QMP:
+    def __init__(self, path=None):
+        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.s.settimeout(120)
+        self.s.connect(path or os.path.join(RUN, "qmp.sock"))
+        self.f = self.s.makefile("rwb")
+        self._read()  # greeting
+        self.cmd("qmp_capabilities")
+
+    def _read(self):
+        while True:
+            line = self.f.readline()
+            if not line:
+                raise ConnectionError("QMP closed")
+            msg = json.loads(line)
+            if "event" not in msg:
+                return msg
+
+    def cmd(self, name, **args):
+        req = {"execute": name}
+        if args:
+            req["arguments"] = args
+        self.f.write(json.dumps(req).encode() + b"\n")
+        self.f.flush()
+        r = self._read()
+        if "error" in r:
+            raise RuntimeError(f"QMP {name}: {r['error'].get('desc')}")
+        return r.get("return")
+
+    def close(self):
+        # the makefile() object holds the fd open too; QEMU serves one QMP
+        # client at a time, so a half-closed socket blocks every later caller
+        self.f.close()
+        self.s.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+# ---------------------------------------------------------------- process state
+
+def read_pid(name, d=None):
+    try:
+        with open(os.path.join(d or RUN, name)) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+def running():
+    return read_pid("qemu.pid")
+
+
+def wait_pid_gone(pid, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+        time.sleep(1)
+    return False
+
+
+# ---------------------------------------------------------------- launch
+
+def qemu_argv(disk, vars_fd, secure_boot, cdroms=(), vnc=None, serial=None, paguro_vm=False):
+    code = OVMF_CODE_SB if secure_boot else OVMF_CODE_NOSB
+    machine = "q35,accel=kvm" + (",smm=on" if secure_boot else "")
+    a = ["qemu-system-x86_64", "-name", "winvm",
+         "-machine", machine,
+         "-cpu", "host,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_vpindex,hv_runtime,"
+                 "hv_synic,hv_stimer,hv_time,hv_frequencies,hv_reset",
+         "-smp", CPUS, "-m", MEM,
+         "-rtc", "base=utc,driftfix=slew",
+         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={code}",
+         "-drive", f"if=pflash,format=raw,unit=1,file={vars_fd}"]
+    if secure_boot:
+        a += ["-global", "driver=cfi.pflash01,property=secure,value=on"]
+    a += ["-chardev", f"socket,id=chrtpm,path={RUN_TPM}/swtpm.sock",
+          "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
+          "-device", "tpm-crb,tpmdev=tpm0",
+          # AHCI: inbox driver, TRIM passes through to the qcow2 (discard=unmap)
+          "-drive", f"if=none,id=disk0,file={disk},format=qcow2,discard=unmap,"
+                    "detect-zeroes=unmap,cache=writeback",
+          "-device", "ide-hd,drive=disk0,bus=ide.0,rotation_rate=1,bootindex=0"]
+    for i, cd in enumerate(cdroms):
+        if cd.startswith("https://"):
+            a += ["-blockdev", json.dumps({"driver": "https", "url": cd, "node-name": f"cdf{i}",
+                                           "read-only": True, "readahead": 64 << 20,
+                                           "timeout": 120}),
+                  "-blockdev", f"driver=raw,file=cdf{i},node-name=cd{i},read-only=on"]
+        else:
+            a += ["-blockdev", f"driver=file,filename={cd},node-name=cdf{i},read-only=on",
+                  "-blockdev", f"driver=raw,file=cdf{i},node-name=cd{i},read-only=on"]
+        a += ["-device", f"ide-cd,drive=cd{i},bus=ide.{i + 1},bootindex={i + 1}"]
+    a += ["-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{SSH_PORT}-:22",
+          "-device", "e1000e,netdev=n0",
+          "-device", "qemu-xhci,id=xhci", "-device", "usb-tablet,bus=xhci.0",
+          "-vga", "std", "-display", "none",
+          "-serial", f"file:{serial or os.path.join(RUN, 'serial.log')}",
+          "-qmp", f"unix:{RUN}/qmp.sock,server=on,wait=off",
+          "-pidfile", f"{RUN}/qemu.pid"]
+    if vnc is not None:
+        a += ["-vnc", f"127.0.0.1:{vnc}"]
+    if paguro_vm:
+        # the OEM string the minifilter looks for (windows/minifilter/README.md)
+        a += ["-smbios", "type=11,value=paguro-vm/1"]
+    return a
+
+
+def launch(disk, vars_fd, tpm_dir, secure_boot, cdroms=(), vnc=None, paguro_vm=False):
+    """Start swtpm + QEMU inside one transient systemd scope capped at 10G."""
+    if running():
+        die("a VM is already running (winvm stop first)")
+    os.makedirs(RUN, exist_ok=True)
+    os.makedirs(RUN_TPM, exist_ok=True)
+    for f in (f"{RUN}/qmp.sock", f"{RUN_TPM}/swtpm.sock", f"{RUN}/qemu.pid", f"{RUN_TPM}/swtpm.pid"):
+        try:
+            os.unlink(f)
+        except FileNotFoundError:
+            pass
+    swtpm = ["swtpm", "socket", "--tpm2", "--tpmstate", f"dir={tpm_dir}",
+             "--ctrl", f"type=unixio,path={RUN_TPM}/swtpm.sock", "--terminate",
+             "--daemon", "--pid", f"file={RUN_TPM}/swtpm.pid", "--log", f"file={RUN_TPM}/swtpm.log"]
+    qemu = qemu_argv(disk, vars_fd, secure_boot, cdroms, vnc, paguro_vm=paguro_vm)
+    q = lambda v: "'" + v.replace("'", "'\\''") + "'"
+    script = " ".join(map(q, swtpm)) + " && exec " + " ".join(map(q, qemu))
+    env = dict(os.environ, XDG_RUNTIME_DIR=os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+    unit = f"winvm-{int(time.time())}"
+    out = open(os.path.join(RUN, "qemu.log"), "ab")
+    subprocess.Popen(["systemd-run", "--user", "--scope", "--collect", "--unit", unit,
+                      "-p", f"MemoryMax={SCOPE_MEMORY_MAX}", "--", "sh", "-c", script],
+                     stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env,
+                     start_new_session=True)
+    end = time.time() + 30
+    while time.time() < end:
+        if running() and os.path.exists(os.path.join(RUN, "qmp.sock")):
+            log(f"VM up: pid {running()}, scope {unit}, ssh 127.0.0.1:{SSH_PORT}, "
+                f"secure boot {'on' if secure_boot else 'off'}")
+            return
+        time.sleep(0.5)
+    die(f"VM did not start; see {RUN}/qemu.log")
+
+
+# ---------------------------------------------------------------- ssh
+
+def ssh_base(tty=False):
+    return ["ssh", "-i", KEY, "-p", str(SSH_PORT), "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
+            "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=15"] + (["-t"] if tty else [])
+
+
+def ssh_run(cmd, check=False, capture=False, timeout=None):
+    r = subprocess.run(ssh_base() + ["paguro@127.0.0.1", cmd], text=True,
+                       capture_output=capture, timeout=timeout)
+    if check and r.returncode:
+        die(f"ssh {cmd!r} exited {r.returncode}")
+    return r
+
+
+def wait_ssh(timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        if not running():
+            die("VM exited while waiting for ssh")
+        try:
+            r = ssh_run("echo winvm-ready", capture=True, timeout=20)
+            if "winvm-ready" in r.stdout:
+                return True
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(3)
+    return False
+
+
+# ---------------------------------------------------------------- screen / input
+
+def screendump(path):
+    path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    qmp = QMP()
+    try:
+        qmp.cmd("screendump", filename=path, format="png")
+    finally:
+        qmp.close()
+    return path
+
+
+def png_size(path):
+    with open(path, "rb") as f:
+        head = f.read(24)
+    return struct.unpack(">II", head[16:24])
+
+
+KEY_ALIASES = {"win": "meta_l", "super": "meta_l", "meta": "meta_l", "enter": "ret",
+               "return": "ret", "del": "delete", "space": "spc", "escape": "esc",
+               "ctrl": "ctrl", "control": "ctrl", "pgup": "pgup", "pgdn": "pgdn"}
+PLAIN = {" ": "spc", "\n": "ret", "\t": "tab", "-": "minus", "=": "equal",
+         "[": "bracket_left", "]": "bracket_right", "\\": "backslash", ";": "semicolon",
+         "'": "apostrophe", "`": "grave_accent", ",": "comma", ".": "dot", "/": "slash"}
+SHIFTED = {"!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8",
+           "(": "9", ")": "0", "_": "minus", "+": "equal", "{": "bracket_left",
+           "}": "bracket_right", "|": "backslash", ":": "semicolon", '"': "apostrophe",
+           "~": "grave_accent", "<": "comma", ">": "dot", "?": "slash"}
+
+
+def char_keys(c):
+    if c.isascii() and c.isalpha():
+        return (["shift", c.lower()] if c.isupper() else [c])
+    if c.isascii() and c.isdigit():
+        return [c]
+    if c in PLAIN:
+        return [PLAIN[c]]
+    if c in SHIFTED:
+        return ["shift", SHIFTED[c]]
+    die(f"cannot type {c!r} (US layout, ASCII only)")
+
+
+def send_keys(qmp, keys, hold_ms=60):
+    qmp.cmd("send-key", keys=[{"type": "qcode", "data": k} for k in keys], **{"hold-time": hold_ms})
+
+
+def combo_keys(combo):
+    return [KEY_ALIASES.get(k.lower(), k.lower()) for k in combo.replace("+", "-").split("-") if k]
+
+
+def mouse_click(qmp, x, y, w, h, button="left", double=False):
+    ax = round(x * 0x7FFF / max(w - 1, 1))
+    ay = round(y * 0x7FFF / max(h - 1, 1))
+    qmp.cmd("input-send-event", events=[{"type": "abs", "data": {"axis": "x", "value": ax}},
+                                        {"type": "abs", "data": {"axis": "y", "value": ay}}])
+    time.sleep(0.05)
+    for _ in range(2 if double else 1):
+        for down in (True, False):
+            qmp.cmd("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": button}}])
+            time.sleep(0.05)
+
+
+def load_gray(path):
+    from PIL import Image
+    import numpy as np
+    return np.asarray(Image.open(path).convert("L"), dtype=np.float64)
+
+
+def find_template(img, tpl):
+    """Best match of tpl in img by mean squared difference (FFT correlation)."""
+    import numpy as np
+    H, W = img.shape
+    h, w = tpl.shape
+    if h > H or w > W:
+        return None, float("inf")
+    fs = (H + h, W + w)
+    corr = np.fft.irfft2(np.fft.rfft2(img, fs) * np.conj(np.fft.rfft2(tpl, fs)), fs)[:H - h + 1, :W - w + 1]
+    ii = np.pad(np.cumsum(np.cumsum(img * img, 0), 1), ((1, 0), (1, 0)))
+    win = ii[h:, w:] - ii[:-h, w:] - ii[h:, :-w] + ii[:-h, :-w]
+    mse = (win - 2 * corr + (tpl * tpl).sum()) / (h * w)
+    y, x = np.unravel_index(np.argmin(mse), mse.shape)
+    return (int(x), int(y)), float(mse[y, x])
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_start(a):
+    if not os.path.exists(BASE):
+        die(f"no base image at {BASE}; run `winvm build` first")
+    os.makedirs(RUN, exist_ok=True)
+    overlay = os.path.join(RUN, "overlay.qcow2")
+    vars_fd = os.path.join(RUN, "vars.fd")
+    tpm = os.path.join(RUN_TPM, "state")
+    fresh = not (a.keep and os.path.exists(overlay))
+    if fresh:
+        for p in (overlay, vars_fd):
+            if os.path.exists(p):
+                os.unlink(p)
+        shutil.rmtree(tpm, ignore_errors=True)
+        subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", BASE, overlay], check=True)
+        shutil.copyfile(BASE_VARS, vars_fd)
+        shutil.copytree(BASE_TPM, tpm)
+    log("fresh overlay" if fresh else "keeping previous overlay state")
+    launch(overlay, vars_fd, tpm, a.secure_boot, vnc=a.vnc, paguro_vm=a.paguro_vm)
+    if a.no_wait:
+        return
+    t0 = time.time()
+    if not wait_ssh(a.timeout):
+        die(f"ssh not reachable after {a.timeout}s (VM still running; winvm screenshot to look)")
+    log(f"ssh ready after {time.time() - t0:.0f}s")
+
+
+def cmd_stop(a):
+    pid = running()
+    if not pid:
+        log("not running")
+        return
+    try:
+        qmp = QMP()
+        qmp.cmd("quit" if a.force else "system_powerdown")
+        qmp.close()
+    except (OSError, RuntimeError, ConnectionError) as e:
+        log(f"QMP: {e}")
+    if not wait_pid_gone(pid, 5 if a.force else a.timeout):
+        log(f"qemu pid {pid} still alive after {a.timeout}s: SIGTERM")
+        os.kill(pid, signal.SIGTERM)
+        wait_pid_gone(pid, 10)
+    tpm = read_pid("swtpm.pid", RUN_TPM)
+    if tpm:
+        os.kill(tpm, signal.SIGTERM)
+    log("stopped")
+
+
+def cmd_status(a):
+    pid = running()
+    print(json.dumps({"running": bool(pid), "qemu_pid": pid, "ssh_port": SSH_PORT,
+                      "base": BASE if os.path.exists(BASE) else None, "dir": WINVM_DIR}))
+
+
+def cmd_ssh(a):
+    if not a.cmd:
+        os.execvp("ssh", ssh_base(tty=True) + ["paguro@127.0.0.1"])
+    sys.exit(ssh_run(" ".join(a.cmd)).returncode)
+
+
+def cmd_scp(a):
+    def conv(p):
+        return "paguro@127.0.0.1:" + p[1:] if p.startswith(":") else p
+    argv = ["scp", "-i", KEY, "-P", str(SSH_PORT), "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR"]
+    if a.recursive:
+        argv.append("-r")
+    sys.exit(subprocess.run(argv + [conv(a.src), conv(a.dst)]).returncode)
+
+
+def cmd_screenshot(a):
+    print(screendump(a.out))
+
+
+def cmd_type(a):
+    qmp = QMP()
+    for c in a.text + ("\n" if a.enter else ""):
+        send_keys(qmp, char_keys(c))
+        time.sleep(a.delay)
+    qmp.close()
+
+
+def cmd_key(a):
+    qmp = QMP()
+    for combo in a.combo:
+        send_keys(qmp, combo_keys(combo), a.hold)
+        time.sleep(0.1)
+    qmp.close()
+
+
+def cmd_click(a):
+    with tempfile.TemporaryDirectory() as d:
+        w, h = png_size(screendump(os.path.join(d, "s.png")))
+    qmp = QMP()
+    mouse_click(qmp, a.x, a.y, w, h, a.button, a.double)
+    qmp.close()
+
+
+def cmd_wait_screen(a):
+    """wait-screen <seconds>: wait until the screen stops changing.
+       wait-screen <template.png>: wait until the template appears."""
+    import numpy as np
+    try:
+        timeout, tpl = float(a.pattern), None
+    except ValueError:
+        timeout, tpl = a.timeout, load_gray(a.pattern)
+    end = time.time() + timeout
+    prev, stable_since = None, None
+    with tempfile.TemporaryDirectory() as d:
+        shot = os.path.join(d, "s.png")
+        while time.time() < end:
+            img = load_gray(screendump(shot))
+            if tpl is not None:
+                pos, mse = find_template(img, tpl)
+                if mse <= a.threshold:
+                    x, y = pos[0] + tpl.shape[1] // 2, pos[1] + tpl.shape[0] // 2
+                    print(f"{x} {y}")  # centre of the match, ready for `winvm click`
+                    return
+            else:
+                if prev is not None and prev.shape == img.shape and np.abs(prev - img).mean() < 0.05:
+                    stable_since = stable_since or time.time()
+                    if time.time() - stable_since >= a.stable:
+                        print("stable")
+                        return
+                else:
+                    stable_since = None
+                prev = img
+            time.sleep(1)
+    if a.out:
+        shutil.copyfile(shot, a.out)
+    die("wait-screen: timed out", 2)
+
+
+# ---------------------------------------------------------------- build
+
+def fetch_payload():
+    d = os.path.join(WINVM_DIR, "payload")
+    os.makedirs(d, exist_ok=True)
+    for name, url, algo, digest in PAYLOAD:
+        p = os.path.join(d, name)
+        if not os.path.exists(p):
+            log(f"downloading {name}")
+            urllib.request.urlretrieve(url, p + ".part")
+            os.rename(p + ".part", p)
+        if algo:
+            h = hashlib.new(algo)
+            with open(p, "rb") as f:
+                for b in iter(lambda: f.read(1 << 20), b""):
+                    h.update(b)
+            if h.hexdigest() != digest:
+                die(f"{name}: {algo} mismatch")
+    return d
+
+
+def verify_iso(src):
+    log(f"verifying ISO SHA-256 ({'streamed' if src.startswith('https://') else 'local'})")
+    h = hashlib.sha256()
+    f = urllib.request.urlopen(src) if src.startswith("https://") else open(src, "rb")
+    with f:
+        for b in iter(lambda: f.read(8 << 20), b""):
+            h.update(b)
+    if h.hexdigest() != ISO_SHA256:
+        die(f"ISO SHA-256 {h.hexdigest()} != published {ISO_SHA256}")
+    log("ISO SHA-256 matches Microsoft's published hash")
+
+
+def make_cfg_iso(out):
+    with open(os.path.join(WINVM_DIR, "keys", "password")) as f:
+        password = f.read().strip()
+    with tempfile.TemporaryDirectory() as st:
+        with open(os.path.join(HERE, "autounattend.xml")) as f:
+            xml = f.read().replace("@PASSWORD@", password)
+        with open(os.path.join(st, "autounattend.xml"), "w") as f:
+            f.write(xml)
+        shutil.copy(os.path.join(HERE, "winvm-setup.ps1"), st)
+        shutil.copy(KEY + ".pub", os.path.join(st, "authorized_keys"))
+        shutil.copytree(fetch_payload(), os.path.join(st, "payload"))
+        subprocess.run(["genisoimage", "-quiet", "-J", "-r", "-joliet-long", "-V", "WINVMCFG",
+                        "-o", out, st], check=True)
+
+
+def ensure_secrets():
+    k = os.path.join(WINVM_DIR, "keys")
+    os.makedirs(k, exist_ok=True)
+    if not os.path.exists(KEY):
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "winvm-paguro", "-f", KEY], check=True)
+    pw = os.path.join(k, "password")
+    if not os.path.exists(pw):
+        import secrets
+        with open(pw, "w") as f:
+            f.write("Pg-" + secrets.token_urlsafe(12) + "\n")
+        os.chmod(pw, 0o600)
+
+
+def watch_install(t0, timeout):
+    logs = os.path.join(WINVM_DIR, "logs")
+    pid, n = running(), 0
+    while pid and not wait_pid_gone(pid, 60):
+        n += 1
+        if time.time() - t0 > timeout:
+            die("install timed out (VM left running; winvm screenshot / winvm stop)")
+        try:
+            screendump(os.path.join(logs, "build-latest.png"))
+        except (OSError, RuntimeError, ConnectionError):
+            pass
+        if n % 5 == 0:
+            try:
+                with open(os.path.join(RUN, "serial.log"), errors="replace") as f:
+                    tail = [l for l in f.read().splitlines() if "winvm-setup" in l][-1:]
+            except FileNotFoundError:
+                tail = []
+            log(f"installing, {(time.time() - t0) / 60:.0f} min {tail[0] if tail else ''}")
+
+
+def cmd_build(a):
+    if os.path.exists(BASE) and not a.force:
+        die(f"{BASE} exists (use --force to rebuild)")
+    logs = os.path.join(WINVM_DIR, "logs")
+    os.makedirs(logs, exist_ok=True)
+    os.makedirs(RUN, exist_ok=True)
+    vars_fd, tpm = BASE_VARS + ".tmp", BASE_TPM + ".tmp"
+    # the image being installed; --resume --disk names another top of the
+    # chain (e.g. after a live blockdev-snapshot to a disk with more room)
+    disk = a.disk or BASE + ".tmp"
+    t0 = time.time()
+    if a.resume:
+        log("resuming after phase 1" + (" (waiting for the running install)" if running() else ""))
+        watch_install(t0, a.timeout)
+    else:
+        if running():
+            die("a VM is running")
+        ensure_secrets()
+        if not a.skip_verify:
+            verify_iso(a.iso)
+        cfg = os.path.join(RUN, "cfg.iso")
+        make_cfg_iso(cfg)
+        for p in (disk, vars_fd):
+            if os.path.exists(p):
+                os.unlink(p)
+        shutil.rmtree(tpm, ignore_errors=True)
+        os.makedirs(tpm)
+        subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-o", "cluster_size=64k,lazy_refcounts=on",
+                        disk, a.disk_size], check=True)
+        shutil.copyfile(OVMF_VARS_MS, vars_fd)
+        # phase 1: Secure Boot on, install + first-logon setup, which powers off
+        launch(disk, vars_fd, tpm, secure_boot=True, cdroms=[a.iso, cfg], vnc=a.vnc)
+        with QMP() as qmp:
+            end = time.time() + 45   # "Press any key to boot from CD or DVD..."
+            while time.time() < end:
+                send_keys(qmp, ["ret"])
+                time.sleep(0.7)
+        watch_install(t0, a.timeout)
+    t1 = time.time()
+    log(f"phase 1 (install + setup) finished after {(t1 - t0) / 60:.1f} min")
+    try:
+        shutil.copyfile(os.path.join(RUN, "serial.log"), os.path.join(logs, "build-serial.log"))
+    except FileNotFoundError:
+        pass
+
+    # phase 2: Secure Boot off (testsigning is refused under SB), set testsigning
+    launch(disk, vars_fd, tpm, secure_boot=False, vnc=a.vnc)
+    if not wait_ssh(900):
+        die("phase 2: ssh never came up")
+    ssh_run("bcdedit /set testsigning on", check=True)
+    ssh_run("type C:\\winvm\\setup.log")
+    pid = running()
+    ssh_run("shutdown /s /t 0")
+    if not wait_pid_gone(pid, 300):
+        die("phase 2: VM did not power off")
+    log(f"phase 2 finished in {(time.time() - t1) / 60:.1f} min")
+
+    # one self-contained, compressed base image (zero clusters dropped)
+    log("writing the compressed base image")
+    subprocess.run(["qemu-img", "convert", "-c", "-p", "-O", "qcow2", "-o", "cluster_size=64k",
+                    disk, BASE + ".new"], check=True)
+    if os.path.exists(BASE):
+        os.chmod(BASE, 0o644)
+    os.replace(BASE + ".new", BASE)
+    os.chmod(BASE, 0o444)
+    os.replace(vars_fd, BASE_VARS)
+    shutil.rmtree(BASE_TPM, ignore_errors=True)
+    os.replace(tpm, BASE_TPM)
+    if disk == BASE + ".tmp":
+        os.unlink(os.path.realpath(disk))
+        if os.path.islink(disk):
+            os.unlink(disk)
+    else:
+        log(f"left the install chain ({disk} and its backing files) for you to delete")
+    log(f"base image ready: {BASE} ({os.path.getsize(BASE) / 2**30:.1f} GiB), "
+        f"total {(time.time() - t0) / 60:.1f} min")
+
+
+# ---------------------------------------------------------------- main
+
+def main():
+    p = argparse.ArgumentParser(prog="winvm", description=__doc__.splitlines()[0])
+    sp = p.add_subparsers(dest="command", required=True)
+
+    b = sp.add_parser("build", help="install the base image (unattended)")
+    b.add_argument("--iso", default=ISO_URL, help="ISO path or https URL (default: streamed from Microsoft)")
+    b.add_argument("--skip-verify", action="store_true")
+    b.add_argument("--disk-size", default="80G")
+    b.add_argument("--timeout", type=int, default=3 * 3600)
+    b.add_argument("--force", action="store_true")
+    b.add_argument("--resume", action="store_true",
+                   help="skip the install: wait for a running phase 1, then finish")
+    b.add_argument("--disk", help="with --resume: the image to finish (default base.qcow2.tmp)")
+    b.add_argument("--vnc", type=int, metavar="DISPLAY")
+    b.set_defaults(fn=cmd_build)
+
+    s = sp.add_parser("start", help="boot from a fresh overlay of the base image")
+    s.add_argument("--keep", action="store_true", help="reuse the previous overlay (keep state)")
+    s.add_argument("--secure-boot", action="store_true",
+                   help="enforce Secure Boot (testsigning then has no effect)")
+    s.add_argument("--vnc", type=int, metavar="DISPLAY", help="also serve VNC on 127.0.0.1:590N")
+    s.add_argument("--paguro-vm", action="store_true",
+                   help="add the SMBIOS type 11 'paguro-vm/1' marker (minifilter loads active)")
+    s.add_argument("--no-wait", action="store_true", help="do not wait for ssh")
+    s.add_argument("--timeout", type=int, default=600)
+    s.set_defaults(fn=cmd_start)
+
+    s = sp.add_parser("stop", help="ACPI power-off (then quit, then SIGTERM the qemu pid)")
+    s.add_argument("--force", action="store_true", help="QMP quit immediately")
+    s.add_argument("--timeout", type=int, default=120)
+    s.set_defaults(fn=cmd_stop)
+
+    sp.add_parser("status").set_defaults(fn=cmd_status)
+
+    s = sp.add_parser("ssh", help="run a command (cmd.exe) as paguro, or an interactive shell")
+    s.add_argument("cmd", nargs=argparse.REMAINDER)
+    s.set_defaults(fn=cmd_ssh)
+
+    s = sp.add_parser("scp", help="copy files; prefix the guest side with ':' (e.g. :C:/winvm/)")
+    s.add_argument("-r", "--recursive", action="store_true")
+    s.add_argument("src")
+    s.add_argument("dst")
+    s.set_defaults(fn=cmd_scp)
+
+    s = sp.add_parser("screenshot", help="QMP screendump to PNG")
+    s.add_argument("out")
+    s.set_defaults(fn=cmd_screenshot)
+
+    s = sp.add_parser("type", help="type ASCII text (US layout)")
+    s.add_argument("text")
+    s.add_argument("--enter", action="store_true", help="press Enter afterwards")
+    s.add_argument("--delay", type=float, default=0.03)
+    s.set_defaults(fn=cmd_type)
+
+    s = sp.add_parser("key", help="press key combos, e.g. ctrl-alt-delete win-r alt-f4 ret")
+    s.add_argument("combo", nargs="+")
+    s.add_argument("--hold", type=int, default=80, help="hold time in ms")
+    s.set_defaults(fn=cmd_key)
+
+    s = sp.add_parser("click", help="click at screen pixel x y (usb-tablet)")
+    s.add_argument("x", type=int)
+    s.add_argument("y", type=int)
+    s.add_argument("--button", default="left", choices=["left", "right", "middle"])
+    s.add_argument("--double", action="store_true")
+    s.set_defaults(fn=cmd_click)
+
+    s = sp.add_parser("wait-screen", help="<seconds>: wait for a still screen; <tpl.png>: wait for a match")
+    s.add_argument("pattern")
+    s.add_argument("--timeout", type=float, default=300, help="for a template (default 300 s)")
+    s.add_argument("--stable", type=float, default=5, help="seconds unchanged counted as still")
+    s.add_argument("--threshold", type=float, default=150.0, help="max mean squared difference for a match")
+    s.add_argument("--out", help="save the last screenshot here on timeout")
+    s.set_defaults(fn=cmd_wait_screen)
+
+    a = p.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()
