@@ -253,6 +253,7 @@ proptest! {
                 boot_sector_reloc_sectors: s,
                 encrypted_size: e,
                 sector_size: 512,
+                extra_region_offset: 0,
             }),
             b: &b,
             pcrs: Pcrs { mask, values: &pcrv },

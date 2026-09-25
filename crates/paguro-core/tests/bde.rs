@@ -58,6 +58,24 @@ fn vhb(off: u64, len: u64) -> Vec<u8> {
     entry(entry::VOLUME_HEADER_BLOCK, value::OFFSET_AND_SIZE, &d)
 }
 
+/// The volume-header entry as Windows 10+ writes it: offset and size, then
+/// a 76-byte structure (`u16 5 | u16 76 | … | offset u64 | size u64`).
+fn vhb_win10(off: u64, len: u64, extra: u64, extra_len: u64) -> Vec<u8> {
+    let mut d = off.to_le_bytes().to_vec();
+    d.extend(len.to_le_bytes());
+    d.extend(extra_struct(76, extra, extra_len));
+    entry(entry::VOLUME_HEADER_BLOCK, value::OFFSET_AND_SIZE, &d)
+}
+
+fn extra_struct(n: usize, extra: u64, extra_len: u64) -> Vec<u8> {
+    let mut x = 5u16.to_le_bytes().to_vec();
+    x.extend((n as u16).to_le_bytes());
+    x.resize(n - 16, 0x11);
+    x.extend(extra.to_le_bytes());
+    x.extend(extra_len.to_le_bytes());
+    x
+}
+
 #[derive(Clone, Debug)]
 struct V {
     bps: u16,
@@ -212,8 +230,11 @@ fn a_well_formed_volume_parses() {
     assert_eq!(h.boot_sector_reloc_offset, 17 * MB);
     assert_eq!(h.boot_sector_reloc_sectors, 16);
     assert_eq!(h.encrypted_size, 64 * MB);
+    assert_eq!(m.extra_region, None);
+    assert_eq!(l.extra_region, None);
+    assert_eq!(h.extra_region_offset, 0);
     assert_eq!(
-        l.reserved_ranges(),
+        l.reserved_ranges().collect::<Vec<_>>(),
         [
             (0, 16),
             (17 * MB / 512, 16),
@@ -753,6 +774,108 @@ fn layout_refusals() {
     assert_eq!(full(&v).unwrap().units(), 64 * MB / 4096);
 }
 
+#[test]
+fn the_windows_10_region_is_reserved_not_hidden() {
+    let mut v = V::new();
+    let n = v.entries.len();
+    v.entries.truncate(n - 24);
+    let extra = v.reloc + 8192;
+    v.entries
+        .extend(vhb_win10(v.reloc, 8192, extra, REGION_SIZE));
+    let hdr = v.header();
+    let r = v.region();
+    let m = Metadata::parse(cross_check([&r, &r, &r], &hdr).unwrap()).unwrap();
+    assert_eq!(m.volume_header, (17 * MB, 8192));
+    assert_eq!(m.extra_region, Some((extra, REGION_SIZE)));
+    let l = Layout::new(&hdr, &m, v.size).unwrap();
+    assert_eq!(l.extra_region, Some(extra));
+    assert_eq!(l.fve_layout().extra_region_offset, extra);
+    let rr: Vec<_> = l.reserved_ranges().collect();
+    assert_eq!(rr.len(), 6);
+    assert_eq!(rr[5], (extra / 512, 128));
+    // Readers (libbde, dislocker, cryptsetup) do not hide it: neither does
+    // the map.
+    let u = extra / 512;
+    assert_eq!(
+        l.map(u).unwrap().0,
+        Source::Disk {
+            unit: u,
+            encrypted: true
+        }
+    );
+    // Extents meeting it (half-open, 512-byte sectors) are caught.
+    let ext = |s: u64, e: u64| paguro_core::range::Extent { start: s, end: e };
+    assert!(l.overlaps_reserved(&[ext(u + 127, u + 200)]));
+    assert!(l.overlaps_reserved(&[ext(1, 2), ext(u + 64, u + 65)]));
+    assert!(!l.overlaps_reserved(&[ext(u + 128, u + 200)]));
+    // Without the region, the same extents are data.
+    let mut plain = l;
+    plain.extra_region = None;
+    assert!(!plain.overlaps_reserved(&[ext(u + 64, u + 200)]));
+}
+
+#[test]
+fn windows_10_region_refusals() {
+    let with = |entry: Vec<u8>| {
+        let mut v = V::new();
+        let n = v.entries.len();
+        v.entries.truncate(n - 24);
+        v.entries.extend(entry);
+        v
+    };
+    let reloc = 17 * MB;
+    let raw = |extra: &[u8]| {
+        let mut d = reloc.to_le_bytes().to_vec();
+        d.extend(8192u64.to_le_bytes());
+        d.extend(extra);
+        entry(entry::VOLUME_HEADER_BLOCK, value::OFFSET_AND_SIZE, &d)
+    };
+    // Malformed structures: a parse refusal.
+    let mut short_len = extra_struct(76, reloc + 8192, REGION_SIZE);
+    short_len[2] = 75;
+    for bad in [
+        vec![5u8],
+        vec![5, 0, 3, 0],
+        extra_struct(24, reloc + 8192, REGION_SIZE)[..23].to_vec(),
+        short_len,
+        {
+            let mut x = extra_struct(76, reloc + 8192, REGION_SIZE);
+            x.push(0);
+            x
+        },
+    ] {
+        assert_eq!(meta_err(&with(raw(&bad))), BdeError::ExtraRegion, "{bad:?}");
+    }
+    // The smallest accepted structure.
+    let v = with(raw(&extra_struct(24, reloc + 8192, REGION_SIZE)));
+    assert_eq!(full(&v).unwrap().extra_region, Some(reloc + 8192));
+    // Well-formed, but not one aligned 64 KiB region inside the volume.
+    for (o, l) in [
+        (reloc + 8192, 0x2000),
+        (reloc + 8192, 0),
+        (reloc + 8192 + 1, REGION_SIZE),
+        (0, REGION_SIZE),
+        (64 * MB - 4096, REGION_SIZE),
+        (u64::MAX - 100, REGION_SIZE),
+    ] {
+        assert_eq!(
+            full(&with(vhb_win10(reloc, 8192, o, l))).err(),
+            Some(BdeError::ExtraRegion),
+            "{o:#x}+{l:#x}"
+        );
+    }
+    // Over another non-data region.
+    for o in [reloc, 16 * MB + 4096, 48 * MB - 512, 4096] {
+        assert_eq!(
+            full(&with(vhb_win10(reloc, 8192, o, REGION_SIZE))).err(),
+            Some(BdeError::Overlap),
+            "{o:#x}"
+        );
+    }
+    // Directly after the relocated copy (as Windows puts it): fine.
+    assert!(full(&with(vhb_win10(reloc, 8192, reloc + 8192, REGION_SIZE))).is_ok());
+}
+
 /// The map, by brute force: what each unit of the decrypted view is.
 fn model(l: &Layout, unit: u64) -> Source {
     let bps = u64::from(l.bytes_per_sector);
@@ -861,6 +984,10 @@ proptest! {
         let _ = parse_key(&b);
         let _ = parse_startup_key(&b);
         let _ = Ccm::parse(&b);
+        if let Ok(Some((o, l))) = parse_extra_region(&b) {
+            prop_assert_eq!(usize::from(u16::from_le_bytes([b[2], b[3]])), b.len());
+            prop_assert_eq!(&b[b.len() - 16..], &[o.to_le_bytes(), l.to_le_bytes()].concat()[..]);
+        }
         for e in Entries::new(&b, MAX_ENTRIES) {
             let _ = e;
         }

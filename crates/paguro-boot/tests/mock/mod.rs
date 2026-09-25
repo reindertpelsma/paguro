@@ -507,6 +507,7 @@ impl<P: Platform> Volume<P> for FakeVolume {
             boot_sector_reloc_sectors: 16,
             encrypted_size: 1 << 30,
             sector_size: 512,
+            extra_region_offset: 0,
         })
     }
     fn recovery_key(&mut self, _: &mut P, key: &[u8; 16]) -> Result<Option<Key>, BootError> {

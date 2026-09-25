@@ -439,6 +439,106 @@ fn listings_come_from_the_volume() {
     );
 }
 
+/// An efi disk whose extents meet a BitLocker reserved range is never
+/// published — including the Windows 10+ region beside the metadata, which
+/// the decrypted view does not hide. Stage 4 is driven directly over the
+/// plain NTFS with a synthetic layout, so the extents are real `ntfs-3g`
+/// ones and only the region's position is chosen.
+#[test]
+fn a_disk_over_the_windows_10_region_is_refused() {
+    // Stage4 and Located are built on the stack before boxing.
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(disk_over_the_windows_10_region)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn disk_over_the_windows_10_region() {
+    use paguro_boot::stage4::Stage4;
+    use paguro_boot::volume::Located;
+    use paguro_core::bde::{Cipher, Layout};
+    use paguro_core::config::{DEFAULT_EFI, Efi, Entry};
+
+    let d = tmp("reserved");
+    let Some(vhd) = payload_vhd(&d, b"MZ-probe") else {
+        return;
+    };
+    let Some(b) = build("reserved", move |m| {
+        std::fs::create_dir_all(m.join("paguro")).unwrap();
+        std::fs::write(m.join("paguro/linux.vhd"), &vhd).unwrap();
+    }) else {
+        return;
+    };
+    let mut m = mock(b.disk.clone(), Some("root = \\paguro\\linux.vhd"));
+    assert_eq!(run(&mut m), Outcome::Started(Rung::Unencrypted));
+    let ext = m.exposed[0].extents.clone();
+    let part = m.exposed[0].part;
+    let volume_size = part.sectors * 512;
+    // Reserved ranges the file does not meet, in 64 KiB slots.
+    let meets = |o: u64| {
+        let (s, e) = (o / 512, (o + 0x1_0000) / 512);
+        ext.iter().any(|x| x.start < e && s < x.end)
+    };
+    let mut free = (1..volume_size / 0x1_0000 - 1)
+        .map(|i| i * 0x1_0000)
+        .filter(|&o| !meets(o));
+    let mut layout = Layout {
+        bytes_per_sector: 512,
+        volume_size,
+        metadata_offsets: [
+            free.next().unwrap(),
+            free.next().unwrap(),
+            free.next().unwrap(),
+        ],
+        reloc_len: 8192,
+        reloc_offset: free.next().unwrap(),
+        extra_region: None,
+        encrypted_size: volume_size,
+        cipher: Cipher::XtsAes128,
+        partial: false,
+    };
+    let entry = Entry {
+        name: "linux",
+        volume: part.guid,
+        root: Some("\\paguro\\linux.vhd"),
+        efi: Efi::Disk {
+            disk: "\\paguro\\linux.vhd",
+            path: DEFAULT_EFI,
+        },
+    };
+    let key = [7u8; 32];
+    let locate = |l: Layout| {
+        let mut m = mock(b.disk.clone(), None);
+        let mut s4 = Box::new(Stage4::new());
+        let mut out = Box::new(Located::new());
+        let mut r = PartitionReader { part };
+        let res = s4.locate(
+            &mut m,
+            &mut r,
+            &part,
+            Some((0x8004, &key[..], l)),
+            Some(&entry),
+            &mut out,
+        );
+        (res, m.exposed.len())
+    };
+    // Clear of every region: published.
+    assert_eq!(locate(layout), (Ok(()), 1));
+    // The Windows 10+ region over the file's middle: refused, nothing published.
+    let first = ext[0];
+    let mid = ((first.start + (first.end - first.start) / 2) * 512) & !0xfff;
+    layout.extra_region = Some(mid);
+    assert_eq!(
+        locate(layout),
+        (Err(BootError::Stage4(Stage4Error::Reserved)), 0)
+    );
+    // Touching the file's last sector from before is enough.
+    layout.extra_region = Some(first.start * 512 - 0x1_0000 + 512);
+    assert_eq!(locate(layout).1, 0);
+}
+
 /// The partition reader over 4 KiB physical blocks: any 512-byte sector
 /// range, aligned or not, reads what a 512-byte view of the same bytes has.
 #[test]

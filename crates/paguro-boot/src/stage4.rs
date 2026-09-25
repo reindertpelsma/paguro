@@ -67,17 +67,9 @@ pub enum Stage4Error {
     /// The platform could not provide memory for the `efi_file`.
     Memory(PlatformError),
     /// The efi disk's extents cover a BitLocker non-data region (the
-    /// relocated boot sectors or their copy, a metadata region).
+    /// relocated boot sectors or their copy, a metadata region, the
+    /// Windows 10+ region beside them).
     Reserved,
-}
-
-/// Whether any extent (512-byte volume sectors) meets one of `l`'s
-/// reserved ranges.
-fn overlaps_reserved(ext: &[Extent], l: &Layout) -> bool {
-    l.reserved_ranges().iter().any(|&(start, len)| {
-        ext.iter()
-            .any(|e| e.start < start.saturating_add(len) && start < e.end)
-    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -722,7 +714,7 @@ impl Stage4 {
                 // disk's data in either view (INTERFACES.md §12.2): refuse.
                 if let Some((_, _, l)) = fve {
                     let ext = self.ext.get(..self.ext_n).unwrap_or(&[]);
-                    if overlaps_reserved(ext, &l) {
+                    if l.overlaps_reserved(ext) {
                         return Err(Stage4Error::Reserved.into());
                     }
                 }

@@ -205,6 +205,17 @@ fn check_fixture(f: &Fixture) {
             return;
         }
     };
+    // Windows 10+ names a further 64 KiB region after the volume-header
+    // entry's offset and size (test/fixtures/bde/README.md); Windows 7/8
+    // volumes do not.
+    let extra = if f.name.contains("elephant") || f.name.starts_with("dfvfs") {
+        None
+    } else if f.name.contains("togo") {
+        Some((m.volume_header.0 + 0x51_5000, core::REGION_SIZE))
+    } else {
+        Some((m.volume_header.0 + 0x2000, core::REGION_SIZE))
+    };
+    assert_eq!(m.extra_region, extra, "{}: the Windows 10+ region", f.name);
     if !f.fields.is_empty() {
         // (bdeinfo cannot open used-space-only volumes.)
         assert_eq!(fields(&m), f.fields, "{}: metadata vs bdeinfo", f.name);
@@ -302,6 +313,13 @@ fn check_fixture(f: &Fixture) {
             v.layout_detail().unwrap().bytes_per_sector,
             hdr.bytes_per_sector
         );
+        // The Windows 10+ region is reserved and forwarded.
+        assert_eq!(l.extra_region_offset, extra.map_or(0, |e| e.0));
+        let rr: Vec<_> = v.layout_detail().unwrap().reserved_ranges().collect();
+        assert_eq!(rr.len(), 5 + usize::from(extra.is_some()), "{}", f.name);
+        if let Some((o, n)) = extra {
+            assert!(rr.contains(&(o / 512, n / 512)), "{}", f.name);
+        }
         let mut boot = vec![0u8; 8192];
         v.read_sectors(&mut p, 0, &mut boot).unwrap();
         assert_eq!(
@@ -514,6 +532,7 @@ fn synthetic(bps: u32, enc_units: u64) -> (Layout, Vec<u8>, Xts) {
         metadata_offsets: [300 * b, 700 * b, 1100 * b],
         reloc_len: 8192,
         reloc_offset: 1500 * b,
+        extra_region: None,
         encrypted_size: enc_units * b,
         cipher: Cipher::XtsAes128,
         partial: enc_units < units,

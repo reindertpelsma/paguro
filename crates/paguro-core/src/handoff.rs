@@ -114,6 +114,9 @@ pub struct FveLayout {
     pub encrypted_size: u64,
     /// The XTS data unit in bytes: the volume's sector size, 512 or 4096.
     pub sector_size: u32,
+    /// Windows 10+: byte offset of the further reserved region beside the
+    /// metadata (`region_size` bytes); 0 = none.
+    pub extra_region_offset: u64,
 }
 
 /// SHA-256 PCR values: `values` holds 32 bytes per set bit of `mask`,
@@ -294,7 +297,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
                 });
             }
             rtype::FVE_LAYOUT => {
-                fixed(56)?;
+                fixed(64)?;
                 fve_layout = Some(FveLayout {
                     metadata_offsets: [
                         v.u64_le().map_err(short)?,
@@ -306,6 +309,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
                     boot_sector_reloc_sectors: v.u32_le().map_err(short)?,
                     encrypted_size: v.u64_le().map_err(short)?,
                     sector_size: v.u32_le().map_err(short)?,
+                    extra_region_offset: v.u64_le().map_err(short)?,
                 });
                 if !matches!(
                     fve_layout,
@@ -510,7 +514,8 @@ pub fn encode(h: &Handoff<'_>, out: &mut [u8]) -> Result<usize, EncodeError> {
             w.u64_le(l.boot_sector_reloc_offset)?;
             w.u32_le(l.boot_sector_reloc_sectors)?;
             w.u64_le(l.encrypted_size)?;
-            w.u32_le(l.sector_size)
+            w.u32_le(l.sector_size)?;
+            w.u64_le(l.extra_region_offset)
         })?;
         count += 1;
     }
@@ -578,6 +583,7 @@ mod tests {
                 boot_sector_reloc_sectors: 16,
                 encrypted_size: 1 << 40,
                 sector_size: 512,
+                extra_region_offset: 1 << 20,
             }),
             b: &[0xbb; 32],
             pcrs: Pcrs {

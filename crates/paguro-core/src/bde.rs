@@ -196,6 +196,11 @@ pub enum BdeError {
     /// The relocated boot-sector region disagrees between the block header
     /// and its entry, or is misaligned, empty or past the volume.
     Relocation,
+    /// The structure Windows 10+ appends to the volume-header entry is
+    /// malformed (its length field disagrees with the entry, or it is too
+    /// short to hold the region it names), or that region is not one 64 KiB
+    /// region, sector-aligned, inside the volume.
+    ExtraRegion,
     /// Two non-data regions overlap.
     Overlap,
     /// Encryption state other than encrypted, or paused/in-progress
@@ -759,6 +764,10 @@ pub struct Metadata<'a> {
     pub fvek: Ccm<'a>,
     /// The relocated boot sectors: `(offset, size)` in bytes.
     pub volume_header: (u64, u64),
+    /// Windows 10+: the further region named by the structure after the
+    /// volume-header entry's offset and size, `(offset, size)` in bytes
+    /// ([`parse_extra_region`]). `None` on older volumes.
+    pub extra_region: Option<(u64, u64)>,
     /// UTF-16LE, as stored (NUL included when Windows wrote one).
     pub description: Option<&'a [u8]>,
     protectors: [Option<Protector<'a>>; MAX_PROTECTORS],
@@ -776,6 +785,7 @@ impl<'a> Metadata<'a> {
                 ciphertext: &[],
             },
             volume_header: (0, 0),
+            extra_region: None,
             description: None,
             protectors: [None; MAX_PROTECTORS],
             count: 0,
@@ -820,6 +830,7 @@ impl<'a> Metadata<'a> {
                         le64(e.data, 0).ok_or(BdeError::Relocation)?,
                         le64(e.data, 8).ok_or(BdeError::Relocation)?,
                     );
+                    m.extra_region = parse_extra_region(e.data.get(16..).unwrap_or(&[]))?;
                 }
                 entry::DESCRIPTION => {
                     if e.value_type != value::UNICODE {
@@ -849,6 +860,31 @@ impl<'a> Metadata<'a> {
     pub fn of_kind(&self, kind: ProtectorKind) -> impl Iterator<Item = &Protector<'a>> {
         self.protectors().filter(move |p| p.kind == kind)
     }
+}
+
+/// Smallest trailing structure: its u16 tag and length, then at least
+/// one u32 before the region's offset and size.
+const EXTRA_MIN: usize = 4 + 4 + 16;
+
+/// The structure Windows 10+ writes after the volume-header entry's offset
+/// and size: `u16 (5 in every sample) | u16 length (its own, 76 in every
+/// sample) | … | offset u64 | size u64` — the region it names is a further
+/// 64 KiB BitLocker keeps beside the relocated boot sectors
+/// (`test/fixtures/bde/README.md`). Nothing but the length and the last 16
+/// bytes is read. Empty = an older volume, no region.
+pub fn parse_extra_region(rest: &[u8]) -> Result<Option<(u64, u64)>> {
+    if rest.is_empty() {
+        return Ok(None);
+    }
+    let len = usize::from(le16(rest, 2).ok_or(BdeError::ExtraRegion)?);
+    if rest.len() < EXTRA_MIN || len != rest.len() {
+        return Err(BdeError::ExtraRegion);
+    }
+    let at = len - 16;
+    Ok(Some((
+        le64(rest, at).ok_or(BdeError::ExtraRegion)?,
+        le64(rest, at + 8).ok_or(BdeError::ExtraRegion)?,
+    )))
 }
 
 /// A startup key (`.BEK` file): the external key and the protector it
@@ -923,6 +959,10 @@ pub struct Layout {
     /// Bytes of the boot sectors relocated to `reloc_offset`.
     pub reloc_len: u64,
     pub reloc_offset: u64,
+    /// Windows 10+: the further 64 KiB region (byte offset) named after the
+    /// volume-header entry. Reserved, but **not** hidden by [`Layout::map`]:
+    /// libbde, dislocker and cryptsetup all show its bytes decrypted.
+    pub extra_region: Option<u64>,
     /// Bytes from the volume start that are encrypted.
     pub encrypted_size: u64,
     pub cipher: Cipher,
@@ -957,12 +997,27 @@ impl Layout {
         {
             return Err(BdeError::Relocation);
         }
+        let extra_region = match m.extra_region {
+            None => None,
+            Some((o, l)) => {
+                let inside = o.checked_add(l).is_some_and(|end| end <= volume_size);
+                if l != REGION_SIZE || o == 0 || o % bps != 0 || !inside {
+                    return Err(BdeError::ExtraRegion);
+                }
+                Some(o)
+            }
+        };
         let regions = [
             (0, reloc_len),
             (reloc_offset, reloc_len),
             (hdr.metadata_offsets[0], REGION_SIZE),
             (hdr.metadata_offsets[1], REGION_SIZE),
             (hdr.metadata_offsets[2], REGION_SIZE),
+            // Absent: an empty range meets nothing.
+            (
+                extra_region.unwrap_or(0),
+                extra_region.map_or(0, |_| REGION_SIZE),
+            ),
         ];
         for (i, &(o, l)) in regions.iter().enumerate() {
             match o.checked_add(l) {
@@ -971,7 +1026,7 @@ impl Layout {
                 _ => return Err(BdeError::MetadataOffset),
             }
             for &(o2, l2) in regions.iter().skip(i + 1) {
-                if o < o2.saturating_add(l2) && o2 < o.saturating_add(l) {
+                if l != 0 && l2 != 0 && o < o2.saturating_add(l2) && o2 < o.saturating_add(l) {
                     return Err(BdeError::Overlap);
                 }
             }
@@ -1003,6 +1058,7 @@ impl Layout {
             metadata_offsets: hdr.metadata_offsets,
             reloc_len,
             reloc_offset,
+            extra_region,
             encrypted_size: b.encrypted_size,
             cipher: b.cipher,
             partial,
@@ -1074,16 +1130,31 @@ impl Layout {
 
     /// The non-data regions as `(start, length)` in 512-byte sectors, for
     /// `PG_VOLUME_ADD` (INTERFACES.md §10.2): `[0, reloc_len)`, the
-    /// relocated copy, the three metadata regions.
-    pub fn reserved_ranges(&self) -> [(u64, u64); 5] {
+    /// relocated copy, the three metadata regions, and (Windows 10+) the
+    /// further region beside them — five or six ranges, none empty.
+    pub fn reserved_ranges(&self) -> impl Iterator<Item = (u64, u64)> + use<> {
         let s = |o: u64, l: u64| (o / 512, l / 512);
         [
-            s(0, self.reloc_len),
-            s(self.reloc_offset, self.reloc_len),
-            s(self.metadata_offsets[0], REGION_SIZE),
-            s(self.metadata_offsets[1], REGION_SIZE),
-            s(self.metadata_offsets[2], REGION_SIZE),
+            Some(s(0, self.reloc_len)),
+            Some(s(self.reloc_offset, self.reloc_len)),
+            Some(s(self.metadata_offsets[0], REGION_SIZE)),
+            Some(s(self.metadata_offsets[1], REGION_SIZE)),
+            Some(s(self.metadata_offsets[2], REGION_SIZE)),
+            self.extra_region.map(|o| s(o, REGION_SIZE)),
         ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// Whether any extent (512-byte volume sectors, half-open) meets a
+    /// reserved range: a file over one of them is not the file's data in
+    /// either view (INTERFACES.md §12.2).
+    pub fn overlaps_reserved(&self, extents: &[crate::range::Extent]) -> bool {
+        self.reserved_ranges().any(|(start, len)| {
+            extents
+                .iter()
+                .any(|e| e.start < start.saturating_add(len) && start < e.end)
+        })
     }
 
     /// The handoff record (INTERFACES.md §8): byte offsets and sizes, the
@@ -1096,6 +1167,7 @@ impl Layout {
             boot_sector_reloc_sectors: u32::try_from(self.reloc_len / 512).unwrap_or(u32::MAX),
             encrypted_size: self.encrypted_size,
             sector_size: self.bytes_per_sector,
+            extra_region_offset: self.extra_region.unwrap_or(0),
         }
     }
 }

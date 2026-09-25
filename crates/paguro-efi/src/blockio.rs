@@ -288,6 +288,13 @@ pub fn expose(
     if disk.sectors == 0 || disk.extents.is_empty() {
         return Err(PlatformError::Unsupported);
     }
+    // Stage 4 refused this already; the device is the last place it can be
+    // caught, so a disk over BitLocker's own regions is never published.
+    if let Some((_, _, layout)) = disk.fve {
+        if layout.overlaps_reserved(disk.extents) {
+            return Err(PlatformError::Unsupported);
+        }
+    }
     let (phys, phys_media_id, phys_block) = physical(disk_handle)?;
     if phys_block != 512 && phys_block != 4096 {
         return Err(PlatformError::Unsupported);
@@ -325,6 +332,7 @@ pub fn expose(
                 metadata_offsets: [0; 3],
                 reloc_len: 0,
                 reloc_offset: 0,
+                extra_region: None,
                 encrypted_size: 0,
                 cipher: paguro_core::bde::Cipher::XtsAes128,
                 partial: false,
