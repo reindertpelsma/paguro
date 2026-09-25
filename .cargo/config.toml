@@ -6,3 +6,12 @@ rustflags = ["--cfg", 'aes_backend="soft"']
 
 [target.aarch64-unknown-uefi]
 rustflags = ["--cfg", 'aes_backend="soft"']
+
+# Windows binaries link the C runtime statically: a clean Windows install has no
+# VCRUNTIME140.dll, and paguro.exe then fails to start with 0xC0000135 and no
+# output (found by the local Windows VM; CI runners hide it because Visual
+# Studio is installed there).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
