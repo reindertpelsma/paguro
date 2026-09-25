@@ -3673,12 +3673,30 @@ a **CI oracle** — synthesised metadata plus `.BEK` in, correct VMK out. The `.
 must be on *removable* media, because `bootmgr` only searches there; the open
 question is that automatic search at boot (§11 Q9).
 
-**Guest writes to the substituted ranges are unresolved** (§11 Q24). Windows
-servicing will write them — a feature update suspends BitLocker. `EIO` breaks
-servicing; passthrough lets the guest edit the real metadata from a substituted
-view; absorbing silently loses a change the guest thinks it made. This is the one
-place a wrong answer could break the *orphaned but intact* bound (§4.3): until
-Q24 is answered, that bound does not cover FVE metadata.
+**Guest writes to BitLocker's own regions are absorbed, never passed through**
+(§11 Q24). The substituted set is every sector BitLocker owns, not only the
+three metadata blocks: the volume header with its metadata pointers, the
+relocated boot sectors, the three metadata regions, and the further region
+Windows 10+ keeps beside them. All of it is served from the per-session
+substitute, and guest writes to it land in a per-session overlay: the guest
+reads back what it wrote, and **nothing reaches the disk**.
+
+| Guest action | Result |
+|---|---|
+| suspend for an update, add a clear key | works in the session; the next VM boot starts from the real metadata again — as the suspend's reboot count would have |
+| add or remove a protector, change the PIN | appears to work and is **not kept**; the host notices the write and says so: *BitLocker changes belong in native Windows* |
+| **relocate metadata** | the new blocks are ordinary NTFS-allocated sectors and land harmlessly; the pointers to them live in the volume header, which is in the absorbed set — so native Windows keeps its old, intact metadata |
+
+That makes the bound hold for FVE metadata too: **nothing the guest does to
+BitLocker's structures can change what native Windows boots from.** The cost is
+that BitLocker management is a native-boot activity, which it already was
+(no TPM in the VM).
+
+Why absorb rather than `EIO`: the writer is `fvevol.sys`, below NTFS, and how
+it reacts to a failed metadata write — retry, volume offline, bugcheck — is
+unknown; absorbing keeps the guest stable and is equally safe for the disk.
+`EIO` stays available as a test mode. **The minifilter cannot help here**: it
+sits above the filesystem and `fvevol.sys` below it.
 
 **The VM gets no TPM.** Windows Hello, Credential Guard and in-guest BitLocker
 management are unavailable in VM sessions; they were never going to work against
@@ -4413,13 +4431,14 @@ later question sits with the ones it belongs to rather than in numeric order.
 
 ### Design gaps to close before building
 
-24. **What is the write policy for the substituted FVE metadata ranges?** (§6)
-    Windows servicing edits FVE metadata — a feature update suspends BitLocker and
-    writes a clear-key entry. `EIO` fails a component Microsoft assumes always
-    works; passthrough lets the guest edit the real metadata while reasoning from a
-    substituted view; absorbing into the buffer loses a change the guest believes
-    succeeded. **This is the one open decision that could break the "orphaned but
-    intact" bound**, and it is a design decision rather than an experiment.
+24. **Does the guest touch BitLocker's regions the way §6 assumes?** (§6) The
+    policy is decided — absorb every write to BitLocker-owned sectors, pass
+    none through. What needs measuring, in the Windows VM with every write
+    recorded (`dm-log-writes`): which sectors suspend/resume, adding and
+    removing protectors, a PIN change, a cumulative and a feature update,
+    volume shrink and extend, `chkdsk` and `defrag` write; whether any of them
+    moves metadata (a write to BitLocker structures outside the substituted
+    set would show it); and how `fvevol.sys` behaves under absorb versus `EIO`.
 
 25. **Used-space-only encryption.** Device Encryption's default. Those volumes
     report a distinct conversion state; the loader identifies it and refuses the
