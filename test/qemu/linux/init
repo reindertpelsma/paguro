@@ -1,0 +1,35 @@
+#!/bin/sh
+# The test initramfs's /init (test/qemu/linux-e2e.sh): the same steps as
+# the initramfs-tools hook (initramfs/initramfs-tools/scripts/local-top/
+# paguro), then mount the root it names and switch to it.
+export PATH=/sbin:/bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+mount -t tmpfs -o mode=0755,nosuid,nodev run /run
+fail() {
+    echo "PAGURO-INITRD: FAIL $*"
+    dmesg | grep -E 'paguro|device-mapper|ntfs3|crypt' | tail -20
+    poweroff -f
+    sleep 10
+}
+echo "PAGURO-INITRD: start"
+for m in $(cat /lib/paguro/order); do insmod "/lib/paguro/$m.ko" 2>/dev/null; done
+insmod /lib/paguro/dm-paguro.ko || fail "dm-paguro did not load"
+st=$(paguro-initrd systab) || fail "no EFI system table"
+insmod /lib/paguro/paguro-handoff.ko systab="$st" || fail "no handoff (paguro-handoff)"
+[ -c /dev/paguro-handoff ] || fail "no /dev/paguro-handoff"
+paguro-initrd setup --env /run/paguro/root.env || fail "paguro-initrd setup"
+# The handoff is consumed and wiped; the module has nothing left to hold.
+rmmod paguro_handoff || fail "paguro-handoff did not unload"
+. /run/paguro/root.env
+mkdir -p /root
+opts=rw
+[ "$PAGURO_ROOT_RO" = 1 ] && opts=ro
+mount -t "$PAGURO_ROOTFSTYPE" -o "$opts" "$PAGURO_ROOT" /root || fail "mount $PAGURO_ROOT"
+echo "PAGURO-INITRD: root $PAGURO_ROOT mounted $opts"
+umount /run
+umount /sys/kernel/security /sys/firmware/efi/efivars 2>/dev/null
+mount --move /dev /root/dev 2>/dev/null || umount /dev
+umount /sys /proc
+exec switch_root /root /sbin/init

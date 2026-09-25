@@ -1,0 +1,68 @@
+name: linux-e2e
+
+# A real Linux booted end to end through paguro (DESIGN.md §3a):
+# OVMF -> paguro.efi -> the UKI inside the image (or on NTFS) ->
+# paguro-initrd -> the root from dm-paguro's view A -> a marker service.
+# test/qemu/linux-e2e.sh; the VM kernel is Ubuntu's generic HWE kernel,
+# unpacked (never installed or loaded on the runner), as in kernel.yml.
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-e2e:
+    name: Linux end to end (${{ matrix.group }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: plain, bare, degraded
+            scenarios: linux-plain linux-bare linux-dirty linux-hibernated
+          - group: persistence, BitLocker, fragmented
+            scenarios: linux-persist linux-bde linux-bde-partial linux-frag
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-uefi, x86_64-unknown-linux-musl
+      - name: install QEMU, OVMF, swtpm, image tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf swtpm mtools \
+            dosfstools gdisk ntfs-3g attr e2fsprogs busybox-static cpio zstd binutils \
+            build-essential
+      - name: fetch the VM kernel (generic HWE image, modules, headers)
+        run: |
+          kver=$(apt-cache depends linux-image-generic-hwe-24.04 |
+                 sed -n 's/^ *Depends: linux-image-\([0-9].*-generic\)$/\1/p' | head -1)
+          [ -n "$kver" ] || { echo "::error::cannot resolve the HWE kernel version"; exit 1; }
+          common=$(apt-cache depends linux-headers-$kver |
+                   sed -n 's/^ *Depends: \(linux-.*-headers-.*\)$/\1/p' | head -1)
+          d=$RUNNER_TEMP/vmk; mkdir -p $d/debs; cd $d/debs
+          apt-get download linux-image-unsigned-$kver linux-modules-$kver \
+            linux-headers-$kver $common
+          for f in *.deb; do dpkg -x $f $d; done
+          echo "VMK=$d" >> "$GITHUB_ENV"; echo "KVER=$kver" >> "$GITHUB_ENV"
+      # The Alpine minirootfs (pinned and checksummed) and systemd-stub.
+      - uses: actions/cache@v4
+        with:
+          path: target/linux-cache
+          key: linux-cache-${{ hashFiles('test/qemu/linux-e2e.sh') }}
+      # TCG, as in loader.yml: OVMF + swtpm under nested KVM intermittently
+      # stops getting TPM responses inside the firmware.
+      - name: boot (${{ matrix.group }})
+        run: |
+          PAGURO_QEMU_ACCEL=tcg PAGURO_KERNEL=$VMK/boot/vmlinuz-$KVER \
+            PAGURO_MODULES=$VMK/lib/modules/$KVER PAGURO_KDIR=$VMK/usr/src/linux-headers-$KVER \
+            test/qemu/linux-e2e.sh ${{ matrix.scenarios }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-e2e-serial-logs-${{ strategy.job-index }}
+          path: target/qemu/*.log

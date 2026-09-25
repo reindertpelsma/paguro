@@ -39,7 +39,11 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
-#include <linux/unaligned.h>
+#if __has_include(<linux/unaligned.h>)
+#include <linux/unaligned.h>	/* >= 6.12 */
+#else
+#include <asm/unaligned.h>
+#endif
 
 #define PGH_MAGIC "PGRHOF\0\x01"
 #define PGH_HEADER 16

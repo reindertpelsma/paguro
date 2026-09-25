@@ -12,6 +12,7 @@
 //! KVM is used when `/dev/kvm` is usable, TCG otherwise.
 #![allow(clippy::indexing_slicing)]
 
+mod linux;
 mod stage4;
 mod vars;
 
@@ -98,6 +99,8 @@ struct Env {
     ovmf: PathBuf,
     work: PathBuf,
     kvm: bool,
+    /// test/qemu/linux-e2e.sh's output: `uki.efi`, `rootfs/`.
+    linux: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +490,25 @@ impl Vm {
         qmp: Option<&Path>,
         extra: &[&str],
     ) -> R<Vm> {
+        let d: Vec<(&Path, bool)> = disks.iter().map(|d| (*d, true)).collect();
+        Self::launch_disks(env, name, secure, &d, vars, state, qmp, extra, 512)
+    }
+
+    /// As [`Vm::launch`], each disk with its own `snapshot` setting (a
+    /// Linux boot that must persist writes uses its disk directly), and
+    /// `mem_mib` of RAM.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_disks(
+        env: &Env,
+        name: &str,
+        secure: bool,
+        disks: &[(&Path, bool)],
+        vars: &Path,
+        state: &Path,
+        qmp: Option<&Path>,
+        extra: &[&str],
+        mem_mib: u32,
+    ) -> R<Vm> {
         let tpm = swtpm_for_qemu(state)?;
         let code = env.ovmf.join(if secure {
             "OVMF_CODE_4M.secboot.fd"
@@ -500,9 +522,8 @@ impl Vm {
                 if env.kvm { "kvm" } else { "tcg" },
                 if secure { ",smm=on" } else { "" }
             ))
-            .args([
-                "-m", "512", "-display", "none", "-serial", "stdio", "-monitor", "none",
-            ])
+            .args(["-m", &mem_mib.to_string()])
+            .args(["-display", "none", "-serial", "stdio", "-monitor", "none"])
             .args(["-no-reboot", "-net", "none"])
             .args(extra);
         if let Some(q) = qmp {
@@ -520,12 +541,13 @@ impl Vm {
             ))
             .arg("-drive")
             .arg(format!("if=pflash,format=raw,file={}", vars.display()));
-        for d in disks {
+        for (d, snapshot) in disks {
             // snapshot: the guest can never change the images (the loader
             // must not write anyway; this keeps a shared image pristine).
             cmd.arg("-drive").arg(format!(
-                "format=raw,file={},if=virtio,snapshot=on",
-                d.display()
+                "format=raw,file={},if=virtio,snapshot={}",
+                d.display(),
+                if *snapshot { "on" } else { "off" }
             ));
         }
         cmd.args(["-device", "virtio-rng-pci"])
@@ -1465,6 +1487,14 @@ const SCENARIOS: &[Scenario] = &[
     ("mode-graphics", mode_graphics_light),
     ("two-displays", two_displays),
     ("pointer-tablet", pointer_tablet),
+    ("linux-plain", linux::plain),
+    ("linux-persist", linux::persist),
+    ("linux-bde", linux::bde),
+    ("linux-bde-partial", linux::bde_partial),
+    ("linux-bare", linux::bare),
+    ("linux-frag", linux::frag),
+    ("linux-dirty", linux::dirty),
+    ("linux-hibernated", linux::hibernated),
 ];
 
 fn main() {
@@ -1480,6 +1510,7 @@ fn main() {
     let mut ovmf = PathBuf::from("/usr/share/OVMF");
     let mut work = std::env::temp_dir().join("paguro-qemu");
     let mut accel = "auto".to_string();
+    let mut linux = None;
     let mut only = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -1494,6 +1525,7 @@ fn main() {
             "--ovmf" => ovmf = args.next().map(PathBuf::from).unwrap_or(ovmf),
             "--work" => work = args.next().map(PathBuf::from).unwrap_or(work),
             "--accel" => accel = args.next().unwrap_or(accel),
+            "--linux" => linux = args.next().map(PathBuf::from),
             "--list" => {
                 for (n, _) in SCENARIOS {
                     println!("{n}");
@@ -1531,6 +1563,7 @@ fn main() {
         ovmf,
         work,
         kvm,
+        linux,
     };
     println!("accelerator: {}", if kvm { "kvm" } else { "tcg" });
     let mut failed = 0;
@@ -1541,6 +1574,10 @@ fn main() {
             None => o == name,
         };
         if !only.is_empty() && !only.iter().any(wanted) {
+            continue;
+        }
+        // The Linux scenarios need test/qemu/linux-e2e.sh's images.
+        if name.starts_with("linux-") && env.linux.is_none() {
             continue;
         }
         let t0 = Instant::now();

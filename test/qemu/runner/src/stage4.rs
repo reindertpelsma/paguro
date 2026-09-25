@@ -21,11 +21,11 @@ use crate::{BOOT_WAIT, Env, R, Vm, fresh, sh, sha256, vars};
 /// The NTFS partition's GPT unique GUID (the entries' `volume`).
 pub const NTFS_VOLUME: &str = "7d1f0c2a-5b3e-4c8d-9a61-0e2f4b6c8d90";
 
-fn io<T>(r: std::io::Result<T>) -> R<T> {
+pub(crate) fn io<T>(r: std::io::Result<T>) -> R<T> {
     r.map_err(|e| e.to_string())
 }
 
-fn write(p: &Path, data: &[u8]) -> R<()> {
+pub(crate) fn write(p: &Path, data: &[u8]) -> R<()> {
     if let Some(d) = p.parent() {
         io(std::fs::create_dir_all(d))?;
     }
@@ -38,7 +38,7 @@ fn write(p: &Path, data: &[u8]) -> R<()> {
 /// A FAT32 file system image of `mib` MiB holding `files` (`/`-separated
 /// paths). One sector per cluster keeps small images above the 65 525
 /// clusters that make a volume FAT32 to the firmware's driver.
-fn fat32(path: &Path, mib: u64, files: &[(&str, &[u8])]) -> R<()> {
+pub(crate) fn fat32(path: &Path, mib: u64, files: &[(&str, &[u8])]) -> R<()> {
     let _ = std::fs::remove_file(path);
     sh(Command::new("mkfs.vfat")
         .args(["-F", "32", "-S", "512", "-s", "1", "-n", "PAYLOAD", "-C"])
@@ -78,16 +78,16 @@ fn fat32(path: &Path, mib: u64, files: &[(&str, &[u8])]) -> R<()> {
 }
 
 /// A partition for [`gpt`]: sgdisk type code, size in MiB, content.
-struct Part<'a> {
-    code: &'a str,
-    mib: u64,
-    image: Option<&'a Path>,
-    guid: Option<&'a str>,
+pub(crate) struct Part<'a> {
+    pub code: &'a str,
+    pub mib: u64,
+    pub image: Option<&'a Path>,
+    pub guid: Option<&'a str>,
 }
 
 /// A GPT disk of `mib` MiB with `parts` laid out from LBA 2048, each
 /// image written into its partition.
-fn gpt(path: &Path, mib: u64, parts: &[Part<'_>]) -> R<()> {
+pub(crate) fn gpt(path: &Path, mib: u64, parts: &[Part<'_>]) -> R<()> {
     let _ = std::fs::remove_file(path);
     let f = io(std::fs::File::create(path))?;
     io(f.set_len(mib << 20))?;
@@ -120,7 +120,7 @@ fn gpt(path: &Path, mib: u64, parts: &[Part<'_>]) -> R<()> {
     Ok(())
 }
 
-fn vhd(raw: &Path, out: &Path, subformat: &str) -> R<()> {
+pub(crate) fn vhd(raw: &Path, out: &Path, subformat: &str) -> R<()> {
     let _ = std::fs::remove_file(out);
     sh(Command::new("qemu-img")
         .args(["convert", "-q", "-f", "raw", "-O", "vpc", "-o"])
@@ -146,7 +146,7 @@ fn uid_gid() -> (u32, u32) {
 }
 
 /// Run `cmd` directly as root, else through `sudo -n` (CI runners).
-fn privileged(cmd: &str) -> Command {
+pub(crate) fn privileged(cmd: &str) -> Command {
     if uid_gid().0 == 0 {
         Command::new(cmd)
     } else {
@@ -158,7 +158,7 @@ fn privileged(cmd: &str) -> Command {
 
 /// Mount the NTFS image `img` with ntfs-3g, let `fill` write into it,
 /// unmount.
-fn with_ntfs(img: &Path, fill: impl FnOnce(&Path) -> R<()>) -> R<()> {
+pub(crate) fn with_ntfs(img: &Path, fill: impl FnOnce(&Path) -> R<()>) -> R<()> {
     let mnt = img.with_extension("mnt");
     let _ = std::fs::remove_dir_all(&mnt);
     io(std::fs::create_dir_all(&mnt))?;
@@ -176,7 +176,7 @@ fn with_ntfs(img: &Path, fill: impl FnOnce(&Path) -> R<()>) -> R<()> {
 }
 
 /// `mkntfs` a volume of `mib` MiB (4 KiB clusters).
-fn mkntfs(img: &Path, mib: u64) -> R<()> {
+pub(crate) fn mkntfs(img: &Path, mib: u64) -> R<()> {
     let _ = std::fs::remove_file(img);
     let f = io(std::fs::File::create(img))?;
     io(f.set_len(mib << 20))?;
@@ -290,7 +290,7 @@ fn attrs(rec: &[u8]) -> Vec<(usize, usize, usize)> {
 }
 
 /// Set `$Volume`'s dirty bit, as an unclean Windows shutdown leaves it.
-fn set_dirty(img: &Path) -> R<()> {
+pub(crate) fn set_dirty(img: &Path) -> R<()> {
     patch_record(img, 3, |rec| {
         let (_, pos, _) = *attrs(rec)
             .iter()
@@ -339,7 +339,7 @@ fn pairs(list: &[(u64, u64)]) -> Vec<u8> {
 /// reverse order within the same clusters, and its runlist rewritten to
 /// match — `k` runs, none adjacent to the next in file order. The data
 /// read through the new map is unchanged (checked with `ntfscat`).
-fn fragment(img: &Path, path: &str, k: u64) -> R<()> {
+pub(crate) fn fragment(img: &Path, path: &str, k: u64) -> R<()> {
     let (recno, _) = identity(img, path)?;
     let before = ntfscat(img, path)?;
     let mut moved = None;
@@ -404,7 +404,7 @@ fn fragment(img: &Path, path: &str, k: u64) -> R<()> {
     Ok(())
 }
 
-fn ntfscat(img: &Path, path: &str) -> R<Vec<u8>> {
+pub(crate) fn ntfscat(img: &Path, path: &str) -> R<Vec<u8>> {
     let out = Command::new("ntfscat")
         .arg(img)
         .arg(path)
@@ -624,7 +624,7 @@ fn build_volume(env: &Env) -> R<Volume> {
 /// removable-media default, `\EFI\paguro\paguro.ini` when given) and the
 /// NTFS partition `ntfs` under `guid`.
 #[allow(clippy::too_many_arguments)]
-fn boot_disk(
+pub(crate) fn boot_disk(
     env: &Env,
     name: &str,
     efi: &Path,
@@ -670,7 +670,7 @@ fn boot_disk(
     Ok(disk)
 }
 
-fn ini(entry: &str) -> Vec<u8> {
+pub(crate) fn ini(entry: &str) -> Vec<u8> {
     format!(
         "# paguro configuration. Not hand-editable: use `paguro config`.\n[Paguro]\nversion = 1\ndefault = linux\n\n[Boot.linux]\nvolume = {NTFS_VOLUME}\n{entry}\n"
     )
