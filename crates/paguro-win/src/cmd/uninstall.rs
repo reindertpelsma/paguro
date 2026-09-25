@@ -84,7 +84,14 @@ fn exists_service(api: &dyn WinApi, name: &str) -> Result<bool, CmdError> {
     Ok(api.run("sc.exe", &["query", name], None)?.ok())
 }
 
+/// The minifilter is in memory: a reboot is needed to be rid of it. One
+/// that was installed but never started (the service control manager says
+/// STOPPED) needs none.
 fn driver_loaded(api: &dyn WinApi) -> Result<bool, CmdError> {
+    let q = api.run("sc.exe", &["query", DRIVER], None)?;
+    if q.ok() && q.stdout.contains("STOPPED") {
+        return Ok(false);
+    }
     Ok(api
         .run("fltmc.exe", &["instances", "-f", DRIVER], None)?
         .ok())

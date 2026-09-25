@@ -1479,3 +1479,28 @@ fn repair_app_only_never_touches_images_or_firmware() {
         "{muts}"
     );
 }
+
+/// A minifilter that was installed but never started needs no restart.
+#[test]
+fn uninstall_needs_no_restart_for_a_driver_that_never_ran() {
+    let m = MockApi::standard();
+    m.set_runner(|prog, args| {
+        let stdout = if prog == "sc.exe" && args == ["query", "paguroflt"] {
+            "SERVICE_NAME: paguroflt\n        STATE              : 1  STOPPED\n"
+        } else {
+            ""
+        };
+        let status = i32::from(prog == "sc.exe" && args == ["query", "paguro"]) * 1060;
+        Some(paguro_win::api::Output {
+            status,
+            stdout: stdout.into(),
+            stderr: String::new(),
+        })
+    });
+    let r = common::run(
+        &m,
+        &["uninstall", "--yes", "--keep-images", "--skip-final-boot"],
+    );
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert_eq!(r.json["data"]["finished"], true);
+}
