@@ -1,8 +1,11 @@
 //! The stage machine. Read top to bottom: [`Machine::go`] is the execution
 //! contract of DESIGN.md §4.1, and every branch in it is a mock boot test.
 
+use core::mem::size_of;
+
 use paguro_core::bootstrap;
 use paguro_core::config::{self, Config, Efi, Entry, MAX_ENTRIES};
+use paguro_core::disk::SECTOR;
 use paguro_core::guid::{EFI_GLOBAL_VARIABLE, Guid, PAGURO_VENDOR, PCR12_EVENT_TAG};
 use paguro_core::handoff::{self, Handoff, ImageId, Pcrs, Rung, state};
 use paguro_core::ini;
@@ -20,11 +23,59 @@ use crate::platform::{
 use crate::tpm::{self, Tpm};
 use crate::ui;
 use crate::volume::{self, Key, Located, Partition, Volume, VolumeKind};
-use crate::{BootError, Buffers, Mode, Outcome, Params, RecoveryReason};
+use crate::{BootError, Buffers, Mode, Outcome, Params, RecoveryReason, SEAL_KINDS, SECRET_MAX};
 
 const PCR12: u32 = 12;
-/// PCRs recorded for the handoff (0, 2, 4, 7), for re-seals from Linux.
+/// PCRs recorded for the handoff, for re-seals from Linux, in the order
+/// `State::pcrs` holds them.
+const RECORDED_PCR_LIST: [u32; 4] = [0, 2, 4, 7];
 pub const RECORDED_PCRS: u32 = 1 << 0 | 1 << 2 | 1 << 4 | 1 << 7;
+const _: () = {
+    let [a, b, c, d] = RECORDED_PCR_LIST;
+    assert!(1 << a | 1 << b | 1 << c | 1 << d == RECORDED_PCRS);
+};
+
+/// A SHA-256 digest: PCR values, `H(paguro.ini)`, `B`, `S`.
+const DIGEST_LEN: usize = paguro_core::tpm::SHA256_LEN;
+type Sha256Digest = [u8; DIGEST_LEN];
+
+/// paguro's 32-byte variables (`PaguroB`, `PaguroSetup`, `PaguroConfigHash`;
+/// INTERFACES.md §5) are read into one byte more, so an oversized one reads
+/// as a wrong size rather than fitting.
+const SECRET_VAR_LEN: usize = DIGEST_LEN;
+const SECRET_VAR_BUF: usize = SECRET_VAR_LEN + 1;
+/// `PaguroUninstall` is exactly one byte; the buffer has room for one more.
+const UNINSTALL_VAR_LEN: usize = 1;
+/// `PaguroTpmBroken`'s value.
+const TPM_BROKEN_VALUE: &[u8] = &[1];
+
+/// Globally defined variables (UEFI 2.10 §3.3), under `EFI_GLOBAL_VARIABLE`.
+const VAR_BOOT_CURRENT: &str = "BootCurrent";
+const VAR_BOOT_ORDER: &str = "BootOrder";
+const VAR_BOOT_NEXT: &str = "BootNext";
+/// A boot option number (`UINT16`, UEFI 2.10 §3.1.1).
+const BOOT_OPTION_LEN: usize = size_of::<u16>();
+/// `Boot####`: the prefix, then the option number in four upper-case hex digits.
+const BOOT_VAR_PREFIX: &[u8; 4] = b"Boot";
+const BOOT_VAR_DIGITS: usize = 4;
+/// `BootOrder` bytes read when looking for the one-shot entry, and when
+/// looking for Windows Boot Manager.
+const BOOT_ORDER_MAX_ONE_SHOT: usize = 512;
+const BOOT_ORDER_MAX_WINDOWS: usize = 256;
+
+/// The PCR 12 event: `PCR12_EVENT_TAG` followed by the label, within a
+/// fixed buffer.
+const PCR12_EVENT_MAX: usize = 64;
+const PCR12_EVENT_TAG_LEN: usize = PCR12_EVENT_TAG.0.len();
+
+/// Random bytes drawn at provisioning: `D`, then the seal's salt.
+const PROVISION_D_LEN: usize = tpm::PAYLOAD_LEN;
+const PROVISION_RANDOM_LEN: usize = PROVISION_D_LEN + seal::SALT_LEN;
+
+/// The parsed seal of `kind`, if its file was present and valid.
+fn seal_of<'s>(parsed: &[Option<Seal<'s>>; SEAL_KINDS], kind: Kind) -> Option<Seal<'s>> {
+    parsed.get(kind as usize).copied().flatten()
+}
 
 enum Step<T> {
     Go(T),
@@ -43,8 +94,8 @@ macro_rules! go {
 #[derive(Clone, Copy)]
 struct BootstrapData {
     volume: Guid,
-    salt: [u8; 16],
-    wrapped: [u8; 32],
+    salt: [u8; seal::SALT_LEN],
+    wrapped: [u8; seal::VMK_LEN],
 }
 
 /// Everything the machine learns, including the secrets it must wipe.
@@ -54,11 +105,11 @@ struct State {
     tpm: bool,
     capped: bool,
     pcr12_was_zero: bool,
-    ini_hash: Option<[u8; 32]>,
-    b: [u8; 32],
-    s: Option<[u8; 32]>,
+    ini_hash: Option<Sha256Digest>,
+    b: Sha256Digest,
+    s: Option<Sha256Digest>,
     bootstrap: Option<BootstrapData>,
-    pcrs: [[u8; 32]; 4],
+    pcrs: [Sha256Digest; RECORDED_PCR_LIST.len()],
     vmk: Option<Key>,
     user_hash: Option<Key>,
     blob_len: Option<usize>,
@@ -112,10 +163,10 @@ pub fn run<P: Platform, V: Volume<P>>(
             capped: false,
             pcr12_was_zero: false,
             ini_hash: None,
-            b: [0; 32],
+            b: [0; DIGEST_LEN],
             s: None,
             bootstrap: None,
-            pcrs: [[0; 32]; 4],
+            pcrs: [[0; DIGEST_LEN]; RECORDED_PCR_LIST.len()],
             vmk: None,
             user_hash: None,
             blob_len: None,
@@ -146,16 +197,20 @@ pub fn run<P: Platform, V: Volume<P>>(
     out
 }
 
-fn sha256(b: &[u8]) -> [u8; 32] {
+fn sha256(b: &[u8]) -> Sha256Digest {
     Sha256::digest(b).into()
 }
 
 /// `Boot####` for entry `n`.
-fn boot_var_name(n: u16) -> [u8; 8] {
+fn boot_var_name(n: u16) -> [u8; BOOT_VAR_PREFIX.len() + BOOT_VAR_DIGITS] {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = *b"Boot0000";
-    for (i, o) in out.iter_mut().skip(4).enumerate() {
-        let nib = (n >> (12 - 4 * i)) & 0xf;
+    const NIBBLE_BITS: usize = 4;
+    const NIBBLE_MASK: u16 = 0xf;
+    let mut out = [b'0'; BOOT_VAR_PREFIX.len() + BOOT_VAR_DIGITS];
+    let (prefix, digits) = out.split_at_mut(BOOT_VAR_PREFIX.len());
+    prefix.copy_from_slice(BOOT_VAR_PREFIX);
+    for (i, o) in digits.iter_mut().enumerate() {
+        let nib = (n >> (NIBBLE_BITS * (BOOT_VAR_DIGITS - 1 - i))) & NIBBLE_MASK;
         *o = HEX.get(usize::from(nib)).copied().unwrap_or(b'0');
     }
     out
@@ -166,7 +221,13 @@ fn ascii(b: &[u8]) -> &str {
 }
 
 /// The unwrapped VMK for a standing rung: `key XOR wrapped_vmk`.
-fn derive_vmk(env: &Key, salt: &[u8; 16], blob: &[u8], pass_hash: &Key, wrapped: &[u8; 32]) -> Key {
+fn derive_vmk(
+    env: &Key,
+    salt: &[u8; seal::SALT_LEN],
+    blob: &[u8],
+    pass_hash: &Key,
+    wrapped: &[u8; seal::VMK_LEN],
+) -> Key {
     let mut rg = kdf::root_gate(env, salt, blob);
     let mut key = kdf::final_key(&rg, pass_hash);
     let vmk = kdf::xor32(&key, wrapped);
@@ -220,14 +281,18 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             Mode::FirstBoot => self.st.bootstrap.map(|b| b.volume),
             Mode::Recovery(_) => None,
         };
-        let mut seal_len = [None; 4];
+        let mut seal_len = [None; SEAL_KINDS];
         let mut seals_for = None;
         if let Some(g) = target {
             self.read_seals(&g, seals, &mut seal_len);
             seals_for = Some(g);
         }
         if self.st.mode == Mode::Normal {
-            let tpm_seal_present = seal_len.first().copied().flatten().is_some();
+            let tpm_seal_present = seal_len
+                .get(Kind::Tpm as usize)
+                .copied()
+                .flatten()
+                .is_some();
             go!(self.ratchet(ini_bytes, tpm_seal_present));
         }
 
@@ -240,9 +305,13 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         if seals_for != Some(part.guid) {
             self.read_seals(&part.guid, seals, &mut seal_len);
         }
-        let tpm_seal_present = seal_len.first().copied().flatten().is_some();
-        let seals: &[[u8; seal::MAX_FILE]; 4] = seals;
-        let mut parsed: [Option<Seal<'_>>; 4] = [None; 4];
+        let tpm_seal_present = seal_len
+            .get(Kind::Tpm as usize)
+            .copied()
+            .flatten()
+            .is_some();
+        let seals: &[[u8; seal::MAX_FILE]; SEAL_KINDS] = seals;
+        let mut parsed: [Option<Seal<'_>>; SEAL_KINDS] = [None; SEAL_KINDS];
         for (((kind, buf), len), out) in Kind::ALL
             .iter()
             .zip(seals.iter())
@@ -422,10 +491,10 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
 
     /// `PaguroUninstall`, exactly one byte (any other size is absent, §5).
     fn uninstall_requested(&mut self) -> bool {
-        let mut b = [0u8; 2];
+        let mut b = [0u8; UNINSTALL_VAR_LEN + 1];
         matches!(
             self.p.get_var(names::VAR_UNINSTALL, &PAGURO_VENDOR, &mut b),
-            Ok(Some(1))
+            Ok(Some(UNINSTALL_VAR_LEN))
         )
     }
 
@@ -459,25 +528,25 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
     }
 
     fn delete_one_shot_entry(&mut self, var: &mut [u8]) {
-        let mut cur = [0u8; 2];
-        let Ok(Some(2)) = self
-            .p
-            .get_var("BootCurrent", &EFI_GLOBAL_VARIABLE, &mut cur)
+        let mut cur = [0u8; BOOT_OPTION_LEN];
+        let Ok(Some(BOOT_OPTION_LEN)) =
+            self.p
+                .get_var(VAR_BOOT_CURRENT, &EFI_GLOBAL_VARIABLE, &mut cur)
         else {
             return;
         };
         let id = u16::from_le_bytes(cur);
         let name_b = boot_var_name(id);
         let name = ascii(&name_b);
-        let mut order = [0u8; 512];
+        let mut order = [0u8; BOOT_ORDER_MAX_ONE_SHOT];
         let in_order = match self
             .p
-            .get_var("BootOrder", &EFI_GLOBAL_VARIABLE, &mut order)
+            .get_var(VAR_BOOT_ORDER, &EFI_GLOBAL_VARIABLE, &mut order)
         {
             Ok(Some(n)) => order
                 .get(..n)
                 .unwrap_or(&[])
-                .chunks_exact(2)
+                .chunks_exact(BOOT_OPTION_LEN)
                 .any(|c| c == id.to_le_bytes()),
             Ok(None) => false,
             // Cannot tell: keep it (the Windows tool tears it down).
@@ -545,18 +614,18 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             self.st.flags |= state::CONFIG_UNVERIFIED;
             return Ok(Step::Go(Some(n)));
         }
-        let mut stored = [0u8; 33];
+        let mut stored = [0u8; SECRET_VAR_BUF];
         let stored_len = self
             .p
             .get_var(names::VAR_CONFIG_HASH, &PAGURO_VENDOR, &mut stored)
             .unwrap_or(None);
-        if stored_len != Some(32) {
+        if stored_len != Some(SECRET_VAR_LEN) {
             // Absent or wrong size — treated as absent (§5): NVRAM cleared.
             self.log(format_args!("paguro: stage1 hash variable missing"));
             self.st.mode = Mode::Recovery(RecoveryReason::HashMissing);
             return Ok(Step::Go(None));
         }
-        if !tpm::ct_eq(stored.get(..32).unwrap_or(&[]), &hash) {
+        if !tpm::ct_eq(stored.get(..SECRET_VAR_LEN).unwrap_or(&[]), &hash) {
             self.log(format_args!("paguro: stage1 hash mismatch"));
             return match self.p.prompt(&Screen::ConfigInvalid, &mut []) {
                 Input::Recover => {
@@ -658,8 +727,8 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
     fn read_seals(
         &mut self,
         volume: &Guid,
-        bufs: &mut [[u8; seal::MAX_FILE]; 4],
-        lens: &mut [Option<usize>; 4],
+        bufs: &mut [[u8; seal::MAX_FILE]; SEAL_KINDS],
+        lens: &mut [Option<usize>; SEAL_KINDS],
     ) {
         for ((kind, buf), len) in Kind::ALL.iter().zip(bufs.iter_mut()).zip(lens.iter_mut()) {
             let mut path = [0u8; names::SEAL_PATH_MAX];
@@ -679,7 +748,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             return false;
         }
         match Tpm::new(self.p).pcr_read(1 << PCR12) {
-            Ok(v) => v.get(PCR12) == Some(&[0; 32]),
+            Ok(v) => v.get(PCR12) == Some(&[0; DIGEST_LEN]),
             Err(e) => {
                 self.log(format_args!("paguro: PCR 12 read failed: {e:?}"));
                 false
@@ -688,10 +757,10 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
     }
 
     fn extend12(&mut self, data: &[u8], label: &[u8]) -> Result<(), BootError> {
-        let mut event = [0u8; 64];
-        let n = 16 + label.len();
+        let mut event = [0u8; PCR12_EVENT_MAX];
+        let n = PCR12_EVENT_TAG_LEN + label.len();
         let ev = event.get_mut(..n).ok_or(BootError::Disk)?;
-        let (g, l) = ev.split_at_mut(16);
+        let (g, l) = ev.split_at_mut(PCR12_EVENT_TAG_LEN);
         g.copy_from_slice(&PCR12_EVENT_TAG.0);
         l.copy_from_slice(label);
         self.p
@@ -702,7 +771,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
     fn log_pcr12(&mut self, what: &str) {
         match Tpm::new(self.p).pcr_read(1 << PCR12) {
             Ok(v) => {
-                let val = v.get(PCR12).copied().unwrap_or([0; 32]);
+                let val = v.get(PCR12).copied().unwrap_or([0; DIGEST_LEN]);
                 self.log(format_args!("paguro: pcr12={} ({what})", Hex(&val)));
             }
             Err(e) => self.log(format_args!("paguro: pcr12 unreadable: {e:?}")),
@@ -742,10 +811,12 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
 
     fn load_secrets(&mut self) -> Result<(), BootError> {
         // B, eagerly, before any rung (DESIGN.md §6).
-        let mut b = [0u8; 33];
+        let mut b = [0u8; SECRET_VAR_BUF];
         match self.p.get_var(names::VAR_B, &PAGURO_VENDOR, &mut b) {
-            Ok(Some(32)) => {
-                self.st.b.copy_from_slice(b.get(..32).unwrap_or(&[0; 32]));
+            Ok(Some(SECRET_VAR_LEN)) => {
+                self.st
+                    .b
+                    .copy_from_slice(b.get(..SECRET_VAR_LEN).unwrap_or(&[0; SECRET_VAR_LEN]));
             }
             _ => {
                 self.p.random(&mut self.st.b).map_err(|_| BootError::Rng)?;
@@ -759,17 +830,17 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             }
         }
         b.zeroize();
-        let mut s = [0u8; 33];
-        if let Ok(Some(32)) = self.p.get_var(names::VAR_SETUP, &PAGURO_VENDOR, &mut s) {
-            let mut v = [0u8; 32];
-            v.copy_from_slice(s.get(..32).unwrap_or(&[0; 32]));
+        let mut s = [0u8; SECRET_VAR_BUF];
+        if let Ok(Some(SECRET_VAR_LEN)) = self.p.get_var(names::VAR_SETUP, &PAGURO_VENDOR, &mut s) {
+            let mut v = [0u8; SECRET_VAR_LEN];
+            v.copy_from_slice(s.get(..SECRET_VAR_LEN).unwrap_or(&[0; SECRET_VAR_LEN]));
             self.st.s = Some(v);
         }
         s.zeroize();
         if self.st.tpm {
             match Tpm::new(self.p).pcr_read(RECORDED_PCRS) {
                 Ok(v) => {
-                    for (i, pcr) in [0u32, 2, 4, 7].iter().enumerate() {
+                    for (i, pcr) in RECORDED_PCR_LIST.iter().enumerate() {
                         if let (Some(dst), Some(src)) = (self.st.pcrs.get_mut(i), v.get(*pcr)) {
                             *dst = *src;
                         }
@@ -1245,31 +1316,43 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         }
     }
 
-    fn tpm_usable(&self, cfg: Option<&Config<'_>>, parsed: &[Option<Seal<'_>>; 4]) -> bool {
+    fn tpm_usable(
+        &self,
+        cfg: Option<&Config<'_>>,
+        parsed: &[Option<Seal<'_>>; SEAL_KINDS],
+    ) -> bool {
         self.st.tpm
             && self.st.mode == Mode::Normal
             && self.st.tpm_grey.is_none()
-            && parsed.first().copied().flatten().is_some()
+            && seal_of(parsed, Kind::Tpm).is_some()
             && cfg.is_some_and(|c| c.tpm)
     }
 
-    fn setup_usable(&self, cfg: Option<&Config<'_>>, parsed: &[Option<Seal<'_>>; 4]) -> bool {
+    fn setup_usable(
+        &self,
+        cfg: Option<&Config<'_>>,
+        parsed: &[Option<Seal<'_>>; SEAL_KINDS],
+    ) -> bool {
         self.st.s.is_some()
             && self.st.ini_hash.is_some()
-            && parsed.get(1).copied().flatten().is_some()
+            && seal_of(parsed, Kind::SetupTpm).is_some()
             && (self.st.mode != Mode::Normal || cfg.is_some_and(|c| c.setup_tpm))
     }
 
-    fn passphrase_usable(&self, cfg: Option<&Config<'_>>, parsed: &[Option<Seal<'_>>; 4]) -> bool {
-        parsed.get(2).copied().flatten().is_some()
+    fn passphrase_usable(
+        &self,
+        cfg: Option<&Config<'_>>,
+        parsed: &[Option<Seal<'_>>; SEAL_KINDS],
+    ) -> bool {
+        seal_of(parsed, Kind::Passphrase).is_some()
             && (self.st.mode != Mode::Normal || cfg.is_some_and(|c| c.passphrase))
     }
 
     fn unlock(
         &mut self,
         cfg: Option<&Config<'_>>,
-        parsed: &[Option<Seal<'_>>; 4],
-        secret: &mut [u8; 256],
+        parsed: &[Option<Seal<'_>>; SEAL_KINDS],
+        secret: &mut [u8; SECRET_MAX],
         blob_buf: &mut [u8],
         var: &mut [u8],
     ) -> Result<Step<Rung>, BootError> {
@@ -1342,7 +1425,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             };
             let got = {
                 let s = secret.get(..len).unwrap_or(&[]);
-                let mut copy = [0u8; 256];
+                let mut copy = [0u8; SECRET_MAX];
                 if let Some(d) = copy.get_mut(..len) {
                     d.copy_from_slice(s);
                 }
@@ -1381,9 +1464,9 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
     fn try_pin_bypass(
         &mut self,
         cfg: Option<&Config<'_>>,
-        parsed: &[Option<Seal<'_>>; 4],
+        parsed: &[Option<Seal<'_>>; SEAL_KINDS],
     ) -> Result<Option<Rung>, BootError> {
-        let Some(Some(seal)) = parsed.get(3).copied() else {
+        let Some(seal) = seal_of(parsed, Kind::PinBypass) else {
             return Ok(None);
         };
         if !self.st.tpm || self.st.mode != Mode::Normal || cfg.is_none_or(|c| !c.tpm) {
@@ -1410,7 +1493,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
                 return Ok(None);
             }
         }
-        let mut d = [0u8; 32];
+        let mut d = [0u8; tpm::PAYLOAD_LEN];
         let r = Tpm::new(self.p).unseal(
             sealed.private,
             sealed.public,
@@ -1453,7 +1536,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         pw: &[u8],
         include_tpm: bool,
         cfg: Option<&Config<'_>>,
-        parsed: &[Option<Seal<'_>>; 4],
+        parsed: &[Option<Seal<'_>>; SEAL_KINDS],
         blob_buf: &mut [u8],
     ) -> Result<Option<Rung>, BootError> {
         let Ok(pw) = core::str::from_utf8(pw) else {
@@ -1468,7 +1551,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         r
     }
 
-    fn stretch(&self, user: &Key, salt: &[u8; 16]) -> Key {
+    fn stretch(&self, user: &Key, salt: &[u8; seal::SALT_LEN]) -> Key {
         kdf::bitlocker_stretch(user, salt, self.params.stretch_iterations)
     }
 
@@ -1477,13 +1560,13 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         user: &Key,
         include_tpm: bool,
         cfg: Option<&Config<'_>>,
-        parsed: &[Option<Seal<'_>>; 4],
+        parsed: &[Option<Seal<'_>>; SEAL_KINDS],
         blob_buf: &mut [u8],
     ) -> Result<Option<Rung>, BootError> {
         // setupTPM: S + H(paguro.ini) + passphrase.
         if include_tpm && self.setup_usable(cfg, parsed) {
-            if let (Some(Some(seal)), Some(s), Some(h)) =
-                (parsed.get(1).copied(), self.st.s, self.st.ini_hash)
+            if let (Some(seal), Some(s), Some(h)) =
+                (seal_of(parsed, Kind::SetupTpm), self.st.s, self.st.ini_hash)
             {
                 let mut ph = self.stretch(user, seal.salt);
                 let env = kdf::env_setup(&s, &h);
@@ -1497,7 +1580,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         }
         // passphrase: a public env; opt-in.
         if self.passphrase_usable(cfg, parsed) {
-            if let Some(Some(seal)) = parsed.get(2).copied() {
+            if let Some(seal) = seal_of(parsed, Kind::Passphrase) {
                 let mut ph = self.stretch(user, seal.salt);
                 let blob = self.blob(blob_buf)?;
                 let vmk = derive_vmk(
@@ -1536,7 +1619,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         }
         // tpm: the only rung that costs an attempt.
         if include_tpm && self.tpm_usable(cfg, parsed) {
-            if let Some(Some(seal)) = parsed.first().copied() {
+            if let Some(seal) = seal_of(parsed, Kind::Tpm) {
                 return self.try_tpm(user, &seal, blob_buf);
             }
         }
@@ -1554,7 +1637,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         };
         let mut ph = self.stretch(user, seal.salt);
         let mut auth = kdf::tpm_auth(&ph);
-        let mut d = [0u8; 32];
+        let mut d = [0u8; tpm::PAYLOAD_LEN];
         let r = Tpm::new(self.p).unseal(
             sealed.private,
             sealed.public,
@@ -1592,7 +1675,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
                             names::VAR_TPM_BROKEN,
                             &PAGURO_VENDOR,
                             attrs::NV_BS_RT,
-                            &[1],
+                            TPM_BROKEN_VALUE,
                         ) {
                             self.log(format_args!(
                                 "paguro: setting PaguroTpmBroken failed: {e:?}"
@@ -1671,15 +1754,17 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         let pcr12 = tpm::pcr12_after_load_taint(gen_ini.get(..n).unwrap_or(&[]));
         let [p0, p2, p4, p7] = self.st.pcrs;
         let policy = tpm::policy_digest(seal::PCR_MASK_V1, &[p0, p2, p4, p7, pcr12], None);
-        let mut rnd = [0u8; 48];
+        let mut rnd = [0u8; PROVISION_RANDOM_LEN];
         if self.p.random(&mut rnd).is_err() {
             self.log(format_args!("paguro: provisioning: RNG failed"));
             return Some(n);
         }
-        let mut d = [0u8; 32];
-        d.copy_from_slice(rnd.get(..32).unwrap_or(&[0; 32]));
-        prov.salt
-            .copy_from_slice(rnd.get(32..48).unwrap_or(&[0; 16]));
+        let mut d = [0u8; PROVISION_D_LEN];
+        d.copy_from_slice(rnd.get(..PROVISION_D_LEN).unwrap_or(&[0; PROVISION_D_LEN]));
+        prov.salt.copy_from_slice(
+            rnd.get(PROVISION_D_LEN..PROVISION_RANDOM_LEN)
+                .unwrap_or(&[0; seal::SALT_LEN]),
+        );
         rnd.zeroize();
         let mut ph = self.stretch(&user, &prov.salt);
         let mut auth = kdf::tpm_auth(&ph);
@@ -1727,7 +1812,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         prov: &Provision,
         out: &mut [u8],
     ) -> Result<usize, BootError> {
-        let per = u64::from(part.block_size / 512);
+        let per = u64::from(part.block_size) / SECTOR;
         let name = located.name();
         let id = |f: volume::FileId| ImageId {
             name,
@@ -1744,8 +1829,8 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             .filter(|_| root.is_some() && located.efi_file.is_none())
             .filter(other)
             .map(id);
-        let mut pcrv = [0u8; 128];
-        for (dst, src) in pcrv.chunks_exact_mut(32).zip(self.st.pcrs.iter()) {
+        let mut pcrv = [0u8; RECORDED_PCR_LIST.len() * DIGEST_LEN];
+        for (dst, src) in pcrv.chunks_exact_mut(DIGEST_LEN).zip(self.st.pcrs.iter()) {
             dst.copy_from_slice(src);
         }
         let provision = prov.ok.then_some(Seal {
@@ -1797,16 +1882,16 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
     }
 
     fn start_windows(&mut self, var: &mut [u8]) -> Outcome {
-        let mut order = [0u8; 256];
+        let mut order = [0u8; BOOT_ORDER_MAX_WINDOWS];
         let n = match self
             .p
-            .get_var("BootOrder", &EFI_GLOBAL_VARIABLE, &mut order)
+            .get_var(VAR_BOOT_ORDER, &EFI_GLOBAL_VARIABLE, &mut order)
         {
             Ok(Some(n)) => n,
             _ => 0,
         };
         let mut target = None;
-        for pair in order.get(..n).unwrap_or(&[]).chunks_exact(2) {
+        for pair in order.get(..n).unwrap_or(&[]).chunks_exact(BOOT_OPTION_LEN) {
             let id = u16::from_le_bytes([
                 pair.first().copied().unwrap_or(0),
                 pair.get(1).copied().unwrap_or(0),
@@ -1826,7 +1911,7 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             return Outcome::Halted(BootError::NoWindowsEntry);
         };
         if let Err(e) = self.p.set_var(
-            "BootNext",
+            VAR_BOOT_NEXT,
             &EFI_GLOBAL_VARIABLE,
             attrs::NV_BS_RT,
             &id.to_le_bytes(),
@@ -1847,6 +1932,8 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
 /// `paguro.ini` allows (INTERFACES.md §3.2).
 pub const PATH_MAX: usize = config::MAX_PATH_BYTES;
 const PAGURO_DIR: &str = "\\paguro";
+/// The name of an entry recovery authors when the file's own name gives none.
+const RECOVERY_ENTRY_NAME: &str = "recovery";
 
 /// An absolute backslash path in fixed memory, always valid by
 /// [`config::check_path`] (or empty, or the root `\`).
@@ -1934,7 +2021,7 @@ struct Chosen {
     kind: EntryKind,
     fat: PathText,
     root: PathText,
-    name: [u8; 32],
+    name: [u8; config::MAX_NAME],
 }
 
 impl Chosen {
@@ -1944,7 +2031,7 @@ impl Chosen {
             kind: EntryKind::Disk,
             fat: PathText::new(),
             root: PathText::new(),
-            name: [0; 32],
+            name: [0; config::MAX_NAME],
         }
     }
 
@@ -1958,11 +2045,12 @@ impl Chosen {
     }
 
     fn entry(&mut self, volume: Guid) -> Entry<'_> {
-        let mut name = [0u8; 32];
-        let n = ui::entry_name(self.efi.as_str(), &mut name, "recovery").len();
+        let mut name = [0u8; config::MAX_NAME];
+        let n = ui::entry_name(self.efi.as_str(), &mut name, RECOVERY_ENTRY_NAME).len();
         self.name = name;
         Entry {
-            name: core::str::from_utf8(self.name.get(..n).unwrap_or(&[])).unwrap_or("recovery"),
+            name: core::str::from_utf8(self.name.get(..n).unwrap_or(&[]))
+                .unwrap_or(RECOVERY_ENTRY_NAME),
             volume,
             root: self.root.get(),
             efi: match self.kind {
@@ -1979,16 +2067,16 @@ impl Chosen {
 /// The provisioning outputs that outlive [`Machine::provision`].
 struct Provision {
     ok: bool,
-    salt: [u8; 16],
-    wrapped: [u8; 32],
+    salt: [u8; seal::SALT_LEN],
+    wrapped: [u8; seal::VMK_LEN],
 }
 
 impl Provision {
     const fn new() -> Self {
         Provision {
             ok: false,
-            salt: [0; 16],
-            wrapped: [0; 32],
+            salt: [0; seal::SALT_LEN],
+            wrapped: [0; seal::VMK_LEN],
         }
     }
 }

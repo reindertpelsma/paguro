@@ -36,6 +36,8 @@
 //! (DESIGN.md §6). The response HMAC is verified before anything is
 //! decrypted.
 
+use core::mem::{offset_of, size_of};
+
 use hmac::{Hmac, Mac};
 use p256::elliptic_curve::point::AffineCoordinates;
 use p256::{AffinePoint, FieldBytes, NonZeroScalar, ProjectivePoint};
@@ -50,7 +52,59 @@ use crate::platform::{Platform, PlatformError};
 /// Submissions of one command while the TPM answers "retry".
 const MAX_ATTEMPTS: u32 = 8;
 
-pub type Digest32 = [u8; 32];
+/// Draws of 32 random bytes tried as the ephemeral salting scalar.
+const EPHEMERAL_KEY_ATTEMPTS: usize = 4;
+
+/// Capacity of the parameter area a command is marshalled into.
+const PARAMS_LEN: usize = 2048;
+
+/// Response header (TPM 2.0 Part 1 §18.3). Layout only: offsets are taken
+/// with `offset_of!`, the bytes are never cast to it.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct ResponseHeader {
+    tag: u16,
+    response_size: u32,
+    response_code: u32,
+}
+const RESPONSE_CODE: core::ops::Range<usize> =
+    field_range(offset_of!(ResponseHeader, response_code), size_of::<u32>());
+const _: () = assert!(offset_of!(ResponseHeader, response_code) == 6);
+const _: () = assert!(size_of::<ResponseHeader>() == t::HEADER_LEN);
+
+/// `start..start + len`, for a field located with `offset_of!`.
+const fn field_range(start: usize, len: usize) -> core::ops::Range<usize> {
+    start..start + len
+}
+
+/// Size field in front of every TPM2B (TPM 2.0 Part 2 §10.4).
+const TPM2B_SIZE_LEN: usize = size_of::<u16>();
+/// `TPM_ALG_ID` (TPM 2.0 Part 2 §6.3).
+const ALG_ID_LEN: usize = size_of::<u16>();
+/// A SHA-256 `TPM2B_NAME` body: `nameAlg || digest` (TPM 2.0 Part 1 §16).
+pub const NAME_LEN: usize = ALG_ID_LEN + t::SHA256_LEN;
+/// `TPML_PCR_SELECTION` holding one `TPMS_PCR_SELECTION` of three octets
+/// (PCRs 0–23), as `write_pcr_selection` emits it (TPM 2.0 Part 2 §10.9.7,
+/// §10.6.2). Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct PcrSelectionOne {
+    count: u32,
+    hash: u16,
+    sizeof_select: u8,
+    pcr_select: [u8; 3],
+}
+const PCR_SELECTION_LEN: usize = size_of::<PcrSelectionOne>();
+const _: () = assert!(PCR_SELECTION_LEN == 10);
+
+/// KDF labels (TPM 2.0 Part 1 §19.6.13, §19.6.8): the ECDH salt and the session key.
+const LABEL_SALT: &[u8] = b"SECRET";
+const LABEL_SESSION_KEY: &[u8] = b"ATH";
+
+/// The sealed payload: one 32-byte key.
+pub const PAYLOAD_LEN: usize = 32;
+
+pub type Digest32 = [u8; t::SHA256_LEN];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TpmFail {
@@ -114,7 +168,7 @@ fn sha256(parts: &[&[u8]]) -> Digest32 {
 fn hmac256(key: &[u8], parts: &[&[u8]]) -> Digest32 {
     // HMAC accepts keys of any length.
     let Ok(mut m) = <Hmac<Sha256> as Mac>::new_from_slice(key) else {
-        return [0; 32];
+        return [0; t::SHA256_LEN];
     };
     for p in parts {
         m.update(p);
@@ -130,18 +184,18 @@ fn trim_zeros(b: &[u8]) -> &[u8] {
 }
 
 /// `TPM_ALG_SHA256 || SHA-256(publicArea)`.
-pub fn object_name(public_area: &[u8]) -> [u8; 34] {
-    let mut n = [0u8; 34];
-    let (alg, digest) = n.split_at_mut(2);
+pub fn object_name(public_area: &[u8]) -> [u8; NAME_LEN] {
+    let mut n = [0u8; NAME_LEN];
+    let (alg, digest) = n.split_at_mut(ALG_ID_LEN);
     alg.copy_from_slice(&t::alg::SHA256.to_be_bytes());
     digest.copy_from_slice(&sha256(&[public_area]));
     n
 }
 
-fn pcr_selection_bytes(mask: u32) -> [u8; 10] {
-    let mut b = [0u8; 10];
+fn pcr_selection_bytes(mask: u32) -> [u8; PCR_SELECTION_LEN] {
+    let mut b = [0u8; PCR_SELECTION_LEN];
     let mut w = Writer::new(&mut b);
-    // 10 bytes into 10 cannot fail.
+    // PCR_SELECTION_LEN bytes into PCR_SELECTION_LEN cannot fail.
     let _ = t::write_pcr_selection(&mut w, t::alg::SHA256, mask);
     b
 }
@@ -157,7 +211,7 @@ pub fn policy_digest(mask: u32, pcr_values: &[Digest32], deadline: Option<u64>) 
     }
     let pcr_digest: Digest32 = pcr_digest.finalize().into();
     let mut d = sha256(&[
-        &[0u8; 32],
+        &[0u8; t::SHA256_LEN],
         &t::cc::POLICY_PCR.to_be_bytes(),
         &pcr_selection_bytes(mask),
         &pcr_digest,
@@ -180,7 +234,7 @@ pub fn extend(old: &Digest32, data: &[u8]) -> Digest32 {
 
 /// PCR 12 after the load taint, from zero (INTERFACES.md §6).
 pub fn pcr12_after_load_taint(ini: &[u8]) -> Digest32 {
-    extend(&[0; 32], ini)
+    extend(&[0; t::SHA256_LEN], ini)
 }
 
 pub const MAX_OBJECT: usize = 1024;
@@ -239,7 +293,7 @@ pub struct Tpm<'p, P: Platform> {
     p: &'p mut P,
     cmd: [u8; t::MAX_COMMAND],
     resp: [u8; t::MAX_RESPONSE],
-    params: [u8; 2048],
+    params: [u8; PARAMS_LEN],
 }
 
 impl<'p, P: Platform> Tpm<'p, P> {
@@ -248,7 +302,7 @@ impl<'p, P: Platform> Tpm<'p, P> {
             p,
             cmd: [0; t::MAX_COMMAND],
             resp: [0; t::MAX_RESPONSE],
-            params: [0; 2048],
+            params: [0; PARAMS_LEN],
         }
     }
 
@@ -271,8 +325,8 @@ impl<'p, P: Platform> Tpm<'p, P> {
             attempts += 1;
             let code = self
                 .resp
-                .get(6..10)
-                .filter(|_| len >= 10)
+                .get(RESPONSE_CODE)
+                .filter(|_| len >= RESPONSE_CODE.end)
                 .and_then(|b| b.try_into().ok())
                 .map(u32::from_be_bytes);
             match code {
@@ -321,7 +375,10 @@ impl<'p, P: Platform> Tpm<'p, P> {
 
     pub fn lockout(&mut self) -> Result<Lockout, TpmFail> {
         let perm = self.properties(t::PT_PERMANENT, 1)?;
-        let da = self.properties(t::PT_LOCKOUT_COUNTER, 2)?;
+        let da = self.properties(
+            t::PT_LOCKOUT_COUNTER,
+            t::PT_MAX_AUTH_FAIL - t::PT_LOCKOUT_COUNTER + 1,
+        )?;
         Ok(Lockout {
             in_lockout: perm.get(t::PT_PERMANENT).unwrap_or(0) & t::PERMANENT_IN_LOCKOUT != 0,
             counter: da.get(t::PT_LOCKOUT_COUNTER).unwrap_or(0),
@@ -375,7 +432,7 @@ impl<'p, P: Platform> Tpm<'p, P> {
         let len = self.run(t::cc::LOAD, &[parent], &[AuthCommand::PASSWORD], pn)?;
         let r = t::response(self.resp(len), true, 1)?;
         let name = t::parse_load(r.params)?;
-        let expect = object_name(public.get(2..).unwrap_or(&[]));
+        let expect = object_name(public.get(TPM2B_SIZE_LEN..).unwrap_or(&[]));
         if name != expect {
             return Err(TpmFail::NameMismatch);
         }
@@ -393,8 +450,8 @@ impl<'p, P: Platform> Tpm<'p, P> {
         // An ephemeral scalar in [1, n): retried on the (2^-32) chance that
         // 32 random bytes are not one.
         let mut k = None;
-        for _ in 0..4 {
-            let mut raw = [0u8; 32];
+        for _ in 0..EPHEMERAL_KEY_ATTEMPTS {
+            let mut raw = [0u8; t::ECC_P256_LEN];
             self.p.random(&mut raw)?;
             let s: Option<NonZeroScalar> = NonZeroScalar::from_repr(FieldBytes::from(raw)).into();
             raw.zeroize();
@@ -411,12 +468,12 @@ impl<'p, P: Platform> Tpm<'p, P> {
             x: qe.x().into(),
             y: qe.y().into(),
         };
-        let mut z: [u8; 32] = shared.x().into();
+        let mut z: [u8; t::ECC_P256_LEN] = shared.x().into();
         shared.zeroize();
-        let mut salt = st::kdfe(&z, b"SECRET", &qe_point.x, &srk.point.x);
+        let mut salt = st::kdfe(&z, LABEL_SALT, &qe_point.x, &srk.point.x);
         z.zeroize();
 
-        let mut nonce_caller = [0u8; 32];
+        let mut nonce_caller = [0u8; t::SHA256_LEN];
         self.p.random(&mut nonce_caller)?;
         let pn = t::params_start_session(
             &mut self.params,
@@ -454,14 +511,20 @@ impl<'p, P: Platform> Tpm<'p, P> {
             handle,
             nonce_tpm: [0; t::MAX_NONCE],
             nonce_len: nonce_tpm.len(),
-            key: [0; 32],
+            key: [0; t::SHA256_LEN],
         };
         s.nonce_tpm
             .get_mut(..s.nonce_len)
             .ok_or(TpmFail::Marshal)?
             .copy_from_slice(nonce_tpm);
-        let mut key = [0u8; 32];
-        st::kdfa(&salt, b"ATH", s.nonce_tpm(), &nonce_caller, &mut key);
+        let mut key = [0u8; t::SHA256_LEN];
+        st::kdfa(
+            &salt,
+            LABEL_SESSION_KEY,
+            s.nonce_tpm(),
+            &nonce_caller,
+            &mut key,
+        );
         s.key = key;
         key.zeroize();
         salt.zeroize();
@@ -483,9 +546,9 @@ impl<'p, P: Platform> Tpm<'p, P> {
         pcr_mask: u32,
         deadline: Option<u64>,
         auth: &[u8],
-        out: &mut [u8; 32],
+        out: &mut [u8; PAYLOAD_LEN],
     ) -> Result<(), TpmFail> {
-        let mut nc_unseal = [0u8; 32];
+        let mut nc_unseal = [0u8; t::SHA256_LEN];
         self.p.random(&mut nc_unseal)?;
         let srk = self.create_primary_srk()?;
         let item = match self.load(srk.handle, private, public) {
@@ -524,8 +587,8 @@ impl<'p, P: Platform> Tpm<'p, P> {
         pcr_mask: u32,
         deadline: Option<u64>,
         auth: &[u8],
-        nonce_caller: &[u8; 32],
-        out: &mut [u8; 32],
+        nonce_caller: &[u8; t::SHA256_LEN],
+        out: &mut [u8; PAYLOAD_LEN],
     ) -> Result<(), TpmFail> {
         let pn = t::params_policy_pcr(&mut self.params, t::alg::SHA256, pcr_mask)?;
         self.policy(t::cc::POLICY_PCR, session.handle, pn)?;
@@ -537,7 +600,7 @@ impl<'p, P: Platform> Tpm<'p, P> {
 
         // Unseal: HMAC over cpHash keyed by sessionKey || authValue (the
         // policy has PolicyAuthValue); the response's data encrypted.
-        let name = object_name(public.get(2..).unwrap_or(&[]));
+        let name = object_name(public.get(TPM2B_SIZE_LEN..).unwrap_or(&[]));
         let cp = sha256(&[&t::cc::UNSEAL.to_be_bytes(), &name]);
         let mut key = SessionValue::new(&session.key, trim_zeros(auth));
         // continueSession clear: the TPM flushes the session on success.
@@ -555,13 +618,17 @@ impl<'p, P: Platform> Tpm<'p, P> {
         let r = self.run(t::cc::UNSEAL, &[item], &[s], 0).and_then(|len| {
             let r = t::response(self.resp(len), false, 1)?;
             let ra = r.sessions.first().copied().unwrap_or_default();
-            let rp = sha256(&[&0u32.to_be_bytes(), &t::cc::UNSEAL.to_be_bytes(), r.params]);
+            let rp = sha256(&[
+                &t::rc::SUCCESS.to_be_bytes(),
+                &t::cc::UNSEAL.to_be_bytes(),
+                r.params,
+            ]);
             let want = hmac256(key.get(), &[&rp, ra.nonce, nonce_caller, &[ra.attributes]]);
             if !ct_eq(&want, ra.hmac) {
                 return Err(TpmFail::ResponseAuth);
             }
             let data = t::parse_unseal(r.params)?;
-            if data.len() != 32 {
+            if data.len() != PAYLOAD_LEN {
                 return Err(TpmFail::BadPayload);
             }
             let mut kiv = st::cfb_key_iv(key.get(), ra.nonce, nonce_caller);
@@ -579,8 +646,8 @@ impl<'p, P: Platform> Tpm<'p, P> {
     /// and the Windows tool's PIN bypass).
     pub fn create_sealed(
         &mut self,
-        auth: &[u8; 32],
-        data: &[u8; 32],
+        auth: &[u8; PAYLOAD_LEN],
+        data: &[u8; PAYLOAD_LEN],
         policy: &Digest32,
         out: &mut CreatedObject,
     ) -> Result<(), TpmFail> {
@@ -606,12 +673,12 @@ impl<'p, P: Platform> Tpm<'p, P> {
         &mut self,
         srk: &Srk,
         session: &Session,
-        auth: &[u8; 32],
-        data: &[u8; 32],
+        auth: &[u8; PAYLOAD_LEN],
+        data: &[u8; PAYLOAD_LEN],
         policy: &Digest32,
         out: &mut CreatedObject,
     ) -> Result<(), TpmFail> {
-        let mut nonce_caller = [0u8; 32];
+        let mut nonce_caller = [0u8; t::SHA256_LEN];
         self.p.random(&mut nonce_caller)?;
         let pn = t::params_create_sealed(&mut self.params, auth, data, policy)?;
         // The SRK's authValue is empty: the session value is the key alone.
@@ -620,14 +687,16 @@ impl<'p, P: Platform> Tpm<'p, P> {
         // its size (Part 1 §21.1).
         let first = self
             .params
-            .get(..2)
-            .and_then(|b| <[u8; 2]>::try_from(b).ok())
+            .get(..TPM2B_SIZE_LEN)
+            .and_then(|b| <[u8; TPM2B_SIZE_LEN]>::try_from(b).ok())
             .map(|b| usize::from(u16::from_be_bytes(b)))
             .ok_or(TpmFail::Marshal)?;
         let mut kiv = st::cfb_key_iv(&key, &nonce_caller, session.nonce_tpm());
         st::cfb_encrypt(
             &kiv,
-            self.params.get_mut(2..2 + first).ok_or(TpmFail::Marshal)?,
+            self.params
+                .get_mut(TPM2B_SIZE_LEN..TPM2B_SIZE_LEN + first)
+                .ok_or(TpmFail::Marshal)?,
         );
         kiv.zeroize();
         let params = self.params.get(..pn).ok_or(TpmFail::Marshal)?;
@@ -643,7 +712,11 @@ impl<'p, P: Platform> Tpm<'p, P> {
         let len = self.run(t::cc::CREATE, &[srk.handle], &[s], pn)?;
         let r = t::response(self.resp(len), false, 1)?;
         let ra = r.sessions.first().copied().unwrap_or_default();
-        let rp = sha256(&[&0u32.to_be_bytes(), &t::cc::CREATE.to_be_bytes(), r.params]);
+        let rp = sha256(&[
+            &t::rc::SUCCESS.to_be_bytes(),
+            &t::cc::CREATE.to_be_bytes(),
+            r.params,
+        ]);
         let want = hmac256(&key, &[&rp, ra.nonce, &nonce_caller, &[ra.attributes]]);
         if !ct_eq(&want, ra.hmac) {
             return Err(TpmFail::ResponseAuth);
@@ -670,7 +743,7 @@ impl<'p, P: Platform> Tpm<'p, P> {
 pub struct Srk {
     pub handle: u32,
     pub point: EccPoint,
-    pub name: [u8; 34],
+    pub name: [u8; NAME_LEN],
 }
 
 /// A salted session: its handle, the TPM's last nonce and the session key.
@@ -678,7 +751,7 @@ struct Session {
     handle: u32,
     nonce_tpm: [u8; t::MAX_NONCE],
     nonce_len: usize,
-    key: [u8; 32],
+    key: [u8; t::SHA256_LEN],
 }
 
 impl Session {
@@ -690,20 +763,20 @@ impl Session {
 /// `sessionKey || authValue`: the HMAC key of an authorisation, and the
 /// session value parameter encryption derives its key from.
 struct SessionValue {
-    b: [u8; 32 + t::MAX_NONCE],
+    b: [u8; t::SHA256_LEN + t::MAX_NONCE],
     n: usize,
 }
 
 impl SessionValue {
-    fn new(key: &[u8; 32], auth: &[u8]) -> Self {
+    fn new(key: &[u8; t::SHA256_LEN], auth: &[u8]) -> Self {
         let mut v = SessionValue {
-            b: [0; 32 + t::MAX_NONCE],
+            b: [0; t::SHA256_LEN + t::MAX_NONCE],
             n: 0,
         };
         let auth = auth.get(..auth.len().min(t::MAX_NONCE)).unwrap_or(&[]);
-        let n = 32 + auth.len();
+        let n = t::SHA256_LEN + auth.len();
         if let Some(d) = v.b.get_mut(..n) {
-            let (a, b) = d.split_at_mut(32);
+            let (a, b) = d.split_at_mut(t::SHA256_LEN);
             a.copy_from_slice(key);
             b.copy_from_slice(auth);
             v.n = n;

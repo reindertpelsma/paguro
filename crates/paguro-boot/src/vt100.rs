@@ -46,7 +46,43 @@ enum Seq {
     Drop,
 }
 
+/// C0 control characters (ECMA-48 §8.2).
 const ESC: u8 = 0x1b;
+const BS: u8 = 0x08;
+const CR: u8 = b'\r';
+const LF: u8 = b'\n';
+/// DEL, what most terminals send for Backspace.
+const DEL: u8 = 0x7f;
+
+/// Second byte of a Control Sequence Introducer, `ESC [` (ECMA-48 §5.4).
+const CSI: u8 = b'[';
+/// Second byte of Single Shift Three, `ESC O` (ECMA-48 §8.3.143).
+const SS3: u8 = b'O';
+/// The Linux console's function keys: `ESC [ [ A`…`E`.
+const LINUX_FKEY: u8 = b'[';
+/// Final byte of a VT220 editing/function-key sequence, `ESC [ n ~`.
+const VT220_TILDE: u8 = b'~';
+/// Parameter separator inside a control sequence (ECMA-48 §5.4.2).
+const PARAM_SEP: u8 = b';';
+
+/// Byte classes of a control sequence (ECMA-48 §5.4): parameter and
+/// intermediate bytes, then one final byte.
+const CSI_PARAM_OR_INTERMEDIATE: core::ops::RangeInclusive<u8> = 0x20..=0x3f;
+const CSI_FINAL: core::ops::RangeInclusive<u8> = 0x40..=0x7e;
+/// Printable ASCII (G0 graphic characters, space to tilde).
+const PRINTABLE: core::ops::RangeInclusive<u8> = 0x20..=0x7e;
+
+/// UTF-8 byte classes (RFC 3629 §4): lead bytes of 2-, 3- and 4-byte
+/// sequences, and the continuation-byte tag under its mask.
+const UTF8_LEAD: core::ops::RangeInclusive<u8> = 0xc2..=0xf4;
+const UTF8_LEAD2: core::ops::RangeInclusive<u8> = 0xc2..=0xdf;
+const UTF8_LEAD3: core::ops::RangeInclusive<u8> = 0xe0..=0xef;
+const UTF8_CONT_MASK: u8 = 0xc0;
+const UTF8_CONT: u8 = 0x80;
+
+/// The `ESC [ n ~` parameter of F1…F12, in order (xterm/VT220 numbering,
+/// which skips 16 and 22).
+const VT220_FKEYS: [u32; 12] = [11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 23, 24];
 
 /// `ESC [ … ~` parameters: Home, Insert, Delete, End, PageUp, PageDown and
 /// the function keys (xterm/VT220 numbering).
@@ -58,10 +94,10 @@ fn tilde(n: u32) -> Option<Key> {
         4 | 8 => Key::End,
         5 => Key::PageUp,
         6 => Key::PageDown,
-        11..=15 => Key::Function((n - 10) as u8),
-        17..=21 => Key::Function((n - 11) as u8),
-        23 | 24 => Key::Function((n - 12) as u8),
-        _ => return None,
+        _ => {
+            let i = VT220_FKEYS.iter().position(|&p| p == n)?;
+            Key::Function(i as u8 + 1)
+        }
     })
 }
 
@@ -99,34 +135,37 @@ fn vt100_plus(b: u8) -> Option<Key> {
 fn classify(seq: &[u8]) -> Seq {
     match seq {
         [ESC] => Seq::More,
-        [ESC, b'[' | b'O'] => Seq::More,
+        [ESC, CSI | SS3] => Seq::More,
         [ESC, b] => vt100_plus(*b).map_or(Seq::Drop, Seq::Key),
         // SS3: application cursor keys and F1–F4.
-        [ESC, b'O', b] => match b {
+        [ESC, SS3, b] => match b {
             b'P'..=b'S' => Seq::Key(Key::Function(b - b'P' + 1)),
             _ => letter(*b).map_or(Seq::Drop, Seq::Key),
         },
         // The Linux console's F1–F5.
-        [ESC, b'[', b'['] => Seq::More,
-        [ESC, b'[', b'[', b] => match b {
+        [ESC, CSI, LINUX_FKEY] => Seq::More,
+        [ESC, CSI, LINUX_FKEY, b] => match b {
             b'A'..=b'E' => Seq::Key(Key::Function(b - b'A' + 1)),
             _ => Seq::Drop,
         },
-        [ESC, b'[', rest @ ..] => {
+        [ESC, CSI, rest @ ..] => {
             let Some((&last, params)) = rest.split_last() else {
                 return Seq::More;
             };
             match last {
                 // Parameter and intermediate bytes.
-                0x20..=0x3f => Seq::More,
-                0x40..=0x7e => {
+                b if CSI_PARAM_OR_INTERMEDIATE.contains(&b) => Seq::More,
+                b if CSI_FINAL.contains(&b) => {
                     // Private parameters or intermediates: not a key.
-                    if params.iter().any(|&c| !(c.is_ascii_digit() || c == b';')) {
+                    if params
+                        .iter()
+                        .any(|&c| !(c.is_ascii_digit() || c == PARAM_SEP))
+                    {
                         return Seq::Drop;
                     }
                     // The first parameter; modifiers after `;` are ignored
                     // (a Ctrl+arrow is still an arrow).
-                    let first = params.split(|&c| c == b';').next().unwrap_or(&[]);
+                    let first = params.split(|&c| c == PARAM_SEP).next().unwrap_or(&[]);
                     let mut n = 0u32;
                     for &d in first {
                         n = n
@@ -134,7 +173,7 @@ fn classify(seq: &[u8]) -> Seq {
                             .saturating_add(u32::from(d.wrapping_sub(b'0')));
                     }
                     let key = match last {
-                        b'~' => tilde(n),
+                        VT220_TILDE => tilde(n),
                         // `ESC [ 1 ; 5 A`: the parameter is a count or 1.
                         _ => letter(last),
                     };
@@ -180,10 +219,10 @@ impl Decoder {
 
     /// One byte from the line. `Some` when it completes a key.
     pub fn feed(&mut self, b: u8) -> Option<Key> {
-        let after_cr = core::mem::replace(&mut self.after_cr, b == b'\r');
+        let after_cr = core::mem::replace(&mut self.after_cr, b == CR);
         if self.discard {
             // An over-long CSI ends at its final byte.
-            if (0x40..=0x7e).contains(&b) {
+            if CSI_FINAL.contains(&b) {
                 self.discard = false;
             }
             return None;
@@ -194,13 +233,13 @@ impl Decoder {
                     self.push(b);
                     None
                 }
-                b'\r' => Some(Key::Enter),
-                b'\n' if after_cr => None,
-                b'\n' => Some(Key::Enter),
-                0x08 | 0x7f => Some(Key::Backspace),
-                0x20..=0x7e => Some(Key::Char(char::from(b))),
+                CR => Some(Key::Enter),
+                LF if after_cr => None,
+                LF => Some(Key::Enter),
+                BS | DEL => Some(Key::Backspace),
+                b if PRINTABLE.contains(&b) => Some(Key::Char(char::from(b))),
                 // UTF-8 lead bytes of 2, 3 and 4-byte sequences.
-                0xc2..=0xf4 => {
+                b if UTF8_LEAD.contains(&b) => {
                     self.push(b);
                     None
                 }
@@ -222,7 +261,7 @@ impl Decoder {
             }
             if !self.push(b) {
                 self.reset();
-                self.discard = !(0x40..=0x7e).contains(&b);
+                self.discard = !CSI_FINAL.contains(&b);
                 return None;
             }
             let seq = self.buf.get(..self.n).unwrap_or(&[]);
@@ -245,7 +284,7 @@ impl Decoder {
             };
         }
         // A UTF-8 sequence in progress.
-        if b & 0xc0 != 0x80 {
+        if b & UTF8_CONT_MASK != UTF8_CONT {
             // Not a continuation: drop what we had and start over.
             self.reset();
             return self.feed(b);
@@ -253,8 +292,8 @@ impl Decoder {
         self.push(b);
         let seq = self.buf.get(..self.n).unwrap_or(&[]);
         let want = match seq.first() {
-            Some(0xc2..=0xdf) => 2,
-            Some(0xe0..=0xef) => 3,
+            Some(b) if UTF8_LEAD2.contains(b) => 2,
+            Some(b) if UTF8_LEAD3.contains(b) => 3,
             _ => 4,
         };
         if self.n < want {

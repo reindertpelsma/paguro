@@ -25,7 +25,7 @@
 
 use paguro_core::bde::Layout;
 use paguro_core::config::{self, Efi, Entry};
-use paguro_core::disk::{self, DiskError, EfiFs};
+use paguro_core::disk::{self, DiskError, EfiFs, SECTOR};
 use paguro_core::fat::{self, FatError};
 use paguro_core::handoff::{FveLayout, state};
 use paguro_core::ntfs::dir::{self, Data, DirError, FileRef, Scratch, UPCASE_LEN};
@@ -35,7 +35,26 @@ use paguro_core::runlist::Run;
 
 use crate::BootError;
 use crate::platform::{DirListing, Level, Platform, PlatformError};
-use crate::volume::{FileId, Key, Located, Partition, Volume, VolumeKind};
+use crate::volume::{
+    FileId, Key, Located, MAX_BLOCK, Partition, RECOVERY_KEY_LEN, Volume, VolumeKind,
+};
+
+/// The 512-byte sectors stage 4 reads, as a buffer length.
+const SECTOR_LEN: usize = SECTOR as usize;
+/// The hibernation file, and the bytes of it the hibernation gate reads
+/// (its header's first sector).
+const HIBERFIL_PATH: &str = "\\hiberfil.sys";
+const HIBERFIL_HEADER_LEN: usize = SECTOR_LEN;
+/// The first boot's installation directory (INTERFACES.md §3.2).
+const INSTALL_DIR: &str = "\\paguro";
+const INSTALL_DIR_PREFIX: &[u8] = b"\\paguro\\";
+/// The entry name when the file's own name gives none.
+const FALLBACK_ENTRY_NAME: &str = "linux";
+/// A directory entry's name (at most `dir::MAX_NAME` UTF-16 units) as UTF-8.
+const NAME_UTF8_MAX: usize = 1024;
+const _: () = assert!(dir::MAX_NAME * crate::UTF8_MAX <= NAME_UTF8_MAX);
+/// Bytes of an `efi_file` read per call.
+const EFI_READ_CHUNK: u64 = 1 << 20;
 
 /// Runs of `$MFT` kept (it may not have an attribute list, so its runlist
 /// fits one record).
@@ -103,8 +122,8 @@ pub struct PartitionReader {
 
 impl<P: Platform> SectorRead<P> for PartitionReader {
     fn read(&mut self, p: &mut P, sector: u64, buf: &mut [u8]) -> Result<(), PlatformError> {
-        let n = (buf.len() / 512) as u64;
-        if buf.is_empty() || buf.len() % 512 != 0 {
+        let n = (buf.len() / SECTOR_LEN) as u64;
+        if buf.is_empty() || buf.len() % SECTOR_LEN != 0 {
             return Err(PlatformError::Unsupported);
         }
         let end = sector.checked_add(n).ok_or(PlatformError::TooLarge)?;
@@ -112,7 +131,7 @@ impl<P: Platform> SectorRead<P> for PartitionReader {
             return Err(PlatformError::TooLarge);
         }
         let bs = u64::from(self.part.block_size);
-        let per = bs / 512;
+        let per = bs / SECTOR;
         if per <= 1 {
             let lba = self
                 .part
@@ -122,17 +141,17 @@ impl<P: Platform> SectorRead<P> for PartitionReader {
             return p.read_blocks(self.part.disk, lba, buf);
         }
         // 4 KiB blocks: whole blocks straight through, edges via a bounce.
-        let mut block = [0u8; 4096];
+        let mut block = [0u8; MAX_BLOCK];
         let mut done = 0u64;
         while done < n {
             let s = sector + done;
             let lba = self.part.first_lba + s / per;
             let within = s % per;
-            let at = (done * 512) as usize;
+            let at = (done * SECTOR) as usize;
             if within == 0 && n - done >= per {
                 let whole = ((n - done) / per) * per;
                 let dst = buf
-                    .get_mut(at..at + (whole * 512) as usize)
+                    .get_mut(at..at + (whole * SECTOR) as usize)
                     .ok_or(PlatformError::TooLarge)?;
                 p.read_blocks(self.part.disk, lba, dst)?;
                 done += whole;
@@ -143,9 +162,9 @@ impl<P: Platform> SectorRead<P> for PartitionReader {
                 p.read_blocks(self.part.disk, lba, b)?;
                 let take = (per - within).min(n - done);
                 let src = b
-                    .get((within * 512) as usize..((within + take) * 512) as usize)
+                    .get((within * SECTOR) as usize..((within + take) * SECTOR) as usize)
                     .ok_or(PlatformError::TooLarge)?;
-                buf.get_mut(at..at + (take * 512) as usize)
+                buf.get_mut(at..at + (take * SECTOR) as usize)
                     .ok_or(PlatformError::TooLarge)?
                     .copy_from_slice(src);
                 done += take;
@@ -156,7 +175,7 @@ impl<P: Platform> SectorRead<P> for PartitionReader {
     fn sectors(&self) -> u64 {
         self.part
             .sectors
-            .saturating_mul(u64::from(self.part.block_size) / 512)
+            .saturating_mul(u64::from(self.part.block_size) / SECTOR)
     }
 }
 
@@ -167,7 +186,7 @@ struct NtfsDisk<'a, P: Platform, R: SectorRead<P>> {
 }
 
 impl<P: Platform, R: SectorRead<P>> Disk for NtfsDisk<'_, P, R> {
-    fn read(&mut self, sector: u64, buf: &mut [u8; 512]) -> Result<(), IoError> {
+    fn read(&mut self, sector: u64, buf: &mut [u8; SECTOR_LEN]) -> Result<(), IoError> {
         self.r.read(self.p, sector, buf).map_err(|_| IoError)
     }
 }
@@ -183,9 +202,9 @@ struct Payload<'a, P: Platform, R: SectorRead<P>> {
 
 impl<P: Platform, R: SectorRead<P>> Payload<'_, P, R> {
     fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), PlatformError> {
-        let n = (buf.len() / 512) as u64;
+        let n = (buf.len() / SECTOR_LEN) as u64;
         let end = sector.checked_add(n).ok_or(PlatformError::TooLarge)?;
-        if buf.len() % 512 != 0 || end > self.sectors {
+        if buf.len() % SECTOR_LEN != 0 || end > self.sectors {
             return Err(PlatformError::TooLarge);
         }
         let mut done = 0u64;
@@ -193,9 +212,9 @@ impl<P: Platform, R: SectorRead<P>> Payload<'_, P, R> {
             let (phys, left) =
                 ntfs::gather(self.ext, sector + done).ok_or(PlatformError::TooLarge)?;
             let take = left.min(n - done);
-            let at = (done * 512) as usize;
+            let at = (done * SECTOR) as usize;
             let dst = buf
-                .get_mut(at..at + (take * 512) as usize)
+                .get_mut(at..at + (take * SECTOR) as usize)
                 .ok_or(PlatformError::TooLarge)?;
             self.r.read(self.p, phys, dst)?;
             done += take;
@@ -218,10 +237,10 @@ impl<P: Platform, R: SectorRead<P>> fat::Sectors for FatSource<'_, '_, P, R> {
             .checked_mul(self.bps)
             .and_then(|b| b.checked_add(self.start))
             .ok_or(FatError::Io)?;
-        if byte % 512 != 0 {
+        if byte % SECTOR != 0 {
             return Err(FatError::Io);
         }
-        self.pay.read(byte / 512, buf).map_err(|_| FatError::Io)
+        self.pay.read(byte / SECTOR, buf).map_err(|_| FatError::Io)
     }
 }
 
@@ -396,7 +415,7 @@ impl Stage4 {
         let (id, size) = self
             .map_disk(p, r, path)
             .map_err(|e| Stage4Error::File(Role::EfiDisk, e))?;
-        if size < 512 {
+        if size < SECTOR {
             return Err(Stage4Error::DiskSize);
         }
         let ext = self.ext.get(..self.ext_n).unwrap_or(&[]);
@@ -404,21 +423,21 @@ impl Stage4 {
             p,
             r,
             ext,
-            sectors: size / 512,
+            sectors: size / SECTOR,
         };
-        let mut tail = [0u8; 512];
+        let mut tail = [0u8; SECTOR_LEN];
         whole
-            .read(size / 512 - 1, &mut tail)
+            .read(size / SECTOR - 1, &mut tail)
             .map_err(Stage4Error::Expose)?;
         let pl = disk::detect(size, &tail);
-        let sectors = pl.len / 512;
+        let sectors = pl.len / SECTOR;
         let mut pay = Payload {
             p: whole.p,
             r: whole.r,
             ext,
             sectors,
         };
-        let head_len = (self.head.len() as u64).min(sectors * 512) as usize;
+        let head_len = (self.head.len() as u64).min(sectors * SECTOR) as usize;
         let head = self.head.get_mut(..head_len).unwrap_or(&mut []);
         if !head.is_empty() {
             pay.read(0, head).map_err(Stage4Error::Expose)?;
@@ -431,7 +450,7 @@ impl Stage4 {
         let mut src = FatSource {
             pay: &mut pay,
             start,
-            bps: 512,
+            bps: SECTOR,
         };
         let f = fat::Fs::open(&mut src, space, &mut self.fat).map_err(Stage4Error::Fat)?;
         log(
@@ -502,10 +521,10 @@ impl Stage4 {
                 flags |= state::DIRTY;
             }
         }
-        match self.resolve(p, r, "\\hiberfil.sys") {
+        match self.resolve(p, r, HIBERFIL_PATH) {
             Err(DirError::NotFound) => {}
             Ok(f) if !f.is_dir => {
-                let mut hdr = [0u8; 512];
+                let mut hdr = [0u8; HIBERFIL_HEADER_LEN];
                 let mft = mft!(self);
                 let mut d = NtfsDisk {
                     p: &mut *p,
@@ -515,7 +534,7 @@ impl Stage4 {
                     match dir::data(&mut d, &mft, f.file, &mut self.s, &mut hdr, &mut self.runs) {
                         Ok(Data::Resident(_)) => Ok(()),
                         Ok(Data::Runs { runs, size }) => {
-                            let n = size.min(512) as usize;
+                            let n = size.min(HIBERFIL_HEADER_LEN as u64) as usize;
                             let runs = self.runs.get(..runs).unwrap_or(&[]);
                             dir::read_runs(
                                 &mut d,
@@ -606,13 +625,13 @@ impl Stage4 {
             }
         };
         // The name: the entry's, or (first boot) the file's.
-        let mut nb = [0u8; 32];
+        let mut nb = [0u8; config::MAX_NAME];
         let name = if entry.name.is_empty() {
             let file = match entry.efi {
                 Efi::File(f) => f,
                 Efi::Disk { disk, .. } => disk,
             };
-            crate::ui::entry_name(file, &mut nb, "linux")
+            crate::ui::entry_name(file, &mut nb, FALLBACK_ENTRY_NAME)
         } else {
             entry.name
         };
@@ -622,7 +641,7 @@ impl Stage4 {
         }
         out.name_len = nlen as u8;
 
-        let set = |buf: &mut [u8; 1024], len: &mut usize, s: &str| {
+        let set = |buf: &mut [u8; config::MAX_PATH_BYTES], len: &mut usize, s: &str| {
             let n = s.len().min(buf.len());
             if let Some(d) = buf.get_mut(..n) {
                 d.copy_from_slice(s.as_bytes().get(..n).unwrap_or(&[]));
@@ -748,7 +767,7 @@ impl Stage4 {
         r: &mut R,
         out: &mut [u8; config::MAX_PATH_BYTES],
     ) -> Result<Option<(Found, usize)>, BootError> {
-        let f = match self.resolve(p, r, "\\paguro") {
+        let f = match self.resolve(p, r, INSTALL_DIR) {
             Ok(f) if f.is_dir => f,
             Ok(_) | Err(DirError::NotFound) => return Ok(None),
             Err(e) => return Err(Stage4Error::File(Role::Root, e).into()),
@@ -765,7 +784,7 @@ impl Stage4 {
             if e.is_dir {
                 return true;
             }
-            let mut utf8 = [0u8; 1024];
+            let mut utf8 = [0u8; NAME_UTF8_MAX];
             let Some(s) = utf16_to_str(e.name, &mut utf8) else {
                 return true;
             };
@@ -794,12 +813,12 @@ impl Stage4 {
             (0, 1) => (Found::File, efi_name.get(..en).unwrap_or(&[])),
             _ => return Ok(None),
         };
-        let prefix = b"\\paguro\\";
+        let prefix = INSTALL_DIR_PREFIX;
         let mut n = prefix.len();
         if let Some(d) = out.get_mut(..n) {
             d.copy_from_slice(prefix);
         }
-        let mut utf8 = [0u8; 1024];
+        let mut utf8 = [0u8; NAME_UTF8_MAX];
         let Some(s) = utf16_to_str(name, &mut utf8) else {
             return Ok(None);
         };
@@ -856,7 +875,7 @@ impl Stage4 {
                 }
                 // Whole sectors run by run through the reader (many at a
                 // time); the tail through one bounce sector.
-                let spc = self.vol.cluster_bytes / 512;
+                let spc = self.vol.cluster_bytes / SECTOR;
                 let mut off = 0u64;
                 for run in self.runs.get(..runs).unwrap_or(&[]) {
                     if off >= size {
@@ -864,23 +883,23 @@ impl Stage4 {
                     }
                     let run_bytes = run.count.saturating_mul(self.vol.cluster_bytes);
                     let bytes = run_bytes.min(size - off);
-                    let whole = bytes / 512 * 512;
+                    let whole = bytes / SECTOR * SECTOR;
                     let first = run.lcn.saturating_mul(spc);
                     let mut done = 0u64;
                     while done < whole {
-                        let chunk = (whole - done).min(1 << 20);
+                        let chunk = (whole - done).min(EFI_READ_CHUNK);
                         let at = (off + done) as usize;
                         let dst = buf
                             .get_mut(at..at + chunk as usize)
                             .ok_or(Stage4Error::EfiFileSize)?;
-                        r.read(p, first + done / 512, dst).map_err(|_| {
+                        r.read(p, first + done / SECTOR, dst).map_err(|_| {
                             Stage4Error::File(Role::EfiFile, DirError::Ntfs(ntfs::NtfsError::Io))
                         })?;
                         done += chunk;
                     }
                     if bytes > whole {
-                        let mut sec = [0u8; 512];
-                        r.read(p, first + whole / 512, &mut sec).map_err(|_| {
+                        let mut sec = [0u8; SECTOR_LEN];
+                        r.read(p, first + whole / SECTOR, &mut sec).map_err(|_| {
                             Stage4Error::File(Role::EfiFile, DirError::Ntfs(ntfs::NtfsError::Io))
                         })?;
                         let tail = (bytes - whole) as usize;
@@ -986,11 +1005,11 @@ enum Found {
     File,
 }
 
-fn utf16_to_str<'o>(units: &[u16], out: &'o mut [u8; 1024]) -> Option<&'o str> {
+fn utf16_to_str<'o>(units: &[u16], out: &'o mut [u8; NAME_UTF8_MAX]) -> Option<&'o str> {
     let mut n = 0usize;
     for c in char::decode_utf16(units.iter().copied()) {
         let c = c.ok()?;
-        let mut e = [0u8; 4];
+        let mut e = [0u8; crate::UTF8_MAX];
         let e = c.encode_utf8(&mut e).as_bytes();
         out.get_mut(n..n + e.len())?.copy_from_slice(e);
         n += e.len();
@@ -1090,7 +1109,11 @@ impl<P: Platform> Volume<P> for NtfsVolume {
     fn layout(&self) -> Option<FveLayout> {
         None
     }
-    fn recovery_key(&mut self, _: &mut P, _: &[u8; 16]) -> Result<Option<Key>, BootError> {
+    fn recovery_key(
+        &mut self,
+        _: &mut P,
+        _: &[u8; RECOVERY_KEY_LEN],
+    ) -> Result<Option<Key>, BootError> {
         Err(BootError::NotImplemented("stage 3: recovery password"))
     }
     fn locate(

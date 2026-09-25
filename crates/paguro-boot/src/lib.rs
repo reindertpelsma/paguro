@@ -160,23 +160,38 @@ impl Params {
 /// full buffer means the file is too large (INTERFACES.md §3.1).
 pub const INI_BUF: usize = ini::MAX_LEN + 1;
 
+/// Seal files per volume, one per [`seal::Kind`], indexed by `Kind as usize`.
+pub const SEAL_KINDS: usize = seal::Kind::ALL.len();
+const _: () = {
+    let [a, b, c, d] = seal::Kind::ALL;
+    assert!(a as usize == 0 && b as usize == 1 && c as usize == 2 && d as usize == 3);
+};
+/// The longest UTF-8 encoding of one `char` (RFC 3629 §3).
+pub(crate) const UTF8_MAX: usize = 4;
+/// The configuration authored on a provisioning boot.
+pub const GEN_INI_MAX: usize = 4096;
+/// A typed password, PIN or recovery key, in UTF-8 bytes.
+pub const SECRET_MAX: usize = 256;
+/// The BitLocker FVEK blob kept for the rungs' root gate.
+pub const FVEK_BLOB_MAX: usize = 1024;
+
 /// Every buffer the stage machine uses (~390 KiB, half of it the recovery
 /// browser's directory listing): too large for a UEFI stack, so the caller
 /// allocates it.
 pub struct Buffers {
     pub ini: [u8; INI_BUF],
     /// The configuration authored on a provisioning boot.
-    pub gen_ini: [u8; 4096],
-    pub seals: [[u8; seal::MAX_FILE]; 4],
+    pub gen_ini: [u8; GEN_INI_MAX],
+    pub seals: [[u8; seal::MAX_FILE]; SEAL_KINDS],
     pub var: [u8; bootstrap::MAX_LOAD_OPTION],
     pub gpt: volume::GptScratch,
     pub handoff: [u8; paguro_core::handoff::MAX_LEN],
-    pub secret: [u8; 256],
+    pub secret: [u8; SECRET_MAX],
     /// A path typed in recovery (INTERFACES.md §13.4).
     pub path: [u8; machine::PATH_MAX],
     /// The directory recovery's browser shows.
     pub dir: platform::DirListing,
-    pub fvek_blob: [u8; 1024],
+    pub fvek_blob: [u8; FVEK_BLOB_MAX],
     pub created: tpm::CreatedObject,
     pub located: volume::Located,
 }
@@ -185,15 +200,15 @@ impl Buffers {
     pub const fn new() -> Self {
         Buffers {
             ini: [0; INI_BUF],
-            gen_ini: [0; 4096],
-            seals: [[0; seal::MAX_FILE]; 4],
+            gen_ini: [0; GEN_INI_MAX],
+            seals: [[0; seal::MAX_FILE]; SEAL_KINDS],
             var: [0; bootstrap::MAX_LOAD_OPTION],
             gpt: volume::GptScratch::new(),
             handoff: [0; paguro_core::handoff::MAX_LEN],
-            secret: [0; 256],
+            secret: [0; SECRET_MAX],
             path: [0; machine::PATH_MAX],
             dir: platform::DirListing::new(),
-            fvek_blob: [0; 1024],
+            fvek_blob: [0; FVEK_BLOB_MAX],
             created: tpm::CreatedObject::new(),
             located: volume::Located::new(),
         }

@@ -8,16 +8,44 @@
 //! volume); the FVE side is [`Unimplemented`] until the BitLocker layer
 //! lands. The mock boot tests supply a fake.
 
-use paguro_core::config::Entry;
+use core::mem::{offset_of, size_of};
+use core::ops::Range;
+
+use paguro_core::config::{self, Entry};
 use paguro_core::fve;
 use paguro_core::gpt::{self, Header};
 use paguro_core::guid::{GPT_BASIC_DATA, Guid};
 use paguro_core::handoff::FveLayout;
+use paguro_core::seal;
 
 use crate::BootError;
 use crate::platform::{DirListing, Label, Platform};
 
-pub type Key = [u8; 32];
+pub type Key = [u8; seal::VMK_LEN];
+
+/// The start of a volume boot record, as NTFS and BitLocker lay it out
+/// (NTFS boot sector; libbde "BitLocker volume header"): a jump, then the
+/// OEM ID. Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct BootSectorStart {
+    jump: [u8; 3],
+    oem_id: [u8; 8],
+}
+const OEM_ID: Range<usize> = {
+    let start = offset_of!(BootSectorStart, oem_id);
+    start..start + size_of::<[u8; 8]>()
+};
+const _: () = assert!(offset_of!(BootSectorStart, oem_id) == 3);
+/// The OEM ID of an unencrypted NTFS volume.
+const NTFS_OEM_ID: &[u8; 8] = b"NTFS    ";
+
+/// The primary GPT header's LBA (UEFI 2.10 §5.3.1).
+const GPT_HEADER_LBA: u64 = 1;
+/// Logical block sizes the GPT walk accepts, and the largest.
+const BLOCK_512: usize = 512;
+const BLOCK_4K: usize = 4096;
+pub const MAX_BLOCK: usize = BLOCK_4K;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Partition {
@@ -49,10 +77,10 @@ pub fn probe<P: Platform>(
     let buf = block.get_mut(..bs).ok_or(BootError::Disk)?;
     p.read_blocks(part.disk, part.first_lba, buf)
         .map_err(BootError::Platform)?;
-    let oem = buf.get(3..11).unwrap_or(&[]);
+    let oem = buf.get(OEM_ID).unwrap_or(&[]);
     Ok(if fve::check_signature(oem).is_ok() {
         VolumeKind::BitLocker
-    } else if oem == b"NTFS    " {
+    } else if oem == NTFS_OEM_ID {
         VolumeKind::Ntfs
     } else {
         VolumeKind::Other
@@ -61,14 +89,14 @@ pub fn probe<P: Platform>(
 
 /// Scratch for GPT walks: one block and the largest accepted entry array.
 pub struct GptScratch {
-    pub block: [u8; 4096],
+    pub block: [u8; MAX_BLOCK],
     pub array: [u8; gpt::MAX_ENTRY_ARRAY],
 }
 
 impl GptScratch {
     pub const fn new() -> Self {
         GptScratch {
-            block: [0; 4096],
+            block: [0; MAX_BLOCK],
             array: [0; gpt::MAX_ENTRY_ARRAY],
         }
     }
@@ -92,13 +120,13 @@ pub fn for_each_partition<P: Platform>(
             continue;
         };
         let bs = info.block_size as usize;
-        if bs != 512 && bs != 4096 {
+        if bs != BLOCK_512 && bs != BLOCK_4K {
             continue;
         }
         let Some(blk) = s.block.get_mut(..bs) else {
             continue;
         };
-        if p.read_blocks(disk, 1, blk).is_err() {
+        if p.read_blocks(disk, GPT_HEADER_LBA, blk).is_err() {
             continue;
         }
         let Ok(hdr) = Header::parse(blk, info.blocks) else {
@@ -176,7 +204,7 @@ pub fn enumerate_candidates<P: Platform>(
     out: &mut [Option<Candidate>; MAX_CANDIDATES],
 ) -> Result<usize, BootError> {
     let mut n = 0usize;
-    let mut probe_block = [0u8; 4096];
+    let mut probe_block = [0u8; MAX_BLOCK];
     for_each_partition(p, s, |p, e, part| {
         if e.type_guid != GPT_BASIC_DATA {
             return Ok(true);
@@ -216,7 +244,7 @@ pub const CHAIN_MAX: usize = 4096;
 pub struct Located {
     /// The boot entry's name: the configured entry, or in recovery and on a
     /// first boot the one stage 4 found.
-    pub name: [u8; 32],
+    pub name: [u8; config::MAX_NAME],
     pub name_len: u8,
     /// The Linux root disk; `None`: nothing to boot on this volume.
     pub root: Option<FileId>,
@@ -233,11 +261,11 @@ pub struct Located {
     pub chain_len: usize,
     /// NTFS paths of the root, the efi disk (when separate) and the efi file,
     /// from which the loader authors the configuration on a provisioning boot.
-    pub root_path: [u8; 1024],
+    pub root_path: [u8; config::MAX_PATH_BYTES],
     pub root_path_len: usize,
-    pub efi_disk_path: [u8; 1024],
+    pub efi_disk_path: [u8; config::MAX_PATH_BYTES],
     pub efi_disk_path_len: usize,
-    pub efi_file_path: [u8; 1024],
+    pub efi_file_path: [u8; config::MAX_PATH_BYTES],
     pub efi_file_path_len: usize,
 }
 
@@ -248,7 +276,7 @@ fn text(b: &[u8], n: usize) -> &str {
 impl Located {
     pub const fn new() -> Self {
         Located {
-            name: [0; 32],
+            name: [0; config::MAX_NAME],
             name_len: 0,
             root: None,
             efi_disk: None,
@@ -256,11 +284,11 @@ impl Located {
             flags: 0,
             chain: [0; CHAIN_MAX],
             chain_len: 0,
-            root_path: [0; 1024],
+            root_path: [0; config::MAX_PATH_BYTES],
             root_path_len: 0,
-            efi_disk_path: [0; 1024],
+            efi_disk_path: [0; config::MAX_PATH_BYTES],
             efi_disk_path_len: 0,
-            efi_file_path: [0; 1024],
+            efi_file_path: [0; config::MAX_PATH_BYTES],
             efi_file_path_len: 0,
         }
     }
@@ -316,7 +344,11 @@ pub trait Volume<P: Platform> {
     /// The FVE layout for the handoff.
     fn layout(&self) -> Option<FveLayout>;
     /// The VMK behind the recovery-password protector for this 16-byte key.
-    fn recovery_key(&mut self, p: &mut P, key: &[u8; 16]) -> Result<Option<Key>, BootError>;
+    fn recovery_key(
+        &mut self,
+        p: &mut P,
+        key: &[u8; RECOVERY_KEY_LEN],
+    ) -> Result<Option<Key>, BootError>;
     /// The VMK behind a BitLocker password protector for this user hash
     /// (`SHA-256(SHA-256(UTF-16LE(password)))`). FVE-sourced, merged into
     /// the password row as a free protector (DESIGN.md §6). Default: none.
@@ -384,7 +416,11 @@ impl<P: Platform> Volume<P> for Unimplemented {
     fn layout(&self) -> Option<FveLayout> {
         None
     }
-    fn recovery_key(&mut self, _: &mut P, _: &[u8; 16]) -> Result<Option<Key>, BootError> {
+    fn recovery_key(
+        &mut self,
+        _: &mut P,
+        _: &[u8; RECOVERY_KEY_LEN],
+    ) -> Result<Option<Key>, BootError> {
         Err(BootError::NotImplemented("stage 3: recovery password"))
     }
     fn locate(
@@ -414,6 +450,19 @@ impl<P: Platform> Volume<P> for Unimplemented {
     }
 }
 
+/// BitLocker recovery password (libbde "Recovery password"): 48 digits in
+/// eight groups of six, each group 11 × a little-endian u16 of the 16-byte key.
+pub const RECOVERY_DIGITS: usize = 48;
+pub const RECOVERY_GROUP: usize = 6;
+pub const RECOVERY_KEY_LEN: usize = 16;
+const RECOVERY_GROUP_DIVISOR: u32 = 11;
+/// A group's value is below `11 × 2^16`.
+const RECOVERY_GROUP_LIMIT: u32 = RECOVERY_GROUP_DIVISOR << u16::BITS;
+/// Longest input accepted: the digits plus separators, with room to spare.
+const RECOVERY_INPUT_MAX: usize = 64;
+const _: () = assert!(RECOVERY_GROUP_LIMIT == 720_896);
+const _: () = assert!(RECOVERY_DIGITS / RECOVERY_GROUP * size_of::<u16>() == RECOVERY_KEY_LEN);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecoveryKeyError {
     /// Not 48 digits (optionally in 8 groups of 6 separated by `-` or spaces).
@@ -424,11 +473,11 @@ pub enum RecoveryKeyError {
 
 /// BitLocker's 48-digit recovery password → its 16-byte key: eight groups of
 /// six digits, each divisible by 11, each quotient a little-endian u16.
-pub fn parse_recovery_password(s: &[u8]) -> Result<[u8; 16], RecoveryKeyError> {
-    if s.len() > 64 {
+pub fn parse_recovery_password(s: &[u8]) -> Result<[u8; RECOVERY_KEY_LEN], RecoveryKeyError> {
+    if s.len() > RECOVERY_INPUT_MAX {
         return Err(RecoveryKeyError::Format);
     }
-    let mut digits = [0u8; 48];
+    let mut digits = [0u8; RECOVERY_DIGITS];
     let mut n = 0usize;
     for &c in s {
         match c {
@@ -440,21 +489,21 @@ pub fn parse_recovery_password(s: &[u8]) -> Result<[u8; 16], RecoveryKeyError> {
             _ => return Err(RecoveryKeyError::Format),
         }
     }
-    if n != 48 {
+    if n != RECOVERY_DIGITS {
         return Err(RecoveryKeyError::Format);
     }
-    let mut key = [0u8; 16];
+    let mut key = [0u8; RECOVERY_KEY_LEN];
     for (g, (chunk, out)) in digits
-        .chunks_exact(6)
-        .zip(key.chunks_exact_mut(2))
+        .chunks_exact(RECOVERY_GROUP)
+        .zip(key.chunks_exact_mut(size_of::<u16>()))
         .enumerate()
     {
         let v = chunk.iter().fold(0u32, |a, &d| a * 10 + u32::from(d));
         let gi = g as u8;
-        if v % 11 != 0 || v >= 720_896 {
+        if v % RECOVERY_GROUP_DIVISOR != 0 || v >= RECOVERY_GROUP_LIMIT {
             return Err(RecoveryKeyError::Group(gi));
         }
-        out.copy_from_slice(&((v / 11) as u16).to_le_bytes());
+        out.copy_from_slice(&((v / RECOVERY_GROUP_DIVISOR) as u16).to_le_bytes());
     }
     Ok(key)
 }

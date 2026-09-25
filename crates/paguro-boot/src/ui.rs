@@ -14,7 +14,12 @@
 
 use core::fmt;
 
+use paguro_core::config;
+
 use crate::platform::{DirView, EntryKind, Grey, Input, Level, Notice, Row, Screen, UnlockMenu};
+
+/// List rows per page until the renderer reports how many it shows.
+const DEFAULT_PAGE_ROWS: usize = 8;
 
 /// A key, already decoded from the firmware's `EFI_INPUT_KEY` (or
 /// `EFI_KEY_DATA`, whose modifiers the adapter applies before this point).
@@ -53,9 +58,9 @@ pub const LANGUAGE_KEY: Key = Key::Function(5);
 // Text entry (INTERFACES.md §13.3)
 
 /// The 48-digit BitLocker recovery password, entered without separators.
-pub const RECOVERY_DIGITS: usize = 48;
+pub const RECOVERY_DIGITS: usize = crate::volume::RECOVERY_DIGITS;
 /// Digits per displayed group of the recovery password.
-pub const RECOVERY_GROUP: usize = 6;
+pub const RECOVERY_GROUP: usize = crate::volume::RECOVERY_GROUP;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldKind {
@@ -175,7 +180,7 @@ impl Field {
         if !accept {
             return false;
         }
-        let mut enc = [0u8; 4];
+        let mut enc = [0u8; crate::UTF8_MAX];
         let n = c.encode_utf8(&mut enc).len();
         let Some(new_len) = self.len.checked_add(n).filter(|&l| l <= buf.len()) else {
             return false;
@@ -311,6 +316,7 @@ impl Item {
     }
 }
 
+/// Rows of the longest list ([`crate::platform::MAX_CHOICES`]), with room for two more.
 pub const MAX_ITEMS: usize = crate::platform::MAX_CHOICES + 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -461,7 +467,7 @@ impl Prompt {
         Prompt {
             selected,
             field: field_kind(screen).map(|k| Field::begin(k, buf)),
-            page: 8,
+            page: DEFAULT_PAGE_ROWS,
         }
     }
 
@@ -610,7 +616,15 @@ pub struct Browser {
 /// The browser's rows: every entry, then "Type a path", then (for the root
 /// hint) "No root".
 pub fn browse_rows(dir: &DirView<'_>) -> usize {
-    dir.listing.len() + if dir.level == Level::Root { 2 } else { 1 }
+    const TYPE_PATH_ROWS: usize = 1;
+    const NO_ROOT_ROWS: usize = 1;
+    dir.listing.len()
+        + TYPE_PATH_ROWS
+        + if dir.level == Level::Root {
+            NO_ROOT_ROWS
+        } else {
+            0
+        }
 }
 
 /// Whether `path` is a filesystem root (no parent).
@@ -622,7 +636,7 @@ impl Browser {
     pub fn new(dir: &DirView<'_>) -> Browser {
         Browser {
             selected: dir.selected.min(browse_rows(dir) - 1),
-            page: 8,
+            page: DEFAULT_PAGE_ROWS,
         }
     }
 
@@ -730,15 +744,19 @@ pub struct Size {
 
 impl Size {
     pub fn of(bytes: u64) -> Size {
+        /// Binary multiples: each unit is 1024 of the one before.
+        const STEP: u64 = 1024;
+        /// Below this many units, one decimal is shown.
+        const DECIMAL_BELOW: u64 = 10;
         let units = [Unit::B, Unit::KB, Unit::MB, Unit::GB, Unit::TB];
         let mut i = 0usize;
         let mut div = 1u64;
-        while i + 1 < units.len() && bytes / div >= 1024 {
-            div *= 1024;
+        while i + 1 < units.len() && bytes / div >= STEP {
+            div *= STEP;
             i += 1;
         }
         let unit = units.get(i).copied().unwrap_or(Unit::TB);
-        if bytes / div < 10 && i > 0 {
+        if bytes / div < DECIMAL_BELOW && i > 0 {
             // Tenths, rounded; 9.96 rounds to 10.0 and is shown as 10.
             let tenths = (u128::from(bytes) * 10 + u128::from(div) / 2) / u128::from(div);
             let tenths = u64::try_from(tenths).unwrap_or(u64::MAX);
@@ -750,7 +768,7 @@ impl Size {
                 };
             }
             return Size {
-                whole: 10,
+                whole: DECIMAL_BELOW,
                 tenth: None,
                 unit,
             };
@@ -782,7 +800,11 @@ impl fmt::Display for Size {
 
 /// A file name's stem as a `[Boot.*]`-style name (`[A-Za-z0-9_-]`, ≤ 32),
 /// for the handoff; `fallback` when nothing usable remains.
-pub fn entry_name<'o>(file: &str, out: &'o mut [u8; 32], fallback: &'o str) -> &'o str {
+pub fn entry_name<'o>(
+    file: &str,
+    out: &'o mut [u8; config::MAX_NAME],
+    fallback: &'o str,
+) -> &'o str {
     let base = file.rsplit('\\').next().unwrap_or(file);
     let stem = match base.rfind('.') {
         Some(0) | None => base,
@@ -809,9 +831,14 @@ pub fn entry_name<'o>(file: &str, out: &'o mut [u8; 32], fallback: &'o str) -> &
 /// How a typed path is classified: `*.efi` (any case) is an `efi_file`,
 /// anything else a disk (INTERFACES.md §13.4).
 pub fn classify_path(path: &str) -> EntryKind {
+    const EFI_EXTENSION: &[u8] = b".efi";
     let b = path.as_bytes();
-    match b.len().checked_sub(4).and_then(|i| b.get(i..)) {
-        Some(ext) if ext.eq_ignore_ascii_case(b".efi") => EntryKind::Efi,
+    match b
+        .len()
+        .checked_sub(EFI_EXTENSION.len())
+        .and_then(|i| b.get(i..))
+    {
+        Some(ext) if ext.eq_ignore_ascii_case(EFI_EXTENSION) => EntryKind::Efi,
         _ => EntryKind::Disk,
     }
 }
@@ -826,7 +853,13 @@ pub fn normalize_path<'o>(typed: &str, out: &'o mut [u8]) -> Option<(&'o str, bo
     let t = typed.trim().trim_start_matches(['\\', '/']);
     let mut c = t.chars();
     let drive = matches!((c.next(), c.next()), (Some(d), Some(':')) if d.is_ascii_alphabetic());
-    let rest = if drive { t.get(2..).unwrap_or("") } else { t };
+    // `C:`: a letter and a colon.
+    const DRIVE_PREFIX_LEN: usize = 2;
+    let rest = if drive {
+        t.get(DRIVE_PREFIX_LEN..).unwrap_or("")
+    } else {
+        t
+    };
     let mut n = 0usize;
     let mut put = |b: &[u8], n: &mut usize| -> Option<()> {
         out.get_mut(*n..*n + b.len())?.copy_from_slice(b);

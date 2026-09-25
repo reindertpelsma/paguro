@@ -141,7 +141,7 @@ impl Label {
         let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
         for c in char::decode_utf16(units.iter().take(end).copied()) {
             let c = c.unwrap_or(char::REPLACEMENT_CHARACTER);
-            let mut enc = [0u8; 4];
+            let mut enc = [0u8; crate::UTF8_MAX];
             let e = c.encode_utf8(&mut enc).as_bytes();
             let Some(dst) = l.bytes.get_mut(n..n + e.len()) else {
                 break;
@@ -436,7 +436,7 @@ impl DirListing {
             if c.is_control() || c == '\\' || c == '/' {
                 return true;
             }
-            let mut e = [0u8; 4];
+            let mut e = [0u8; crate::UTF8_MAX];
             let e = c.encode_utf8(&mut e).as_bytes();
             let Some(dst) = self.names.get_mut(at + n..at + n + e.len()) else {
                 self.more = true;

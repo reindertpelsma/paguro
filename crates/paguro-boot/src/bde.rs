@@ -19,31 +19,56 @@
 //!   BitLocker and plain NTFS partitions: stage 3 here, stage 4 by
 //!   [`Stage4`] over the decrypted (or plain) sectors.
 
+use core::mem::size_of;
 use paguro_core::bde::{
     self, BdeError, Ccm, Cipher, Layout, Metadata, ProtectorKind, Source, StartupKey, VolumeHeader,
 };
+
 use paguro_core::config::Entry;
-use paguro_core::handoff::FveLayout;
+use paguro_core::disk::SECTOR;
+use paguro_core::handoff::{FveLayout, MAX_FVEK_KEY};
 use paguro_core::ntfs;
-use paguro_crypto::bitlocker::{Xts, ccm_unwrap};
+use paguro_crypto::bitlocker::{CCM_NONCE_LEN, CCM_TAG_LEN, Xts, ccm_unwrap};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::BootError;
 use crate::platform::{DirListing, Platform, PlatformError};
 use crate::stage4::{PartitionReader, SectorRead, Stage4};
-use crate::volume::{Key, Located, Partition, Volume, VolumeKind};
+use crate::volume::{Key, Located, MAX_BLOCK, Partition, RECOVERY_KEY_LEN, Volume, VolumeKind};
 
-pub type Vmk = [u8; 32];
+/// A 256-bit key: the VMK, and the AES-CCM keys that wrap it (clear key,
+/// stretched password or recovery key).
+const KEY_LEN: usize = 32;
+pub type Vmk = [u8; KEY_LEN];
 
-/// Hash algorithm id of the validation entry's SHA-256.
+/// Hash algorithm id of the validation entry's SHA-256, in the low 16 bits
+/// of the key entry's method field (libbde "FVE key").
 const VALIDATION_SHA256: u32 = 0x2005;
+const KEY_METHOD_MASK: u32 = 0xffff;
+const SHA256_LEN: usize = 32;
+
+/// The 512-byte sectors stage 4 reads, as a buffer length.
+const SECTOR_LEN: usize = SECTOR as usize;
+/// The largest volume sector (`bytes_per_sector`) BitLocker uses.
+const MAX_UNIT: usize = 4096;
+
+/// The FVEK blob handed to the root gate: the FVE AES-CCM encrypted key's
+/// nonce and tag, then its ciphertext (libbde "AES-CCM encrypted key").
+/// Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct FvekBlobHeader {
+    nonce: [u8; CCM_NONCE_LEN],
+    tag: [u8; CCM_TAG_LEN],
+}
+const _: () = assert!(size_of::<FvekBlobHeader>() == 28);
 
 /// Unwrap `c` under `key` and parse the key entry inside. `Ok(None)`: the
 /// MAC did not verify (wrong key). A verified but malformed plaintext is an
 /// error — Windows never writes one.
 fn unwrap<'b>(
-    key: &[u8; 32],
+    key: &[u8; KEY_LEN],
     c: &Ccm<'_>,
     buf: &'b mut [u8; bde::MAX_WRAPPED],
 ) -> Result<Option<bde::Key<'b>>, BdeError> {
@@ -56,7 +81,7 @@ fn unwrap<'b>(
     bde::parse_key(plain).map(Some)
 }
 
-fn unwrap_vmk(key: &[u8; 32], c: &Ccm<'_>) -> Result<Option<Vmk>, BdeError> {
+fn unwrap_vmk(key: &[u8; KEY_LEN], c: &Ccm<'_>) -> Result<Option<Vmk>, BdeError> {
     let mut buf = [0u8; bde::MAX_WRAPPED];
     let r = match unwrap(key, c, &mut buf)? {
         None => None,
@@ -81,7 +106,7 @@ pub fn vmk_from_clear_key(m: &Metadata<'_>) -> Result<Option<Vmk>, BdeError> {
 fn stretched(
     m: &Metadata<'_>,
     kind: ProtectorKind,
-    initial: &[u8; 32],
+    initial: &[u8; KEY_LEN],
 ) -> Result<Option<Vmk>, BdeError> {
     for p in m.of_kind(kind) {
         if let (Some(salt), Some(c)) = (p.salt, p.wrapped_vmk) {
@@ -100,7 +125,10 @@ fn stretched(
 /// The VMK behind a BitLocker password protector, from the user hash
 /// (`SHA-256(SHA-256(UTF-16LE(password)))`, what the loader's password
 /// row already computes).
-pub fn vmk_from_password_hash(m: &Metadata<'_>, user: &[u8; 32]) -> Result<Option<Vmk>, BdeError> {
+pub fn vmk_from_password_hash(
+    m: &Metadata<'_>,
+    user: &[u8; KEY_LEN],
+) -> Result<Option<Vmk>, BdeError> {
     stretched(m, ProtectorKind::Password, user)
 }
 
@@ -114,8 +142,11 @@ pub fn vmk_from_password(m: &Metadata<'_>, password: &str) -> Result<Option<Vmk>
 
 /// The VMK behind a recovery-password protector; `key` is the 16 bytes
 /// [`crate::volume::parse_recovery_password`] derives from the 48 digits.
-pub fn vmk_from_recovery(m: &Metadata<'_>, key: &[u8; 16]) -> Result<Option<Vmk>, BdeError> {
-    let mut h: [u8; 32] = Sha256::digest(key).into();
+pub fn vmk_from_recovery(
+    m: &Metadata<'_>,
+    key: &[u8; RECOVERY_KEY_LEN],
+) -> Result<Option<Vmk>, BdeError> {
+    let mut h: [u8; KEY_LEN] = Sha256::digest(key).into();
     let r = stretched(m, ProtectorKind::RecoveryPassword, &h);
     h.zeroize();
     r
@@ -136,7 +167,7 @@ pub fn vmk_from_startup_key(m: &Metadata<'_>, sk: &StartupKey) -> Result<Option<
 /// The unwrapped full-volume encryption key. Zeroed on drop.
 pub struct Fvek {
     pub cipher: Cipher,
-    key: [u8; 64],
+    key: [u8; MAX_FVEK_KEY],
     len: usize,
 }
 
@@ -180,7 +211,7 @@ pub fn unlock_fvek(m: &Metadata<'_>, vmk: &Vmk) -> Result<Option<Fvek>, BdeError
     }
     let mut f = Fvek {
         cipher,
-        key: [0; 64],
+        key: [0; MAX_FVEK_KEY],
         len: want,
     };
     if let Some(dst) = f.key.get_mut(..want) {
@@ -190,8 +221,8 @@ pub fn unlock_fvek(m: &Metadata<'_>, vmk: &Vmk) -> Result<Option<Fvek>, BdeError
     if let Some(v) = m.block.validation {
         let mut hb = [0u8; bde::MAX_WRAPPED];
         let h = unwrap(vmk, &v, &mut hb)?.ok_or(BdeError::ValidationHash)?;
-        let digest: [u8; 32] = Sha256::digest(m.block.raw).into();
-        if h.method & 0xffff != VALIDATION_SHA256 || h.key != digest {
+        let digest: [u8; SHA256_LEN] = Sha256::digest(m.block.raw).into();
+        if h.method & KEY_METHOD_MASK != VALIDATION_SHA256 || h.key != digest {
             return Err(BdeError::ValidationHash);
         }
     }
@@ -223,7 +254,7 @@ pub struct DecryptingReader<'k, R> {
     bps: u32,
     units: u64,
     /// One unit, for 512-byte reads on 4 KiB volumes.
-    cache: [u8; 4096],
+    cache: [u8; MAX_UNIT],
     cached: Option<u64>,
 }
 
@@ -235,7 +266,7 @@ impl<'k, R: UnitRead> DecryptingReader<'k, R> {
             units: layout.units(),
             layout: Some(layout),
             xts: Some(xts),
-            cache: [0; 4096],
+            cache: [0; MAX_UNIT],
             cached: None,
         }
     }
@@ -248,7 +279,7 @@ impl<'k, R: UnitRead> DecryptingReader<'k, R> {
             xts: None,
             bps: bytes_per_sector,
             units,
-            cache: [0; 4096],
+            cache: [0; MAX_UNIT],
             cached: None,
         }
     }
@@ -301,14 +332,14 @@ impl<'k, R: UnitRead> DecryptingReader<'k, R> {
     /// Read 512-byte sectors of the view, whatever the unit size: whole
     /// units straight through, partial ones via a one-unit cache.
     pub fn read_sectors(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), ReadError> {
-        if buf.len() % 512 != 0 {
+        if buf.len() % SECTOR_LEN != 0 {
             return Err(ReadError::Alignment);
         }
-        if self.bps == 512 {
+        if u64::from(self.bps) == SECTOR {
             return self.read(sector, buf);
         }
-        let per = u64::from(self.bps / 512);
-        let n = (buf.len() / 512) as u64;
+        let per = u64::from(self.bps) / SECTOR;
+        let n = (buf.len() / SECTOR_LEN) as u64;
         if sector
             .checked_add(n)
             .is_none_or(|e| e > self.units.saturating_mul(per))
@@ -318,11 +349,11 @@ impl<'k, R: UnitRead> DecryptingReader<'k, R> {
         let mut done = 0u64;
         while done < n {
             let s = sector + done;
-            let at = (done * 512) as usize;
+            let at = (done * SECTOR) as usize;
             if s % per == 0 && n - done >= per {
                 let whole = (n - done) / per;
                 let dst = buf
-                    .get_mut(at..at + (whole * per * 512) as usize)
+                    .get_mut(at..at + (whole * per * SECTOR) as usize)
                     .ok_or(ReadError::Range)?;
                 self.read(s / per, dst)?;
                 done += whole * per;
@@ -343,7 +374,7 @@ impl<'k, R: UnitRead> DecryptingReader<'k, R> {
             let take = (per - within).min(n - done);
             let src = self
                 .cache
-                .get((within * 512) as usize..((within + take) * 512) as usize)
+                .get((within * SECTOR) as usize..((within + take) * SECTOR) as usize)
                 .ok_or(ReadError::Range)?;
             buf.get_mut(at..at + src.len())
                 .ok_or(ReadError::Range)?
@@ -355,7 +386,7 @@ impl<'k, R: UnitRead> DecryptingReader<'k, R> {
 }
 
 impl<R: UnitRead> ntfs::Disk for DecryptingReader<'_, R> {
-    fn read(&mut self, sector: u64, buf: &mut [u8; 512]) -> Result<(), ntfs::IoError> {
+    fn read(&mut self, sector: u64, buf: &mut [u8; SECTOR_LEN]) -> Result<(), ntfs::IoError> {
         self.read_sectors(sector, buf).map_err(|_| ntfs::IoError)
     }
 }
@@ -416,7 +447,7 @@ impl<P: Platform> SectorRead<P> for BdeSectors<'_> {
             })
     }
     fn sectors(&self) -> u64 {
-        self.layout.units() * u64::from(self.layout.bytes_per_sector / 512)
+        self.layout.units() * (u64::from(self.layout.bytes_per_sector) / SECTOR)
     }
 }
 
@@ -536,7 +567,7 @@ impl<'a> BdeVolume<'a> {
             .sectors
             .checked_mul(u64::from(part.block_size))
             .ok_or(fail(BdeError::MetadataOffset))?;
-        let mut scratch = [0u8; 4096];
+        let mut scratch = [0u8; MAX_BLOCK];
         let first = scratch.get_mut(..bs).ok_or(BootError::Disk)?;
         p.read_blocks(part.disk, part.first_lba, first)
             .map_err(BootError::Platform)?;
@@ -630,10 +661,10 @@ impl<P: Platform> Volume<P> for BdeVolume<'_> {
     fn fvek_blob(&mut self, _: &mut P, out: &mut [u8]) -> Result<usize, BootError> {
         let m = self.metadata().map_err(fail)?;
         let f = m.fvek;
-        let n = 28 + f.ciphertext.len();
+        let n = size_of::<FvekBlobHeader>() + f.ciphertext.len();
         let o = out.get_mut(..n).ok_or(BootError::Disk)?;
-        let (nonce, rest) = o.split_at_mut(12);
-        let (tag, ct) = rest.split_at_mut(16);
+        let (nonce, rest) = o.split_at_mut(CCM_NONCE_LEN);
+        let (tag, ct) = rest.split_at_mut(CCM_TAG_LEN);
         nonce.copy_from_slice(&f.nonce);
         tag.copy_from_slice(&f.tag);
         ct.copy_from_slice(f.ciphertext);
@@ -659,7 +690,11 @@ impl<P: Platform> Volume<P> for BdeVolume<'_> {
         BdeVolume::layout(self)
     }
 
-    fn recovery_key(&mut self, _: &mut P, key: &[u8; 16]) -> Result<Option<Key>, BootError> {
+    fn recovery_key(
+        &mut self,
+        _: &mut P,
+        key: &[u8; RECOVERY_KEY_LEN],
+    ) -> Result<Option<Key>, BootError> {
         vmk_from_recovery(&self.metadata().map_err(fail)?, key).map_err(fail)
     }
 

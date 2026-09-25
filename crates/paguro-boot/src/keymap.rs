@@ -27,6 +27,19 @@ use crate::keymap_tables as t;
 /// Physical keys in a table (see `keymap_tables.rs` for the order).
 pub const KEYS: usize = 47;
 
+/// Shift levels of a table row (xkb levels 1–4): base, Shift, AltGr,
+/// AltGr+Shift. The Shift bit toggles between a level and its pair.
+pub const LEVELS: usize = 4;
+const LEVEL_SHIFT: usize = 1;
+const LEVEL_ALTGR: usize = 2;
+/// A key or level with no character (absent, or a dead key).
+const NO_CHAR: char = '\0';
+
+/// The number row's digit keys: `AE01`..`AE09` give '1'..'9', `AE10` gives '0'.
+const KEY_AE01: usize = 1;
+const KEY_AE09: usize = 9;
+const KEY_AE10: usize = 10;
+
 /// What the firmware reported for one key press, US-mapped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Typed {
@@ -63,7 +76,7 @@ pub enum Purpose {
 }
 
 /// The layout's table.
-pub fn table(k: Keyboard) -> &'static [[char; 4]; KEYS] {
+pub fn table(k: Keyboard) -> &'static [[char; LEVELS]; KEYS] {
     match k {
         Keyboard::Us => &t::US,
         Keyboard::Uk => &t::UK,
@@ -81,7 +94,7 @@ pub fn us_key(c: char) -> Option<(usize, bool)> {
     t::US.iter().enumerate().find_map(|(i, lv)| {
         if lv.first() == Some(&c) {
             Some((i, false))
-        } else if lv.get(1) == Some(&c) {
+        } else if lv.get(LEVEL_SHIFT) == Some(&c) {
             Some((i, true))
         } else {
             None
@@ -92,8 +105,8 @@ pub fn us_key(c: char) -> Option<(usize, bool)> {
 /// Number-row keys: `AE01`..`AE10` are table entries 1..=10.
 fn number_row_digit(key: usize) -> Option<char> {
     match key {
-        1..=9 => char::from_digit(key as u32, 10),
-        10 => Some('0'),
+        KEY_AE01..=KEY_AE09 => char::from_digit(key as u32, 10),
+        KEY_AE10 => Some('0'),
         _ => None,
     }
 }
@@ -118,17 +131,17 @@ pub fn remap(layout: Keyboard, typed: Typed, purpose: Purpose) -> Option<char> {
     // The US layout's letters follow Caps Lock: 'A' without Shift is a
     // lowercase key press with Caps Lock on.
     let shift = typed.shift.unwrap_or(us_shift);
-    let level = usize::from(shift) + if typed.altgr { 2 } else { 0 };
+    let level = usize::from(shift) * LEVEL_SHIFT + if typed.altgr { LEVEL_ALTGR } else { 0 };
     let row = table(layout).get(key)?;
     let out = *row.get(level)?;
-    if out == '\0' {
+    if out == NO_CHAR {
         return None;
     }
     // Caps Lock: a letter's other case, when its key has it.
     let caps = typed.caps.unwrap_or(false) && !typed.altgr;
     if caps && out.is_alphabetic() {
-        let other = *row.get(level ^ 1)?;
-        let is_case_pair = other != '\0'
+        let other = *row.get(level ^ LEVEL_SHIFT)?;
+        let is_case_pair = other != NO_CHAR
             && other != out
             && (out.to_uppercase().eq(core::iter::once(other))
                 || out.to_lowercase().eq(core::iter::once(other)));
