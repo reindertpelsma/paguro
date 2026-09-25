@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The GUI's view models and everything below them (INTERFACES.md §11.8):
+       no UI framework, so it builds and is tested anywhere. The WinUI 3 app
+       (Paguro.Gui) is only views over these. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Paguro.Gui</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\dotnet\Paguro.Api\Paguro.Api.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The shared string tables (INTERFACES §13.5), [win] section. -->
+    <EmbeddedResource Include="$(PaguroStrings)\*.toml" LogicalName="strings.%(Filename).toml" />
+  </ItemGroup>
+</Project>

@@ -127,6 +127,41 @@ jobs:
             Invoke-Pester -Configuration $c
           } finally { Stop-Process -Id $svc.Id -ErrorAction SilentlyContinue }
 
+  gui:
+    name: GUI (WinUI 3 build, view models, FlaUI UI automation with screenshots)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: microsoft/setup-msbuild@v2
+      - name: view models and strings (no UI)
+        working-directory: windows/gui
+        run: dotnet test Paguro.Gui.Core.Tests -m:1 --logger "console;verbosity=normal"
+      - name: build paguro-gui (WinUI 3, unpackaged, self-contained; the XAML compiler needs MSBuild)
+        working-directory: windows/gui/Paguro.Gui
+        run: msbuild Paguro.Gui.csproj /restore /m:1 /v:m /p:Configuration=Release /p:Platform=x64
+      - name: UI automation (FlaUI, a fake service)
+        shell: pwsh
+        working-directory: windows/gui
+        run: |
+          $exe = Get-ChildItem -Recurse Paguro.Gui\bin -Filter paguro-gui.exe | Select-Object -First 1
+          if (-not $exe) { throw 'paguro-gui.exe not built' }
+          $env:PAGURO_GUI_EXE = $exe.FullName
+          $env:PAGURO_SCREENSHOTS = Join-Path $env:GITHUB_WORKSPACE 'screenshots'
+          [System.Environment]::OSVersion.VersionString
+          dotnet test Paguro.Gui.UiTests -m:1 --logger "console;verbosity=normal"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: paguro-gui-screenshots
+          path: screenshots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paguro-gui
+          path: windows/gui/Paguro.Gui/bin/x64/Release
+
   api:
     name: API contract, method coverage, PaguroTools on Linux
     runs-on: ubuntu-latest
@@ -138,6 +173,9 @@ jobs:
       - name: C# types generated from paguro-api.json; fixtures round-trip; client over a pipe
         working-directory: windows/dotnet
         run: dotnet test Paguro.Api.Tests -m:1 --logger "console;verbosity=normal"
+      - name: GUI view models and string tables (no UI framework, so on Linux too)
+        working-directory: windows/gui
+        run: dotnet test Paguro.Gui.Core.Tests -m:1 --logger "console;verbosity=normal"
       - uses: dtolnay/rust-toolchain@stable
       - name: build the module, the fake service and paguro-service
         run: |

@@ -1,0 +1,79 @@
+<Page
+    x:Class="Paguro.Gui.Views.DistributionsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Paguro.Gui"
+    xmlns:vm="using:Paguro.Gui.ViewModels">
+    <ScrollViewer>
+        <StackPanel Spacing="8">
+            <TextBlock Style="{StaticResource PageTitle}" Text="{local:Str Key=distributions_title}" AutomationProperties.AutomationId="PageTitle" />
+            <TextBlock Style="{StaticResource Lead}" Text="{local:Str Key=distributions_lead}" />
+            <TextBlock Style="{StaticResource Error}" Text="{x:Bind VM.Error, Mode=OneWay}" />
+            <TextBlock TextWrapping="Wrap" Text="{x:Bind VM.Notice, Mode=OneWay}" AutomationProperties.AutomationId="Notice" />
+            <ItemsControl AutomationProperties.AutomationId="DistroList" ItemsSource="{x:Bind VM.Items}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:DistroItem">
+                        <Grid Margin="0,4" Padding="16,12" CornerRadius="6" ColumnSpacing="16"
+                              Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                              AutomationProperties.AutomationId="{x:Bind local:Ids.Item('distro', Name)}" AutomationProperties.Name="{x:Bind Name}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock Text="{x:Bind Name}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                    <TextBlock Text="{x:Bind KindText}" Style="{StaticResource Note}" VerticalAlignment="Center" />
+                                    <TextBlock Text="{x:Bind SizeText}" Style="{StaticResource Note}" VerticalAlignment="Center" />
+                                </StackPanel>
+                                <TextBlock Text="{x:Bind Path}" Style="{StaticResource Note}" />
+                                <TextBlock Text="{x:Bind Detail}" Style="{StaticResource Note}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <Button Content="{local:Str Key=open_container}" Visibility="{x:Bind IsImage}" Tag="{x:Bind}" Click="Open_Click"
+                                        AutomationProperties.AutomationId="{x:Bind local:Ids.Item('open', Name)}" />
+                                <Button Content="{local:Str Key=rename}" Visibility="{x:Bind IsImage}" Tag="{x:Bind}" Click="Rename_Click" />
+                                <Button Content="{local:Str Key=grow}" Visibility="{x:Bind IsImage}" Tag="{x:Bind}" Click="Grow_Click" />
+                                <Button Content="{local:Str Key=remove}" Visibility="{x:Bind IsImage}" Tag="{x:Bind}" Click="Remove_Click" />
+                                <Button Content="{local:Str Key=make_bootable}" Visibility="{x:Bind IsWsl}" Tag="{x:Bind}" Click="Bootable_Click"
+                                        AutomationProperties.AutomationId="{x:Bind local:Ids.Item('bootable', Name)}" />
+                            </StackPanel>
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <Button Content="{local:Str Key=detach}" Command="{x:Bind VM.Detach}" AutomationProperties.AutomationId="Detach" />
+
+            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,0" Text="{local:Str Key=install_title}" />
+            <TextBlock Style="{StaticResource Lead}" Text="{local:Str Key=install_lead}" />
+            <StackPanel Spacing="8" MaxWidth="560" HorizontalAlignment="Left">
+                <TextBox Header="{local:Str Key=install_name}" AutomationProperties.AutomationId="NewName" Text="{x:Bind VM.NewName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBox Header="{local:Str Key=install_path}" AutomationProperties.AutomationId="NewPath" Text="{x:Bind VM.NewPath, Mode=TwoWay}" />
+                <TextBox Header="{local:Str Key=install_size}" AutomationProperties.AutomationId="NewSize" Text="{x:Bind VM.NewSize, Mode=TwoWay}" />
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox Header="{local:Str Key=install_iso}" AutomationProperties.AutomationId="IsoPath" Text="{x:Bind VM.IsoPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <Button Grid.Column="1" VerticalAlignment="Bottom" Content="{local:Str Key=browse}" Click="Browse_Click" />
+                </Grid>
+                <CheckBox Content="{local:Str Key=install_manual}" AutomationProperties.AutomationId="Manual" IsChecked="{x:Bind VM.Manual, Mode=TwoWay}" />
+                <TextBlock Style="{StaticResource Note}" Text="{local:Str Key=install_manual_why}" />
+                <Button Style="{StaticResource AccentButtonStyle}" Content="{local:Str Key=install_start}" AutomationProperties.AutomationId="Install" Command="{x:Bind VM.Install}" />
+            </StackPanel>
+            <ProgressBar Value="{x:Bind VM.Operation.Percent, Mode=OneWay, FallbackValue=0}" Maximum="100" MaxWidth="560" HorizontalAlignment="Stretch" Margin="0,12,0,0" />
+            <ItemsControl ItemsSource="{x:Bind VM.Operation.Steps, Mode=OneWay}" AutomationProperties.AutomationId="Steps">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:StepItem">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <FontIcon Glyph="{x:Bind Glyph, Mode=OneWay}" FontSize="14" />
+                            <TextBlock Text="{x:Bind Title}" />
+                            <TextBlock Text="{x:Bind Detail, Mode=OneWay}" Style="{StaticResource Note}" />
+                        </StackPanel>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

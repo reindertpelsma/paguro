@@ -1,0 +1,44 @@
+<Page
+    x:Class="Paguro.Gui.Views.ChecksPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Paguro.Gui"
+    xmlns:vm="using:Paguro.Gui.ViewModels">
+    <ScrollViewer>
+        <StackPanel Spacing="8">
+            <TextBlock Style="{StaticResource PageTitle}" Text="{local:Str Key=checks_title}" AutomationProperties.AutomationId="PageTitle" />
+            <TextBlock Style="{StaticResource Lead}" Text="{local:Str Key=checks_lead}" />
+            <TextBlock AutomationProperties.AutomationId="ChecksSummary" Text="{x:Bind VM.Summary, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+            <TextBlock Style="{StaticResource Error}" Text="{x:Bind VM.Error, Mode=OneWay}" />
+            <ItemsControl AutomationProperties.AutomationId="ChecksList" ItemsSource="{x:Bind VM.Items}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:CheckItem">
+                        <Grid Margin="0,4" Padding="16,12" CornerRadius="6" ColumnSpacing="16"
+                              Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                              AutomationProperties.AutomationId="{x:Bind Id}" AutomationProperties.Name="{x:Bind Title}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <FontIcon Glyph="{x:Bind Glyph}" FontSize="20" VerticalAlignment="Top" Margin="0,2,0,0" />
+                            <StackPanel Grid.Column="1" Spacing="2">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock Text="{x:Bind Title}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                    <TextBlock Text="{x:Bind StateText}" Style="{StaticResource Note}" VerticalAlignment="Center" />
+                                </StackPanel>
+                                <TextBlock Text="{x:Bind Why}" TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind Detail}" Style="{StaticResource Note}" />
+                                <TextBlock Text="{x:Bind FixText}" Style="{StaticResource Note}" Visibility="{x:Bind HasFixText}" FontStyle="Italic" />
+                            </StackPanel>
+                            <Button Grid.Column="2" VerticalAlignment="Center" Content="{local:Str Key=fix}"
+                                    AutomationProperties.AutomationId="{x:Bind local:Ids.Fix(Id)}"
+                                    Visibility="{x:Bind CanFix}" Click="Fix_Click" Tag="{x:Bind}" />
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <Button Content="{local:Str Key=refresh}" AutomationProperties.AutomationId="Refresh" Command="{x:Bind VM.Load}" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

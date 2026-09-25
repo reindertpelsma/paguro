@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- UI automation of paguro-gui (FlaUI over UIA3) against a fake service;
+       Windows only. PAGURO_GUI_EXE names the built app; PAGURO_SCREENSHOTS
+       where the screenshots go. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <Nullable>enable</Nullable>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="FlaUI.UIA3" Version="4.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Paguro.Gui.Core\Paguro.Gui.Core.csproj" />
+    <ProjectReference Include="..\..\dotnet\Paguro.Testing\Paguro.Testing.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="Paguro.Gui.UiTests.FixturesAttribute">
+      <_Parameter1>$(PaguroApiFixtures)</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+</Project>
