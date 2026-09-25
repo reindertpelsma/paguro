@@ -154,16 +154,18 @@ jobs:
       - name: view models and strings (no UI)
         working-directory: windows/gui
         run: dotnet test Paguro.Gui.Core.Tests -m:1 --logger "console;verbosity=normal"
-      - name: build paguro-gui (WinUI 3, unpackaged, self-contained; the XAML compiler needs MSBuild)
+      - name: publish paguro-app.exe (WinUI 3, unpackaged, self-contained, single file; the XAML compiler needs MSBuild)
         working-directory: windows/gui/Paguro.Gui
-        run: msbuild Paguro.Gui.csproj /restore /m:1 /v:m /p:Configuration=Release /p:Platform=x64
+        run: |
+          msbuild Paguro.Gui.csproj /t:Restore,Publish /m:1 /v:m /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishSingleFile=true "/p:PublishDir=$env:GITHUB_WORKSPACE\publish\app\"
+          Get-ChildItem $env:GITHUB_WORKSPACE\publish\app | Format-Table Name, Length
       - name: UI automation (FlaUI, a fake service)
         shell: pwsh
         working-directory: windows/gui
         run: |
-          $exe = Get-ChildItem -Recurse Paguro.Gui\bin -Filter paguro-gui.exe | Select-Object -First 1
-          if (-not $exe) { throw 'paguro-gui.exe not built' }
-          $env:PAGURO_GUI_EXE = $exe.FullName
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'publish\app\paguro-app.exe'
+          if (-not (Test-Path $exe)) { throw 'paguro-app.exe not published' }
+          $env:PAGURO_GUI_EXE = $exe
           $env:PAGURO_SCREENSHOTS = Join-Path $env:GITHUB_WORKSPACE 'screenshots'
           [System.Environment]::OSVersion.VersionString
           dotnet test Paguro.Gui.UiTests -m:1 --logger "console;verbosity=normal"
@@ -174,8 +176,113 @@ jobs:
           path: screenshots
       - uses: actions/upload-artifact@v4
         with:
-          name: paguro-gui
-          path: windows/gui/Paguro.Gui/bin/x64/Release
+          name: paguro-app
+          path: publish/app
+
+  esp-payload:
+    name: ESP payload (paguro.efi; shim and MokManager from Ubuntu's shim-signed, unchanged)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-uefi
+      - run: cargo build --release -p paguro-efi --target x86_64-unknown-uefi
+      - name: shim and MokManager, Microsoft-signed, redistributed unchanged (INTERFACES §11.6)
+        run: |
+          mkdir -p esp deb && cd deb
+          apt-get download shim-signed shim
+          for d in *.deb; do dpkg-deb -x "$d" root; done
+          find root -name '*.efi*' | sort
+          cp "$(find root -name 'shimx64.efi.signed.latest' -o -name 'shimx64.efi.signed' | sort | head -1)" ../esp/shimx64.efi
+          cp "$(find root -name 'mmx64.efi.signed' -o -name 'mmx64.efi' | sort | tail -1)" ../esp/mmx64.efi
+          cd ..
+          cp target/x86_64-unknown-uefi/release/paguro.efi esp/paguro.efi
+          sha256sum esp/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp-payload
+          path: esp
+
+  package:
+    name: paguro.exe with its payloads, the CLI-only build, and an install / repair / uninstall cycle (no firmware writes)
+    needs: [rust, gui, driver, esp-payload]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with: { name: paguro-app, path: payload/app }
+      - uses: actions/download-artifact@v4
+        with: { name: esp-payload, path: payload/esp }
+      - uses: actions/download-artifact@v4
+        with: { name: paguro-minifilter, path: minifilter }
+      - name: the payload tree
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force payload\minifilter | Out-Null
+          Copy-Item minifilter\pkg\Release\* payload\minifilter\
+          Get-ChildItem -Recurse payload | Format-Table FullName, Length
+      - name: paguro.exe (everything) and paguro-cli.exe (no GUI)
+        shell: pwsh
+        run: |
+          $env:PAGURO_PAYLOAD_DIR = (Resolve-Path payload).Path
+          cargo build -p paguro-service --release
+          if ($LASTEXITCODE) { throw 'build' }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\paguro.exe dist\paguro.exe
+          $env:CARGO_TARGET_DIR = 'target-cli'
+          cargo build -p paguro-service --release --no-default-features
+          if ($LASTEXITCODE) { throw 'build (cli)' }
+          Copy-Item target-cli\release\paguro.exe dist\paguro-cli.exe
+          Get-ChildItem dist | Format-Table Name, Length
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          foreach ($b in 'paguro.exe', 'paguro-cli.exe') {
+            $deps = & $dumpbin.FullName /nologo /dependents "dist\$b" | Out-String
+            if ($deps -match '(?i)vcruntime|msvcp|api-ms-win-crt|ucrtbase') { throw "$b depends on the C runtime" }
+          }
+          $s = & dist\paguro.exe --json setup status | ConvertFrom-Json
+          if (-not $s.data.has_gui) { throw 'paguro.exe carries no GUI' }
+          "payloads: $($s.data.payloads.name -join ', ')"
+          $c = & dist\paguro-cli.exe --json setup status | ConvertFrom-Json
+          if ($c.data.has_gui) { throw 'paguro-cli.exe carries the GUI' }
+      - name: install, repair, uninstall on the runner (the runner is elevated; nothing touches firmware)
+        shell: pwsh
+        run: |
+          $pf = "$env:ProgramFiles\paguro"
+          $arp = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\paguro'
+          & dist\paguro.exe install
+          if ($LASTEXITCODE) { throw "install exited $LASTEXITCODE" }
+          foreach ($f in 'paguro.exe', 'app\paguro-app.exe', 'esp\shimx64.efi', 'minifilter\paguro_flt.inf') {
+            if (-not (Test-Path "$pf\$f")) { throw "missing $f" }
+          }
+          $e = Get-ItemProperty $arp
+          "Apps & Features: $($e.DisplayName) $($e.DisplayVersion); uninstall: $($e.UninstallString); modify: $($e.ModifyPath)"
+          if ($e.UninstallString -notmatch 'ProgramData\\paguro\\setup\\paguro.exe" uninstall') { throw 'UninstallString' }
+          if ((sc.exe query paguro | Out-String) -notmatch 'RUNNING') { throw 'the service is not running' }
+          $st = & "$pf\paguro.exe" --json setup status | ConvertFrom-Json
+          if (-not $st.data.installed -or -not $st.data.apps_and_features -or -not $st.data.service) { throw 'setup status' }
+          # Repair (the repair copy, as Apps & Features would run it) puts a deleted file back.
+          Remove-Item "$pf\app\paguro-app.exe"
+          & "$env:ProgramData\paguro\setup\paguro.exe" repair --app-only
+          if ($LASTEXITCODE) { throw "repair exited $LASTEXITCODE" }
+          if (-not (Test-Path "$pf\app\paguro-app.exe")) { throw 'repair did not restore the GUI' }
+          # Uninstall, from the repair copy; the images are the user's choice.
+          & "$env:ProgramData\paguro\setup\paguro.exe" uninstall --yes --keep-images --skip-final-boot
+          $rc = $LASTEXITCODE
+          if ($rc -eq 8) { & "$env:ProgramData\paguro\setup\paguro.exe" --direct uninstall --yes --keep-images --skip-final-boot; $rc = $LASTEXITCODE }
+          if ($rc) { throw "uninstall exited $rc" }
+          if (Test-Path $arp) { throw 'Apps & Features entry left' }
+          if ((sc.exe query paguro | Out-String) -notmatch '1060') { throw 'the service is left' }
+          $left = Get-ChildItem -Recurse $pf -ErrorAction SilentlyContinue
+          "left for the next start (in use): $($left.FullName -join ', ')"
+          if ($left | Where-Object { $_.Name -ne 'paguro.exe' -and -not $_.PSIsContainer }) { throw 'files left in Program Files' }
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paguro-release
+          path: dist
 
   api:
     name: API contract, method coverage, PaguroTools on Linux

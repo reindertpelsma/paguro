@@ -275,7 +275,11 @@ fn step(
                     paguro_core::bootstrap::VAR_NAME,
                     UNINSTALL_VAR,
                 ] {
-                    api.fw_delete(v, &PAGURO_VENDOR)?;
+                    // Only what exists: a machine without paguro's
+                    // variables sees no firmware write at all.
+                    if api.fw_get(v, &PAGURO_VENDOR)?.is_some() {
+                        api.fw_delete(v, &PAGURO_VENDOR)?;
+                    }
                 }
             }
             // The machine's MOK private key (INTERFACES.md §11.6) goes with it.
