@@ -1095,6 +1095,7 @@ impl Layout {
             boot_sector_reloc_offset: self.reloc_offset,
             boot_sector_reloc_sectors: u32::try_from(self.reloc_len / 512).unwrap_or(u32::MAX),
             encrypted_size: self.encrypted_size,
+            sector_size: self.bytes_per_sector,
         }
     }
 }

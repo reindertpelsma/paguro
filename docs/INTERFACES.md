@@ -409,7 +409,7 @@ record   type u16 | len u32 | value[len]        (no padding)
 | 1 | `VOLUME` | partition GUID[16] \| first_lba u64 \| sectors u64 (512-byte units) | 1 |
 | 2 | `VMK` | 32 bytes | 0–1 (absent = unencrypted volume) |
 | 3 | `FVEK` | cipher u16 \| key len u16 \| key | 0–1 |
-| 4 | `FVE_LAYOUT` | metadata offsets u64×3 \| region size u64 \| boot-sector reloc offset u64, sectors u32 \| encrypted_size u64 | 0–1 |
+| 4 | `FVE_LAYOUT` | metadata offsets u64×3 \| region size u64 \| boot-sector reloc offset u64, sectors u32 \| encrypted_size u64 \| sector size u32 — offsets and sizes in bytes, the relocated length in 512-byte sectors, the sector size (the XTS data unit) 512 or 4096 | 0–1 |
 | 5 | `B` | 32 bytes | 1 |
 | 6 | `PCRS` | mask u32 \| n×32-byte SHA-256 values (no TPM: mask `0x95`, zero values) | 1 |
 | 7 | `CONFIG` | the verified `paguro.ini` bytes | 0–1 |

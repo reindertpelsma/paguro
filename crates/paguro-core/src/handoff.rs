@@ -112,6 +112,8 @@ pub struct FveLayout {
     pub boot_sector_reloc_offset: u64,
     pub boot_sector_reloc_sectors: u32,
     pub encrypted_size: u64,
+    /// The XTS data unit in bytes: the volume's sector size, 512 or 4096.
+    pub sector_size: u32,
 }
 
 /// SHA-256 PCR values: `values` holds 32 bytes per set bit of `mask`,
@@ -292,7 +294,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
                 });
             }
             rtype::FVE_LAYOUT => {
-                fixed(52)?;
+                fixed(56)?;
                 fve_layout = Some(FveLayout {
                     metadata_offsets: [
                         v.u64_le().map_err(short)?,
@@ -303,7 +305,17 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
                     boot_sector_reloc_offset: v.u64_le().map_err(short)?,
                     boot_sector_reloc_sectors: v.u32_le().map_err(short)?,
                     encrypted_size: v.u64_le().map_err(short)?,
+                    sector_size: v.u32_le().map_err(short)?,
                 });
+                if !matches!(
+                    fve_layout,
+                    Some(FveLayout {
+                        sector_size: 512 | 4096,
+                        ..
+                    })
+                ) {
+                    return Err(HandoffError::BadValue(t));
+                }
             }
             rtype::B => {
                 fixed(32)?;
@@ -497,7 +509,8 @@ pub fn encode(h: &Handoff<'_>, out: &mut [u8]) -> Result<usize, EncodeError> {
             w.u64_le(l.region_size)?;
             w.u64_le(l.boot_sector_reloc_offset)?;
             w.u32_le(l.boot_sector_reloc_sectors)?;
-            w.u64_le(l.encrypted_size)
+            w.u64_le(l.encrypted_size)?;
+            w.u32_le(l.sector_size)
         })?;
         count += 1;
     }
@@ -564,6 +577,7 @@ mod tests {
                 boot_sector_reloc_offset: 4096,
                 boot_sector_reloc_sectors: 16,
                 encrypted_size: 1 << 40,
+                sector_size: 512,
             }),
             b: &[0xbb; 32],
             pcrs: Pcrs {
