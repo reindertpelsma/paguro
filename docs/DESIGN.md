@@ -2801,13 +2801,12 @@ So the guard only has to stop operations on the image's inode. One volume-wide
 effect remains: metadata **readahead** through the block device's page cache can
 touch clusters next to metadata, including the image's (below).
 
-Three layers, all keyed to the image's inode — never its path, because ntfs3
+Two layers, keyed to the image's inode — never its path, because ntfs3
 resolves the 8.3 short name and supports hard links:
 
 | Layer | Mechanism | Covers |
 |---|---|---|
 | **inode guard** (primary) | a **BPF-LSM** program keyed on `(dev, ino)`: `file_open`, `path_truncate`, `inode_setattr`, `inode_unlink`, `inode_rename`, `inode_link`, `inode_setxattr`/`removexattr`, `inode_file_setattr`, `file_permission` → `EACCES` (`EBUSY` for unlink/rename/link). Every data access needs an fd, so `file_open` alone covers read, mmap, `fallocate`, `open_by_handle_at` | everything, on the inode |
-| **declarative backstop** | NTFS `SYSTEM` attribute on the image, view C mounted `sys_immutable,ads=0`, never `discard` | writes, truncate, unlink even without the program; `ads=0` removes the alternate-stream alias and its lookup-time MFT writes |
 | **tripwire** | the module's range test: readahead (`REQ_RAHEAD`) hits are expected and failed quietly; any other hit is counted and logged as a guard failure | the correctness floor |
 
 The BPF link is pinned, and the program also denies unlinking its own pin and

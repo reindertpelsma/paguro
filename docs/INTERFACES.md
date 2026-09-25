@@ -564,7 +564,7 @@ is differential-tested against it (§12).
   last run when the new clusters are adjacent).
 - **Extra refusals:** `$MFT` with an `$ATTRIBUTE_LIST`; initialized size short
   of the file size; a file size not a multiple of the sector size; record
-  numbers < 24 or ≥ 2³²; record layouts other than NTFS 3.1. The 64-record
+  numbers < 24 or ≥ 2³². FILE records are accepted in both the NTFS 3.1 layout (update sequence at 0x30) and the NTFS 3.0 layout (at 0x2a), which ntfs3 still writes for records it creates — the update-sequence offset is read from the header and bounded either way; anything else is refused. The 64-record
   limit counts `$DATA` segments outside the base record.
 - **Cross-check is mandatory:** `paguro-image` loads only after a passing
   `PG_CROSSCHECK`; `PG_GROW` clears it.
@@ -585,7 +585,7 @@ is differential-tested against it (§12).
 |---|---|---|
 | `PG_VOLUME_ADD` | raw (ciphertext) dev_t, plaintext dev_t, volume GUID, reserved ranges (≤ 8), flags (`READ_ONLY`: set from the handoff's hibernation or dirty state, making every claim and view on the volume read-only in the module itself) | registers a volume; parses its boot sector. Reserved ranges are BitLocker's non-data regions from the handoff `FVE_LAYOUT`: sectors `[0, reloc_len)`, the relocated boot-sector copy, the three metadata regions, Windows 10+'s extra region. **Subtract-only**: they can make a claim fail, never make one succeed |
 | `PG_CLAIM` | volume id, mft_record, mft_seq, format | core derives extents; refuses intersection with any other claim **or any reserved range**; returns claim id |
-| `PG_GROW` | claim id | re-derives; accepted only if the old extents are an exact prefix of the new (append-only); otherwise the claim becomes read-only |
+| `PG_GROW` | claim id | re-derives. Accepted if the old extents are a prefix of the new (the last may be extended in place). **If the new extents fail validation but the old ones are intact, the grow is refused and the claim keeps its old extents, writable** — the image simply did not grow. Only if the old extents themselves changed (the file moved) does the claim become read-only |
 | `PG_CROSSCHECK` | claim id, extent list from ntfs3 FIEMAP | compares only; mismatch → claim is refused, never amended |
 | `PG_RELEASE` | claim id | only when no view uses it |
 | `PG_VOLUME_REMOVE` | volume id | only when it has no claims or views |
@@ -620,8 +620,11 @@ mounted, for every claimed image on that volume:
   `file_permission` with `EACCES` (`EBUSY` for unlink/rename/link), except for
   the growth service's cgroup. Its link is pinned; it also denies removing its
   own pin and unmounting that bpffs. Requires `lsm=…,bpf`.
-- the image carries the NTFS `SYSTEM` attribute; view C is mounted
-  `sys_immutable,ads=0` and never `discard`.
+- view C is never mounted with `discard`. (A declarative backstop — the NTFS
+  `SYSTEM` attribute with `sys_immutable`, and `ads=0` — was dropped: the first
+  also blocks the growth service's own appends, since every mount of the volume
+  shares it, and not every ntfs3 has `ads=`. The BPF-LSM program is the layer,
+  the range test the floor.)
 - `paguro-volume` fails `REQ_RAHEAD` bios on claimed extents quietly and counts
   every other hit as a guard failure (`PG_STATUS`).
 
