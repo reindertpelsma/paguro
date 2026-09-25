@@ -42,10 +42,17 @@ public sealed class PaguroClient : IPaguroClient
     public static async Task<PaguroClient> ConnectAsync(string? pipe = null, int timeoutMs = 3000, CancellationToken cancel = default)
     {
         var name = pipe ?? PipeName;
-        var s = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous);
+        NamedPipeClientStream s;
+        if (OperatingSystem.IsWindows())
+            s = await OpenWindows(name, timeoutMs, cancel).ConfigureAwait(false);
+        else
+        {
+            s = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous);
+            try { await s.ConnectAsync(timeoutMs, cancel).ConfigureAwait(false); }
+            catch { await s.DisposeAsync().ConfigureAwait(false); throw; }
+        }
         try
         {
-            await s.ConnectAsync(timeoutMs, cancel).ConfigureAwait(false);
             if (OperatingSystem.IsWindows() && name == DefaultPipe)
                 VerifyServer(s);
             return new PaguroClient(s);
@@ -55,6 +62,60 @@ public sealed class PaguroClient : IPaguroClient
             await s.DisposeAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>The access a client asks for: FILE_GENERIC_READ | FILE_WRITE_DATA |
+    /// FILE_WRITE_ATTRIBUTES. Never GENERIC_WRITE: it includes
+    /// FILE_CREATE_PIPE_INSTANCE, which the pipe's ACL gives only to
+    /// administrators (NamedPipeClientStream would ask for it).</summary>
+    public const uint ClientAccess = 0x0012018b;
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    static async Task<NamedPipeClientStream> OpenWindows(string name, int timeoutMs, CancellationToken cancel)
+    {
+        var path = $@"\\.\pipe\{name}";
+        var until = Environment.TickCount64 + timeoutMs;
+        while (true)
+        {
+            cancel.ThrowIfCancellationRequested();
+            var h = Native.CreateFileW(path, ClientAccess, 0, IntPtr.Zero, Native.OPEN_EXISTING, Native.FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+            if (!h.IsInvalid)
+                return new NamedPipeClientStream(PipeDirection.InOut, isAsync: true, isConnected: true, h);
+            var err = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+            h.Dispose();
+            var left = until - Environment.TickCount64;
+            switch (err)
+            {
+                case Native.ERROR_FILE_NOT_FOUND when left > 0:
+                    await Task.Delay(50, cancel).ConfigureAwait(false);
+                    continue;
+                case Native.ERROR_PIPE_BUSY when left > 0:
+                    Native.WaitNamedPipeW(path, (uint)Math.Min(left, 1000));
+                    continue;
+                case Native.ERROR_FILE_NOT_FOUND or Native.ERROR_PIPE_BUSY:
+                    throw new TimeoutException($"{path}: no paguro service");
+                case Native.ERROR_ACCESS_DENIED:
+                    throw new UnauthorizedAccessException($"{path}: access denied");
+                default:
+                    throw new IOException($"{path}: error {err}");
+            }
+        }
+    }
+
+    static class Native
+    {
+        public const uint OPEN_EXISTING = 3;
+        public const uint FILE_FLAG_OVERLAPPED = 0x40000000;
+        public const int ERROR_FILE_NOT_FOUND = 2;
+        public const int ERROR_ACCESS_DENIED = 5;
+        public const int ERROR_PIPE_BUSY = 231;
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        public static extern Microsoft.Win32.SafeHandles.SafePipeHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+        public static extern bool WaitNamedPipeW(string name, uint timeout);
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]

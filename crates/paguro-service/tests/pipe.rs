@@ -53,9 +53,9 @@ fn unique(tag: &str) -> String {
 }
 
 fn open(name: &str) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
     OpenOptions::new()
-        .read(true)
-        .write(true)
+        .access_mode(win::CLIENT_ACCESS)
         .open(win::pipe_path(name))
 }
 
@@ -105,6 +105,19 @@ fn acl_owner_and_calls() {
     assert_eq!(c["pid"], std::process::id());
     let r = call(&f, "distro.list", json!({}));
     assert_eq!(r["result"]["data"]["distributions"][0]["name"], "debian");
+}
+
+/// GENERIC_WRITE includes FILE_CREATE_PIPE_INSTANCE: the elevated runner
+/// has full control; the ACL is what keeps the interactive user from it.
+#[test]
+fn generic_write_is_more_than_a_client_needs() {
+    let name = unique("gw");
+    let _w = start(&name);
+    let f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(win::pipe_path(&name));
+    assert!(f.is_ok(), "the elevated runner has full control: {f:?}");
 }
 
 #[test]

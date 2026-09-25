@@ -3,6 +3,7 @@
 //! it: a name squatted by another user never receives a passphrase.
 
 use std::fs::{File, OpenOptions};
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 
 use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
@@ -65,7 +66,10 @@ pub fn owned_by_service(f: &File) -> Result<bool, String> {
 pub fn connect_to(path: &str) -> Connect {
     let mut tried_wait = false;
     let f = loop {
-        match OpenOptions::new().read(true).write(true).open(path) {
+        match OpenOptions::new()
+            .access_mode(crate::rpc::PIPE_CLIENT_ACCESS)
+            .open(path)
+        {
             Ok(f) => break f,
             Err(e) => match e.raw_os_error() {
                 Some(ERROR_FILE_NOT_FOUND) => return Connect::NoService,

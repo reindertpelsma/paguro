@@ -49,11 +49,16 @@ use windows::Win32::System::Pipes::{
 use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 use windows::core::{HSTRING, PWSTR};
 
-use crate::{Worker, serve};
+use crate::Worker;
 
 /// The pipe's security descriptor (see the module documentation).
-/// `0x12018b` = `FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES`.
+/// `0x12018b` = `FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES`:
+/// everything a client needs, but not `FILE_APPEND_DATA`, which on a pipe is
+/// `FILE_CREATE_PIPE_INSTANCE`. `GENERIC_WRITE` includes it, so clients open
+/// the pipe with exactly [`CLIENT_ACCESS`] instead.
 pub const SDDL: &str = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12018b;;;IU)";
+/// What a client asks for when it opens the pipe (see [`SDDL`]).
+pub const CLIENT_ACCESS: u32 = paguro_win::rpc::PIPE_CLIENT_ACCESS;
 /// Connections served at once; more are refused (denial of service).
 pub const MAX_CONNECTIONS: usize = 16;
 const BUFFER: u32 = 64 * 1024;
@@ -294,7 +299,6 @@ pub fn serve_pipe(
             let _ = unsafe { CloseHandle(h) };
             return Ok(());
         }
-        let caller = identify(h);
         // SAFETY: we own the handle; the File closes it.
         let file = unsafe { File::from_raw_handle(h.0) };
         let (w, a, l) = (worker.clone(), active.clone(), log.clone());
@@ -305,20 +309,26 @@ pub fn serve_pipe(
                     b"{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"too many connections\"}}\n",
                 );
             } else {
-                l(&format!(
-                    "connection: {} (pid {:?}, {})",
-                    caller.user,
-                    caller.pid,
-                    if caller.elevated {
-                        "elevated"
-                    } else if caller.admin {
-                        "administrator"
-                    } else {
-                        "read-only"
-                    }
-                ));
-                if let Err(e) = serve(&file, &file, &caller, &w) {
-                    l(&format!("connection {}: {e}", caller.user));
+                let raw = file.as_raw_handle() as usize;
+                let l2 = l.clone();
+                let who = move || {
+                    let c = identify(HANDLE(raw as *mut core::ffi::c_void));
+                    l2(&format!(
+                        "connection: {} (pid {:?}, {})",
+                        c.user,
+                        c.pid,
+                        if c.elevated {
+                            "elevated"
+                        } else if c.admin {
+                            "administrator"
+                        } else {
+                            "read-only"
+                        }
+                    ));
+                    c
+                };
+                if let Err(e) = crate::serve_as(&file, &file, who, &w) {
+                    l(&format!("connection: {e}"));
                 }
             }
             a.fetch_sub(1, Ordering::SeqCst);
@@ -330,9 +340,9 @@ pub fn serve_pipe(
 
 /// Unblock [`serve_pipe`]'s accept after setting its stop flag.
 pub fn wake(name: &str) {
+    use std::os::windows::fs::OpenOptionsExt;
     let _ = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
+        .access_mode(CLIENT_ACCESS)
         .open(pipe_path(name));
 }
 

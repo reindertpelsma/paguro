@@ -45,6 +45,11 @@ pub const API_VERSION: &str = "1.0";
 pub const PIPE: &str = r"\\.\pipe\paguro";
 /// Its name (the part after `\\.\pipe\`).
 pub const PIPE_NAME: &str = "paguro";
+/// The access a client asks for when it opens the pipe:
+/// `FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES`, never
+/// `GENERIC_WRITE` (it includes `FILE_CREATE_PIPE_INSTANCE`, which the
+/// interactive user is not granted). See `paguro-service`'s ACL.
+pub const PIPE_CLIENT_ACCESS: u32 = 0x0012_018b;
 /// Largest request or response line on the pipe.
 pub const MAX_MESSAGE: usize = 4 << 20;
 

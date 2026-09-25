@@ -124,13 +124,22 @@ fn write_value<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
 
 /// Serve one connection until the client closes it. Write failures (the
 /// client went away mid-call) end the connection after the call finishes.
-pub fn serve<R: Read, W: Write>(
+pub fn serve<R: Read, W: Write>(r: R, w: W, caller: &Caller, worker: &Worker) -> io::Result<()> {
+    serve_as(r, w, || caller.clone(), worker)
+}
+
+/// [`serve`], with the caller identified after the first line arrives: a
+/// named pipe's client can only be impersonated once something has been
+/// read from it.
+pub fn serve_as<R: Read, W: Write>(
     r: R,
     mut w: W,
-    caller: &Caller,
+    identify: impl FnOnce() -> Caller,
     worker: &Worker,
 ) -> io::Result<()> {
     let mut br = BufReader::new(r);
+    let mut identify = Some(identify);
+    let mut caller: Option<Caller> = None;
     loop {
         let line = match read_line(&mut br, rpc::MAX_MESSAGE) {
             Ok(Some(l)) => l,
@@ -159,7 +168,13 @@ pub fn serve<R: Read, W: Write>(
         if text.trim().is_empty() {
             continue;
         }
-        let rx = worker.submit(text, caller.clone());
+        if caller.is_none() {
+            caller = identify.take().map(|f| f());
+        }
+        let Some(who) = caller.clone() else {
+            return Ok(());
+        };
+        let rx = worker.submit(text, who);
         let mut alive = true;
         for out in rx {
             let v = match out {
