@@ -89,8 +89,13 @@ qemu-system-x86_64 -machine q35 -m 256 -nographic -net none \
 
 ## Licence
 
-paguro is licensed under the **Apache License 2.0** ([`LICENSE`](LICENSE)),
-except:
+paguro is dual-licensed under **Apache-2.0 OR GPL-2.0-only**
+([`LICENSE-APACHE`](LICENSE-APACHE), [`LICENSE-GPL-2.0`](LICENSE-GPL-2.0)), at
+your option. The GPL-2.0 option exists for compatibility: Apache-2.0 cannot be
+combined with GPL-2.0-only code (such as the Linux kernel), so anyone who needs
+to can take the code under GPL-2.0 instead.
+
+Exceptions:
 
 - the Linux kernel module (`kernel/dm-paguro`) is **GPL-2.0**, as Linux
   requires; its dependency-free core (`pg_range`, `pg_claim`, `pg_ntfs`) and

@@ -1,6 +1,6 @@
 [package]
 name = "paguro-fuzz"
-license = "Apache-2.0"
+license = "Apache-2.0 OR GPL-2.0-only"
 version = "0.0.0"
 edition = "2024"
 publish = false
