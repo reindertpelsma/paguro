@@ -1068,6 +1068,62 @@ impl WinApi for RealApi {
         })
     }
 
+    fn run_limited(&self, program: &str, args: &[&str], secs: u64) -> ApiResult<Output> {
+        use std::time::{Duration, Instant};
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| io_err("CreateProcessW", program, e))?;
+        // Drain the pipes while waiting, so a chatty program cannot block.
+        let out = child.stdout.take().map(|mut o| {
+            std::thread::spawn(move || {
+                let mut v = Vec::new();
+                let _ = o.read_to_end(&mut v);
+                v
+            })
+        });
+        let err = child.stderr.take().map(|mut o| {
+            std::thread::spawn(move || {
+                let mut v = Vec::new();
+                let _ = o.read_to_end(&mut v);
+                v
+            })
+        });
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        let status = loop {
+            if let Some(st) = child
+                .try_wait()
+                .map_err(|e| io_err("WaitForSingleObject", program, e))?
+            {
+                break st;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ApiError::new(
+                    ErrorKind::Other,
+                    "WaitForSingleObject",
+                    format!(
+                        "{program} {} did not finish in {secs} s (waiting for a confirmation nobody can see?); stopped",
+                        args.join(" ")
+                    ),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let take = |h: Option<std::thread::JoinHandle<Vec<u8>>>| {
+            h.and_then(|h| h.join().ok()).unwrap_or_default()
+        };
+        Ok(Output {
+            status: status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&take(out)).into_owned(),
+            stderr: String::from_utf8_lossy(&take(err)).into_owned(),
+        })
+    }
+
     fn run_interactive(&self, program: &str, args: &[&str]) -> ApiResult<i32> {
         let st = Command::new(program)
             .args(args)

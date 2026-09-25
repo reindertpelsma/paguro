@@ -228,9 +228,15 @@ jobs:
         with: { name: esp-payload, path: payload/esp }
       - uses: actions/download-artifact@v4
         with: { name: paguro-minifilter, path: minifilter }
-      - name: the payload tree
+      - name: the payload tree; trust the driver job's test certificate (as a signed release needs no step)
         shell: pwsh
         run: |
+          $cer = Get-ChildItem -Recurse minifilter -Filter paguro-test.cer | Select-Object -First 1
+          if ($cer) {
+            certutil -addstore Root $cer.FullName | Out-Null
+            certutil -addstore TrustedPublisher $cer.FullName | Out-Null
+            "trusted $($cer.FullName)"
+          } else { 'no test certificate: the driver step will be skipped (it must not hang)' }
           New-Item -ItemType Directory -Force payload\minifilter | Out-Null
           Copy-Item minifilter\pkg\Release\* payload\minifilter\
           Get-ChildItem -Recurse payload | Format-Table FullName, Length
@@ -478,6 +484,7 @@ jobs:
           name: paguro-minifilter
           path: |
             windows/minifilter/pkg
+            windows/minifilter/paguro-test.cer
             windows/minifilter/test/*.exe
             windows/minifilter/x64/Release/*.xml
 

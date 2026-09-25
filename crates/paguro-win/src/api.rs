@@ -324,6 +324,13 @@ pub trait WinApi {
 
     // -- processes ----------------------------------------------------------
     fn run(&self, program: &str, args: &[&str], stdin: Option<&[u8]>) -> ApiResult<Output>;
+    /// [`WinApi::run`], killed after `secs` (an `ApiError` naming the
+    /// command): for programs that may stop at a dialog nobody sees, such
+    /// as `pnputil` asking to trust a driver's publisher.
+    fn run_limited(&self, program: &str, args: &[&str], secs: u64) -> ApiResult<Output> {
+        let _ = secs;
+        self.run(program, args, None)
+    }
     /// A program attached to this process's console (an interactive shell);
     /// its exit status. Only a front end calls this, never the service.
     fn run_interactive(&self, program: &str, args: &[&str]) -> ApiResult<i32>;

@@ -40,6 +40,12 @@ pub const SHORTCUT: &str = "Microsoft\\Windows\\Start Menu\\Programs\\paguro.lnk
 /// The GUI, relative to the install directory.
 pub const APP: &str = "app\\paguro-app.exe";
 pub const MINIFILTER_INF: &str = "minifilter\\paguro_flt.inf";
+/// How long pnputil may take: it stops at a dialog (trust this driver's
+/// publisher?) when the package's signer is not trusted, and in a session
+/// nobody sees that dialog.
+const PNPUTIL_SECS: u64 = 120;
+/// How long the Start menu shortcut (PowerShell) may take.
+const SHORTCUT_SECS: u64 = 60;
 /// Largest paguro.exe copied (with its payloads).
 const MAX_EXE: usize = 1 << 30;
 const MAX_MANIFEST: usize = 1 << 20;
@@ -343,7 +349,15 @@ fn step(ctx: &Ctx<'_>, id: &str, repair: bool) -> Result<(&'static str, String),
             if api.file_facts(&inf)?.is_none() {
                 return Ok(("skipped", "no minifilter package in this build".into()));
             }
-            let o = api.run("pnputil.exe", &["/add-driver", &inf, "/install"], None)?;
+            let o = match api.run_limited(
+                "pnputil.exe",
+                &["/add-driver", &inf, "/install"],
+                PNPUTIL_SECS,
+            ) {
+                Ok(o) => o,
+                // Not fatal (below); the reason is the detail.
+                Err(e) => return Ok(("skipped", format!("the minifilter was not added: {e}"))),
+            };
             if o.ok() {
                 Ok((
                     "done",
@@ -416,11 +430,17 @@ fn step(ctx: &Ctx<'_>, id: &str, repair: bool) -> Result<(&'static str, String),
                     exe_path(api)
                 }
             );
-            checked(
-                ctx,
+            let o = api.run_limited(
                 "powershell.exe",
                 &["-NoProfile", "-NonInteractive", "-Command", &script],
+                SHORTCUT_SECS,
             )?;
+            if !o.ok() {
+                return Err(CmdError::new(
+                    Exit::Platform,
+                    format!("the Start menu entry: {}", o.stderr.trim()),
+                ));
+            }
             Ok(("done", format!("Start menu: {lnk} starts paguro.exe")))
         }
         _ => Err(CmdError::internal(format!("unknown setup step {id}"))),
