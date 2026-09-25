@@ -92,15 +92,15 @@ class QMP:
             if "event" not in msg:
                 return msg
 
-    def cmd(self, name, **args):
-        req = {"execute": name}
+    def cmd(self, execute, **args):
+        req = {"execute": execute}
         if args:
             req["arguments"] = args
         self.f.write(json.dumps(req).encode() + b"\n")
         self.f.flush()
         r = self._read()
         if "error" in r:
-            raise RuntimeError(f"QMP {name}: {r['error'].get('desc')}")
+            raise RuntimeError(f"QMP {execute}: {r['error'].get('desc')}")
         return r.get("return")
 
     def close(self):
@@ -122,22 +122,33 @@ def read_pid(name, d=None):
     try:
         with open(os.path.join(d or RUN, name)) as f:
             pid = int(f.read().strip())
-        os.kill(pid, 0)
-        return pid
     except (OSError, ValueError):
         return None
+    return pid if pid_alive(pid) else None
 
 
 def running():
     return read_pid("qemu.pid")
 
 
+def pid_alive(pid):
+    # a zombie counts as gone: `build` launches QEMU itself and would never
+    # see it exit otherwise
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (FileNotFoundError, IndexError):
+        return False
+
+
 def wait_pid_gone(pid, timeout):
     end = time.time() + timeout
     while time.time() < end:
-        try:
-            os.kill(pid, 0)
-        except OSError:
+        if not pid_alive(pid):
+            try:
+                os.waitpid(pid, os.WNOHANG)   # reap our own child, if it is one
+            except ChildProcessError:
+                pass
             return True
         time.sleep(1)
     return False
@@ -535,10 +546,28 @@ def ensure_secrets():
         os.chmod(pw, 0o600)
 
 
-def watch_install(t0, timeout):
+def set_link(up):
+    with QMP() as qmp:
+        qmp.cmd("set_link", name="n0", up=up)
+
+
+def watch_install(t0, timeout, link_down=False):
+    """Wait for phase 1 to power off. With link_down, the NIC stays unplugged
+    until the first-logon script starts: OOBE's "Checking for updates" would
+    otherwise pull cumulative updates into the base image."""
     logs = os.path.join(WINVM_DIR, "logs")
+    serial = os.path.join(RUN, "serial.log")
     pid, n = running(), 0
-    while pid and not wait_pid_gone(pid, 60):
+    while pid and not wait_pid_gone(pid, 20 if link_down else 60):
+        if link_down:
+            try:
+                with open(serial, errors="replace") as f:
+                    if "winvm-setup" in f.read():
+                        set_link(True)
+                        link_down = False
+                        log("first-logon setup started: network link up")
+            except FileNotFoundError:
+                pass
         n += 1
         if time.time() - t0 > timeout:
             die("install timed out (VM left running; winvm screenshot / winvm stop)")
@@ -592,7 +621,8 @@ def cmd_build(a):
             while time.time() < end:
                 send_keys(qmp, ["ret"])
                 time.sleep(0.7)
-        watch_install(t0, a.timeout)
+            qmp.cmd("set_link", name="n0", up=False)
+        watch_install(t0, a.timeout, link_down=True)
     t1 = time.time()
     log(f"phase 1 (install + setup) finished after {(t1 - t0) / 60:.1f} min")
     try:
@@ -605,6 +635,10 @@ def cmd_build(a):
     if not wait_ssh(900):
         die("phase 2: ssh never came up")
     ssh_run("bcdedit /set testsigning on", check=True)
+    # start the evaluation's 90-day activation (online); an unactivated eval
+    # reports "grace time expired" and nags / shuts down
+    ssh_run("cscript //nologo %windir%\\system32\\slmgr.vbs /ato & "
+            "cscript //nologo %windir%\\system32\\slmgr.vbs /xpr")
     ssh_run("type C:\\winvm\\setup.log")
     pid = running()
     ssh_run("shutdown /s /t 0")
@@ -612,23 +646,33 @@ def cmd_build(a):
         die("phase 2: VM did not power off")
     log(f"phase 2 finished in {(time.time() - t1) / 60:.1f} min")
 
-    # one self-contained, compressed base image (zero clusters dropped)
-    log("writing the compressed base image")
-    subprocess.run(["qemu-img", "convert", "-c", "-p", "-O", "qcow2", "-o", "cluster_size=64k",
-                    disk, BASE + ".new"], check=True)
     if os.path.exists(BASE):
         os.chmod(BASE, 0o644)
-    os.replace(BASE + ".new", BASE)
+    if a.no_compress:
+        # needs no extra space: the install image (and its backing chain,
+        # if any) becomes the base as is
+        if disk != BASE + ".tmp":
+            subprocess.run(["qemu-img", "commit", "-q", "-b", os.path.realpath(BASE + ".tmp"), disk], check=True)
+        os.replace(os.path.realpath(BASE + ".tmp"), BASE)
+        if os.path.islink(BASE + ".tmp"):
+            os.unlink(BASE + ".tmp")
+    else:
+        # one self-contained, compressed image (about half the size; needs
+        # that much free space next to the install image while it runs)
+        log("writing the compressed base image")
+        subprocess.run(["qemu-img", "convert", "-c", "-p", "-O", "qcow2", "-o", "cluster_size=64k",
+                        disk, BASE + ".new"], check=True)
+        os.replace(BASE + ".new", BASE)
+        if disk == BASE + ".tmp":
+            os.unlink(os.path.realpath(disk))
+            if os.path.islink(disk):
+                os.unlink(disk)
+        else:
+            log(f"left the install chain ({disk} and its backing files) for you to delete")
     os.chmod(BASE, 0o444)
     os.replace(vars_fd, BASE_VARS)
     shutil.rmtree(BASE_TPM, ignore_errors=True)
     os.replace(tpm, BASE_TPM)
-    if disk == BASE + ".tmp":
-        os.unlink(os.path.realpath(disk))
-        if os.path.islink(disk):
-            os.unlink(disk)
-    else:
-        log(f"left the install chain ({disk} and its backing files) for you to delete")
     log(f"base image ready: {BASE} ({os.path.getsize(BASE) / 2**30:.1f} GiB), "
         f"total {(time.time() - t0) / 60:.1f} min")
 
@@ -647,6 +691,8 @@ def main():
     b.add_argument("--force", action="store_true")
     b.add_argument("--resume", action="store_true",
                    help="skip the install: wait for a running phase 1, then finish")
+    b.add_argument("--no-compress", action="store_true",
+                   help="keep the install image as the base instead of a compressed copy")
     b.add_argument("--disk", help="with --resume: the image to finish (default base.qcow2.tmp)")
     b.add_argument("--vnc", type=int, metavar="DISPLAY")
     b.set_defaults(fn=cmd_build)

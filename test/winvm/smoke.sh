@@ -22,9 +22,12 @@ MF="$DIR/artifacts/minifilter-$RUN"
 [ -d "$MF" ] || gh run download "$RUN" -R reindertpelsma/paguro -n paguro-minifilter -D "$MF"
 echo "run $RUN -> $MF"
 
-say "paguro.exe (x86_64-pc-windows-msvc, cargo-xwin)"
-(cd "$REPO" && cargo xwin build -p paguro-win --release --target x86_64-pc-windows-msvc)
-EXE="$REPO/target/x86_64-pc-windows-msvc/release/paguro.exe"
+say "paguro.exe (x86_64-pc-windows-msvc, cargo-xwin, static CRT)"
+# +crt-static: a clean Windows has no VCRUNTIME140.dll, and the default
+# (dynamic CRT) build exits 0xC0000135 (DLL not found) there
+(cd "$REPO" && RUSTFLAGS="-C target-feature=+crt-static" cargo xwin build -p paguro-win --release \
+    --target x86_64-pc-windows-msvc --target-dir target/winvm-crt-static)
+EXE="$REPO/target/winvm-crt-static/x86_64-pc-windows-msvc/release/paguro.exe"
 
 say "boot"
 "$W" start

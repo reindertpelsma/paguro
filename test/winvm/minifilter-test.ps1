@@ -13,8 +13,11 @@ Step 'trust the CI test certificate (taken from the driver signature)'
 $sig = Get-AuthenticodeSignature pkg\Release\paguro_flt.sys
 "signature: $($sig.Status) by $($sig.SignerCertificate.Subject)"
 Export-Certificate -Cert $sig.SignerCertificate -FilePath paguro-test.cer | Out-Null
-Import-Certificate -FilePath paguro-test.cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-Import-Certificate -FilePath paguro-test.cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+# certutil, not Import-Certificate: over SSH (an S4U logon) the latter fails
+# with E_ACCESSDENIED on LocalMachine\Root
+certutil -f -addstore Root paguro-test.cer | Select-String 'completed|already'
+certutil -f -addstore TrustedPublisher paguro-test.cer | Select-String 'completed|already'
+
 bcdedit /enum | Select-String testsigning
 
 Step 'install Release, load INERT (no paguro-vm/1 marker)'
