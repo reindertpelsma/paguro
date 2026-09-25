@@ -4214,8 +4214,17 @@ the image install, not replacing it.
 | Windows VM | view B: synthetic GPT, image extents refused | the **whole Windows disk** passed to QEMU; FVE substitution only if BitLocker is on (the VM still has no TPM) |
 | Fast Startup / hibernation | gates Linux read-write | irrelevant to booting Linux; the VM still requires a clean Windows volume, and the app says how to get one |
 
+**Encryption follows Windows.** The dedicated disk mirrors what the user
+already chose for Windows:
+
+| Windows | Linux disk |
+|---|---|
+| BitLocker with a TPM protector | LUKS2, with the TPM + PIN slot below |
+| BitLocker without a TPM (password or USB key) | LUKS2 without a TPM slot: the Linux passphrase |
+| BitLocker off | **no LUKS by default.** Offered, not recommended: most people who leave Windows unencrypted do not want Linux encrypted on the same machine |
+
 **Encryption: ordinary LUKS2, three keyslots, each labelled.** When Windows
-uses BitLocker, the Linux disk is standard LUKS2 with:
+uses BitLocker with a TPM, the Linux disk is standard LUKS2 with:
 
 | Keyslot | Opened by | Purpose |
 |---|---|---|
@@ -4240,6 +4249,45 @@ and for the other two, what depends on them: *"Lets Windows open this Linux disk
 the Windows tool re-creates a missing one, and replaces the recovery slot when
 the recovery password is rotated in Windows, using the VMK-derived slot to
 authorise the change.
+
+**The PIN bypass, for the LUKS disk too.** *Restart into Linux* from a
+logged-in Windows skips the PIN here as it does for images (§6), with the same
+security. LUKS has no native time-limited TPM unlock — `systemd-cryptenroll`
+binds PCRs and a PIN, not a TPM clock deadline — so paguro adds the one missing
+piece as a **LUKS2 token plugin** (`libcryptsetup-token-paguro-bypass.so`, a
+small C library on libcryptsetup's documented token API). `systemd-cryptsetup`
+tries tokens before it prompts, so the bypass needs no script in the boot path:
+
+```text
+Windows, on "Restart into Linux" (logged in)
+    K <- random 32 bytes
+    add a LUKS keyslot for K       (authorised by the VMK-derived slot, via WSL)
+    seal K: PolicyPCR(the TPM + PIN slot's PCRs, as recorded by the
+            last Linux boot) AND PolicyCounterTimer(clock < deadline)
+    store the sealed object + deadline in a LUKS2 token "paguro-bypass"
+    BootNext = the Linux disk, restart
+
+Linux initrd
+    systemd-cryptsetup -> the plugin unseals K -> unlocked, no prompt
+    after unlock: remove the bypass keyslot and its token
+```
+
+It is exactly as strong as paguro's own bypass: created only by a logged-in
+Windows, sealed to the same PCRs as the standing TPM + PIN slot, refused when
+`TPMS_CLOCK_INFO.safe` is clear, expired by the TPM clock whatever copies
+exist, and one-shot — the initrd removes it after use, and the Windows service
+removes any stale one at its next start.
+
+**The PCRs must cover the command line.** Getting a shell in a LUKS initrd
+before unlock is trivial (`init=/bin/sh` from the boot menu, the emergency
+shell), much as WinRE is on a Windows laptop — and Secure Boot does not stop it.
+Without a PIN such a shell must gain nothing. The standing TPM + PIN slot is
+safe regardless, because it needs the PIN and the TPM's lockout applies. The
+bypass has no PIN during its window, so it is sealed to the PCRs that measure
+the kernel command line and boot chain — PCR 8/9 under GRUB, PCR 11/12 under
+systemd-stub — together with PCR 7: an edited command line then cannot unseal
+it. After unlock, the volume key is measured into PCR 15 (`tpm2-measure-pcr`),
+so nothing later in the boot can unseal again.
 
 **Booting it** stays one click from either side: *Restart into Linux* in
 Windows, or the entry in `paguro.efi`'s picker, sets `BootNext` to the Linux
