@@ -4295,8 +4295,30 @@ extend it before any shell:
 |---|---|---|
 | measure the volume key into PCR 15 after unlock | `systemd-cryptsetup`, `tpm2-measure-pcr=yes` in crypttab | set |
 | refuse unseal once PCR 15 moved | binding PCR 15 **to its zero value** at enrolment (`--tpm2-pcrs=7+15:sha256=00…0`) | set; not a distribution default |
-| cap before any shell | **not built in** | a unit ordered before `emergency`, `rescue` and `debug-shell` in the initrd (and initramfs-tools' panic hook) extends PCR 15 with a sentinel — WinRE's pattern, and paguro's "cap on entry" (§4.1) |
+| cap before any shell | **not built in** | a unit ordered before `emergency`, `rescue` and `debug-shell` in the initrd (and initramfs-tools' panic hook) extends PCR 15 with a sentinel **and wipes whatever was already unsealed** — keyring entries, files under `/run`, a pending bypass keyslot and token — WinRE's pattern, and paguro's "cap on entry" (§4.1) |
 | an edited command line cannot unseal | PCRs 8/9 (GRUB) or 11/12 (systemd-stub) | bound for the bypass slot, which has no PIN during its window |
+
+**GRUB or UKI.** Which PCRs cover the command line depends on the boot chain:
+
+| Chain | What is measured | Standing TPM + PIN slot | PIN-less bypass |
+|---|---|---|---|
+| **UKI** (systemd-stub, optionally behind systemd-boot) | the kernel, initrd and command line in one signed image (PCR 11), extra command line and credentials (PCR 12) | PCR 7 + 15 (zero) | bound to PCR 11/12 — **the recommended chain for TPM** |
+| **GRUB** with its TPM measurements | every command GRUB executes, including anything typed at the GRUB shell or in an edited menu entry (PCR 8), and every file it loads plus the kernel command line (PCR 9) | PCR 7 + 15 (zero) | bound to PCR 8/9 **as the last Linux boot recorded them**; a kernel or `grub.cfg` update changes them, and the bypass then simply fails and the PIN is asked for |
+
+The standing slot needs no command-line binding: a shell before unlock still
+has no PIN, and the TPM's lockout limits guessing. Only PIN-less paths need it.
+Whether a distribution's signed GRUB performs these measurements is checked at
+install, and the bypass is offered only where they are present.
+
+**How robust TPM + PIN is on LUKS, stated plainly.** BitLocker's TPM path was
+designed as a whole — the PCR 7/11 profile, `bootmgr` ratcheting PCR 11, WinRE
+capping, the PIN mixed into the key. LUKS provides the parts, but its defaults
+bind PCR 7 alone, leave PCR 15 unbound, give the emergency shell no cap and the
+PIN no offline gate, and many distributions do not enable TPM unlock at all.
+LUKS users traditionally rely on the passphrase, whose Argon2id keyslot is a
+strong offline gate by itself. paguro therefore treats the **passphrase and the
+recovery key as the robust baseline** of the dedicated disk and TPM + PIN as a
+convenience layered on top, with the gaps above closed by configuration.
 
 PCR 15 bound to zero also closes the published *fake volume* attack (swap in a
 LUKS volume with the same UUID whose `init` then asks the TPM): the fake
