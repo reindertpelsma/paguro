@@ -1164,7 +1164,7 @@ not know their Windows is fine:
 ```
 
 Only after `R` does the 48-digit grid appear, in 8 groups with auto-advance and
-`aka.ms/recoverykeyfaq` on screen.
+`aka.ms/myrecoverykey` on screen.
 
 **Refusal** — one layout, several texts, all actionable. The hibernation case is
 the model because the detail people get wrong is that *Shut down does not count*:
@@ -4456,7 +4456,7 @@ gets a LUKS2 token of type `paguro` naming its purpose, shown by
 in words. For the recovery slot:
 
 > *This is your Microsoft BitLocker recovery key — the 48-digit key of your
-> Windows installation. Find it at aka.ms/recoverykeyfaq.*
+> Windows installation. Find it at aka.ms/myrecoverykey.*
 
 and for the other two, what depends on them: *"Lets Windows open this Linux disk
 (WSL). Managed by paguro — removing it stops Windows from opening Linux."* /
