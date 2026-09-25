@@ -137,7 +137,7 @@ expect "the guest is served substituted metadata, not the disk's" "$(tr '\n' ' '
 vol_sectors=$(python3 -c "import json;print(json.load(open('$SHARE/session.json'))['volume_bytes']//512)")
 out=$(l2 "mkdir -p /mnt/bek /mnt/bde /mnt/dis
 mount -o loop,ro /run/paguro/vm/bek.img /mnt/bek && bek=\$(ls /mnt/bek/*.BEK)
-dmsetup create paguro-vmc --readonly --table \"0 $vol_sectors linear /dev/mapper/paguro-vmdisk $v0\"
+dmsetup create paguro-vmc --readonly --table \"0 $vol_sectors linear /dev/mapper/paguro-vmdisk $v0\" && dmsetup mknodes
 bdeinfo -s \$bek /dev/mapper/paguro-vmc 2>&1 | grep -aE 'Is locked|Number of key protectors|External key' | tr -s ' \t' ' '
 bdemount -s \$bek /dev/mapper/paguro-vmc /mnt/bde && echo libbde \$(dd if=/mnt/bde/bde1 bs=1 skip=3 count=8 2>/dev/null) && umount /mnt/bde
 dislocker-fuse -V /dev/mapper/paguro-vmc -f \$bek -- /mnt/dis >/dev/null 2>&1 && echo dislocker \$(dd if=/mnt/dis/dislocker-file bs=1 skip=3 count=8 2>/dev/null) && umount /mnt/dis
@@ -171,7 +171,8 @@ result "boot to SSH" "$(( $(date +%s) - t0 )) s"
 result "host workloads' memory.max while the VM runs" "$(cat "$HOSTCG/memory.max") ($(grep -a 'memory:' "$VMWORK/launch.log" | tr '\n' ' '))"
 # The driver gate: the report on the agent port, before the timeout.
 wscp "$here/agent-report.ps1" paguro@127.0.0.1:C:/winvm/
-wssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\winvm\agent-report.ps1' 2>&1 | tr -d '\r' | tail -1
+wssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\winvm\agent-report.ps1' 2>&1 | tr -d '\r' > "$VMWORK/agent.txt" || true
+tail -1 "$VMWORK/agent.txt"
 sleep 3
 expect "the launcher's driver gate saw the report" "$(grep -a 'driver:' "$VMWORK/launch.log")" 'reported after'
 phase boot

@@ -59,12 +59,21 @@ l2_root() {
             [ -e "$r$l" ] || { mkdir -p "$r$(dirname "$l")"; cp -L "$l" "$r$l"; }
         done
     fi
+    # nested-e2e.sh: QEMU, OVMF and KVM in L2 too.
+    if [ -n "${PAGURO_L2_NESTED:-}" ]; then
+        vm_bin "$(command -v qemu-system-x86_64)" bin/qemu-system-x86_64
+        mkdir -p "$r/usr/share/qemu" "$r/usr/share/OVMF" "$r/usr/share/seabios"
+        cp -a /usr/share/qemu/. "$r/usr/share/qemu/"
+        cp -a /usr/share/seabios/. "$r/usr/share/seabios/" 2>/dev/null || true
+        cp /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_VARS_4M.fd "$r/usr/share/OVMF/"
+    fi
     cp "$top/target/x86_64-unknown-linux-musl/release/paguro-vm" "$r/bin/"
     cp "$top/kernel/dm-paguro/tools/pgctl" "$r/bin/"
     vm_modules "/lib/modules/$kver" drivers/md/dm-crypt drivers/md/dm-zero fs/ntfs3/ntfs3 \
         fs/9p/9p net/9p/9pnet_virtio fs/smb/client/cifs arch/x86/crypto/aesni-intel \
         drivers/md/dm-log-writes fs/nls/nls_utf8 fs/nls/nls_cp437 fs/nls/nls_iso8859-1 \
-        crypto/cmac crypto/ccm
+        crypto/cmac crypto/ccm ${PAGURO_L2_NESTED:+arch/x86/kvm/kvm-amd arch/x86/kvm/kvm-intel \
+        drivers/vhost/vhost_vsock}
     cp "$top/kernel/dm-paguro/dm-paguro.ko" "$r/mod/"
     vm_init_head > "$r/init"
     cat "$top/test/vm/l2-init.body" >> "$r/init"
@@ -88,7 +97,7 @@ l2_start() {
         -append "console=ttyS0 quiet panic=-1" \
         -drive if=none,id=wd,file="$VMWORK/l2disk.qcow2",format=qcow2,cache=writeback,discard=unmap \
         -device virtio-blk-pci,drive=wd,serial=PAGURO-TEST-DISK \
-        -netdev user,id=nat,hostfwd=tcp:127.0.0.1:$L2_NBD_PORT-:10809 \
+        -netdev user,id=nat,hostfwd=tcp:127.0.0.1:$L2_NBD_PORT-:10809${PAGURO_L2_EXTRA_FWD:+,$PAGURO_L2_EXTRA_FWD} \
         -device virtio-net-pci,netdev=nat,mac=52:54:00:12:34:56 \
         -netdev stream,id=link,server=on,addr.type=unix,addr.path="$VMWORK/paguro0.sock" \
         -device virtio-net-pci,netdev=link,mac=02:70:67:00:00:01 \

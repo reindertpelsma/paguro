@@ -24,6 +24,7 @@
 //! paguro-vm fve --volume DEV|FILE --vmk-file F --out DIR [--apply COPY]
 //!     the substitute, the .BEK and the owned ranges (the oracle's input)
 //! paguro-vm identity [--system-partition NAME]      what would be passed through
+//! paguro-vm qmp --socket S JSON...                  QMP commands (tests, diagnostics)
 //! paguro-vm windows-provision [--mac MAC]           the guest's link script
 //! paguro-vm smb-conf --root DIR --state DIR         the netns Samba's smb.conf
 //! paguro-vm samba --root DIR --state DIR --secret-file F   L: over the link
@@ -255,6 +256,34 @@ fn main() {
             ) {
                 Ok(s) => println!("{s}"),
                 Err(e) => fail(e),
+            }
+        }
+        "qmp" => {
+            // paguro-vm qmp --socket S JSON...: one command per argument
+            // (a test and diagnostics aid, where no python or socat is).
+            let mut sock = None;
+            let mut cmds = Vec::new();
+            while let Some(k) = a.it.next() {
+                match k.as_str() {
+                    "--socket" => sock = Some(PathBuf::from(a.val(&k))),
+                    _ => cmds.push(k),
+                }
+            }
+            let mut q = paguro_vm::qmp::Qmp::connect(&sock.unwrap_or_else(|| usage()))
+                .unwrap_or_else(|e| fail(e));
+            for c in cmds {
+                let v: serde_json::Value =
+                    serde_json::from_str(&c).unwrap_or_else(|e| fail(e.to_string()));
+                let ex = v
+                    .get("execute")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_else(|| usage())
+                    .to_string();
+                let args = v.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+                match q.cmd(&ex, args) {
+                    Ok(r) => println!("{r}"),
+                    Err(e) => fail(e),
+                }
             }
         }
         "identity" => {
