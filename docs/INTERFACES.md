@@ -878,6 +878,23 @@ paguro-service (Rust, elevated, a Windows service)
   unit-tested without UI; UI automation with FlaUI (UIA) on the Windows runner
   for the main flows.
 
+**Rule: nothing is GUI-only.** Every action the GUI offers is a service method,
+and every service method is reachable from `paguro.exe` and from a cmdlet. The
+GUI is one client; CI enforces the rule by checking that every schema method
+has a CLI command and a cmdlet.
+
+**The installer from a terminal.** The ISO-in-a-container install (§11.4) has
+three ways to drive it, all over the same service:
+
+| Mode | What the user sees |
+|---|---|
+| GUI | the distribution's installer through WSLg |
+| terminal | `paguro install --iso ubuntu.iso` (or `Install-PaguroDistro`): the installer's GUI through WSLg *or* its own text UI / autoinstall answers in the terminal where the distribution has one |
+| **manual** | `paguro install --iso ubuntu.iso --shell` (or `Enter-PaguroInstaller`): a root shell **inside the installer's container**, with the target disk attached and mounted at `/target` after partitioning, the `paguro` package and the adapter's hooks staged. The user can run the installer, partition by hand, `chroot /target`, install extra packages or change anything, then `paguro install --finish` checks the result (paguro package present, initramfs contains `dm-paguro`, bootloader in the nested ESP with the paguro settings, a structural check of the disk) and completes the ESP files, MOK and bootstrap entry — or reports exactly what is missing |
+
+The same `--shell` works on an existing image (`Enter-PaguroDistro`): its disk
+in a privileged WSL2 container, chroot-ready, for repairs.
+
 ### 11.8 The installer GUI — DRAFT
 
 For a non-expert, in this order:
