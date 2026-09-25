@@ -46,7 +46,22 @@
 #endif
 
 #define PGH_MAGIC "PGRHOF\0\x01"
-#define PGH_HEADER 16
+
+/*
+ * The blob's header (INTERFACES 8, paguro-core::handoff): layout only,
+ * used through offsetof()/sizeof_field() on a byte buffer, never cast.
+ */
+struct pgh_header {
+	u8 magic[8];
+	__le32 total_len;	/* the whole blob, header included */
+	__le16 record_count;
+	__le16 reserved;
+} __packed;
+
+#define PGH_HEADER sizeof(struct pgh_header)
+static_assert(sizeof(struct pgh_header) == 16);
+static_assert(offsetof(struct pgh_header, total_len) == 8);
+static_assert(sizeof(PGH_MAGIC) - 1 == sizeof_field(struct pgh_header, magic));
 #define PGH_MAX (96 * 1024)		/* INTERFACES 8: maximum blob */
 #define PGH_MAX_TABLES 1024		/* bound on nr_tables */
 
@@ -188,8 +203,9 @@ static int pgh_take(u64 phys)
 		memunmap(fw);
 		return -ENODATA;	/* consumed by an earlier load */
 	}
-	len = get_unaligned_le32(fw + 8);
-	e = memcmp(fw, PGH_MAGIC, 8) ? -EINVAL : 0;
+	len = get_unaligned_le32(fw + offsetof(struct pgh_header, total_len));
+	e = memcmp(fw + offsetof(struct pgh_header, magic), PGH_MAGIC,
+		   sizeof_field(struct pgh_header, magic)) ? -EINVAL : 0;
 	memunmap(fw);
 	if (e)
 		return e;
