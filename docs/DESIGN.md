@@ -2249,38 +2249,39 @@ The pieces, cheapest first:
 4. **The balloon** stays the last resort, and host memory limits (a cgroup for
    the VM) keep the worst case bounded.
 
-**One pool for both systems: working memory is reserved, cache is shared.**
-The aim is WSL2's model in both directions — one machine's RAM, used by
-whichever side needs it, with only signalling between them. The invariant that
-makes it safe needs no per-page bookkeeping:
+**One pool for both systems: lent memory may only hold cache; given memory is
+ballooned.** Under one kernel, memory has three states — used, free, and
+*cache*, which anyone may reclaim at once. A VM boundary loses the third: when
+a guest touches a page it had reported free, the host must produce a page on
+the spot, and if it cannot, the guest stalls and, in the end, is killed with
+its QEMU process. The rule that restores the guarantee:
 
-| | Reserved (never lent) | Shared |
+| Memory the guest… | Host may use it for | Guest touches it again |
 |---|---|---|
-| Windows | its working set, up to the VM's size | its standby cache |
-| Linux | its working memory, up to RAM − the VM's size | its page cache |
+| **reported free** (free-page reporting, or KSM's zero pages for Windows) | **clean page cache only** | the host drops cache — always possible, no I/O |
+| **gave up through the balloon** | anything, including process memory | cannot: it is the balloon's until deflated |
 
-Anything beyond a side's working memory can only be cache, so whatever one side
-needs back can always be taken from cache — never from the other side's working
-memory:
+**Enforced by accounting, not per page.** Linux cannot tag individual pages
+"cache only", and does not need to: it is enough that the host's
+non-reclaimable memory (process memory, unreclaimable kernel memory, dirty
+pages) never exceeds
 
-- **Linux needs memory**: its own page cache drops instantly; then Windows' cache
-  is reclaimed by the graded standby purge and the freed pages discarded
-  (above) — fast, but not instant, which is why Linux's working memory is
-  reserved rather than borrowed.
-- **Windows needs memory**: it touches its pages, and Linux supplies them by
-  dropping page cache — clean cache is freed without I/O; swap (16 GB here) is
-  the backstop, never an OOM kill.
-- **The barriers are only signals**: free-page reporting or KSM for what Windows
-  releases, the guest agent's purge for what Linux asks back, PSI to decide when.
+    RAM − the VM's size + what the balloon holds
 
-**Keeping Linux's working memory inside its reservation** is the one part the
-stock kernel does not do directly: cgroups limit anonymous and file memory
-together. A small host daemon watches anonymous usage (`memory.stat`) and
-applies `memory.high` to Linux's workloads before it would cross RAM − the VM's
-size, so the pressure lands on Linux's own processes (reclaim, then swap)
-instead of on the guest. The page cache stays free to fill everything else,
-including memory Windows has released. The kernel's retired cleancache interface
-was a per-page version of the same idea; the invariant makes it unnecessary.
+because then at every moment there is at least as much clean, droppable cache
+as memory the guest could take back. A host daemon keeps it so: it applies
+`memory.high` to Linux's own workloads before the bound, and when Linux needs
+more working memory it **inflates the balloon** instead — which raises the
+bound by exactly what the guest gave up. Dirty memory is bounded
+(`vm.dirty_bytes`) so reclaim never waits on writeback. Swap and an
+`oom_score_adj` of −1000 for QEMU remain the backstop for anything the
+accounting misses; the guest is never the OOM victim.
+
+**For a Windows guest**, whose balloon consumes its standby cache first, the
+guest agent reports the standby size so the host knows how much it can take
+through the balloon cheaply; free pages Windows zeroes come back through KSM.
+What stays out of reach is one shared cache for files (virtio-fs without DAX on
+Windows), so file data may be cached on both sides.
 
 ### 4.6 Windows-side transition app
 
