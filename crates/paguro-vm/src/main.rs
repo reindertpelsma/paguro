@@ -20,6 +20,8 @@
 //!                  --vmk-out F [--volume-add]
 //!     stand-in for the initrd: the VMK; with --volume-add the decrypted
 //!     volume registered with dm-paguro (prints the volume id)
+//! paguro-vm fve --volume DEV|FILE --vmk-file F --out DIR [--apply COPY]
+//!     the substitute, the .BEK and the owned ranges (the oracle's input)
 //! paguro-vm identity [--system-partition NAME]      what would be passed through
 //! paguro-vm windows-provision [--mac MAC]           the guest's link script
 //! paguro-vm smb-conf --root DIR --state DIR         the netns Samba's smb.conf
@@ -198,6 +200,47 @@ fn main() {
             }
             if let Some(id) = u.volume_id {
                 println!("{id}");
+            }
+        }
+        "fve" => {
+            let (mut vol, mut vmk, mut out, mut apply) = (None, None, None, None);
+            while let Some(k) = a.it.next() {
+                match k.as_str() {
+                    "--volume" => vol = Some(PathBuf::from(a.val(&k))),
+                    "--vmk-file" => vmk = Some(PathBuf::from(a.val(&k))),
+                    "--vmk-hex" => {
+                        let h = a.val(&k);
+                        let b: Vec<u8> = (0..h.len() / 2)
+                            .filter_map(|i| {
+                                h.get(2 * i..2 * i + 2)
+                                    .and_then(|x| u8::from_str_radix(x, 16).ok())
+                            })
+                            .collect();
+                        let p = std::env::temp_dir()
+                            .join(format!("paguro-vm-vmk-{}", std::process::id()));
+                        std::fs::write(&p, b).unwrap_or_else(|e| fail(e.to_string()));
+                        vmk = Some(p);
+                    }
+                    "--out" => out = Some(PathBuf::from(a.val(&k))),
+                    "--apply" => apply = Some(PathBuf::from(a.val(&k))),
+                    _ => usage(),
+                }
+            }
+            let vp = vmk.unwrap_or_else(|| usage());
+            let v = std::fs::read(&vp).unwrap_or_else(|e| fail(format!("{}: {e}", vp.display())));
+            if vp.starts_with(std::env::temp_dir()) {
+                let _ = std::fs::remove_file(&vp);
+            }
+            let v =
+                <[u8; 32]>::try_from(v.as_slice()).unwrap_or_else(|_| fail("VMK: 32 bytes".into()));
+            match session::fve_files(
+                &vol.unwrap_or_else(|| usage()),
+                &v,
+                &out.unwrap_or_else(|| usage()),
+                apply.as_deref(),
+            ) {
+                Ok(s) => println!("{s}"),
+                Err(e) => fail(e),
             }
         }
         "identity" => {

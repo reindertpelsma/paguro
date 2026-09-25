@@ -670,7 +670,7 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, pid: u32) -> R<()> {
             }
         }
         let _ = q.poll_events(Duration::from_millis(500));
-        let events: Vec<Value> = q.events.drain(..).collect();
+        let events = std::mem::take(&mut q.events);
         for e in events {
             let name = field(&e, "event").as_str().unwrap_or("");
             match name {
@@ -694,6 +694,49 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, pid: u32) -> R<()> {
             log(&format!("running {:.0}s", start.elapsed().as_secs_f64()));
         }
     }
+}
+
+/// The substitute and the `.BEK` for a volume (a device or an image
+/// file) into `out`: `region.bin`, `<G>.BEK`, `owned.txt`; with `apply`, a
+/// copy of the volume (same size) gets the substitute at all three
+/// metadata offsets — what the guest reads, for the libbde and dislocker
+/// oracles (DESIGN.md §11 Q10).
+pub fn fve_files(volume: &Path, vmk: &Vmk, out: &Path, apply: Option<&Path>) -> R<Value> {
+    let f = File::open(volume).map_err(|e| format!("{}: {e}", volume.display()))?;
+    let size = match sys::blk_geometry(&f) {
+        Ok((s, _)) => s,
+        Err(_) => f.metadata().map_err(|e| e.to_string())?.len(),
+    };
+    let b = read_bitlocker(&f, size)?.ok_or("not a BitLocker volume")?;
+    let p = Params::random().map_err(|e| format!("getrandom: {e}"))?;
+    let s = fve::substitute(
+        &b.header,
+        [&b.regions[0], &b.regions[1], &b.regions[2]],
+        vmk,
+        &p,
+    )
+    .map_err(|e| e.to_string())?;
+    fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    fs::write(out.join("region.bin"), &s.region).map_err(|e| e.to_string())?;
+    fs::write(out.join(&s.bek_name), &s.bek).map_err(|e| e.to_string())?;
+    let owned = fve::owned_ranges(&b.layout);
+    let text: String = owned.iter().map(|(a, l)| format!("{a} {l}\n")).collect();
+    fs::write(out.join("owned.txt"), text).map_err(|e| e.to_string())?;
+    if let Some(copy) = apply {
+        let c = OpenOptions::new()
+            .write(true)
+            .open(copy)
+            .map_err(|e| format!("{}: {e}", copy.display()))?;
+        for &o in &b.layout.metadata_offsets {
+            c.write_all_at(&s.region, o).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(json!({
+        "bek": out.join(&s.bek_name),
+        "protector": fve::guid_text(&p.id),
+        "owned": owned,
+        "metadata_offsets": b.layout.metadata_offsets,
+    }))
 }
 
 /// Stand-in for the initrd (DESIGN.md §6): the VMK from a recovery
