@@ -1,1 +1,4 @@
 pgctl
+pgguard
+pgguard.bpf.o
+pgguard.bpf.lo
