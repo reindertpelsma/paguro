@@ -646,6 +646,7 @@ name = "paguro-harness"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "libc",
  "paguro-boot",
  "paguro-core",
  "paguro-crypto",

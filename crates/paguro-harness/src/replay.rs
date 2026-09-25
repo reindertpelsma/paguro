@@ -24,8 +24,6 @@ const SECTOR: u64 = 512;
 /// buffer large enough to hold one aligned block wherever it lands.
 const DIRECT_ALIGN: usize = 4096;
 const DIRECT_BUF: usize = 2 * DIRECT_ALIGN;
-/// O_DIRECT's value on x86-64 (asm-generic differs; see `DevDisk::open`).
-const O_DIRECT_X86_64: i32 = 0o40000;
 
 /// 512-byte reads from a file or block device; a block device is read with
 /// `O_DIRECT` so nothing stale comes from the page cache.
@@ -40,7 +38,7 @@ impl DevDisk {
         let block = std::fs::metadata(path)?.file_type().is_block_device();
         let file = std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(if block { O_DIRECT_X86_64 } else { 0 })
+            .custom_flags(if block { libc::O_DIRECT } else { 0 })
             .open(path)?;
         Ok(DevDisk {
             file,

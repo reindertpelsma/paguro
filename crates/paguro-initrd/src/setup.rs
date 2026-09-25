@@ -31,7 +31,8 @@ const FOOTER_LEN: usize = paguro_core::vhd::FOOTER_LEN as usize;
 
 // `fs_type`: bytes read from a device's start, and the magic each file
 // system keeps at a fixed offset in them.
-const FS_PROBE_LEN: u64 = 36 * 1024;
+/// Enough to reach the deepest magic probed: btrfs's, at 64 KiB + 0x40.
+const FS_PROBE_LEN: u64 = 68 * 1024;
 /// ext4 superblock (at 1024) `s_magic` (+0x38): 0xEF53, little-endian.
 const EXT4_MAGIC_AT: usize = 1024 + 0x38;
 const EXT4_MAGIC: [u8; 2] = [0x53, 0xef];
@@ -40,6 +41,7 @@ const ISO9660_MAGIC_AT: usize = 0x8001;
 const ISO9660_MAGIC: &[u8] = b"CD001";
 /// btrfs superblock (at 64 KiB) `magic` (+0x40).
 const BTRFS_MAGIC_AT: usize = 0x10040;
+const _: () = assert!(BTRFS_MAGIC_AT + BTRFS_MAGIC.len() <= FS_PROBE_LEN as usize);
 const BTRFS_MAGIC: &[u8] = b"_BHRfS_M";
 /// XFS superblock `sb_magicnum` at the start.
 const XFS_MAGIC_AT: usize = 0;
