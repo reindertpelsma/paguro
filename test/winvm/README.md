@@ -29,7 +29,17 @@ file derived from them.** Everything large lives in `$WINVM_DIR`
   from NuGet in the tests themselves (the VM has internet via user-mode NAT).
 - Windows Update: no automatic updates (policy), quality updates deferred
   30 days, feature updates 365 days; Store auto-download off; no device
-  encryption.
+  encryption. The NIC is unplugged (QMP `set_link`) from the install until the
+  first-logon script starts, so OOBE's "Checking for updates" adds nothing.
+- The evaluation is activated online at the end of the build (`slmgr /ato`):
+  it is valid for **90 days from the build** (`slmgr /xpr` shows the date);
+  after that, rebuild. An unactivated evaluation reports "grace time expired".
+
+The first build took about 75 min on a loaded 4-core host (Windows Setup
+about 60 min with the ISO streamed over HTTPS, first-logon setup 13 min,
+the testsigning boot 1 min). The base image is about 11 GiB (12 GiB with
+`--no-compress`; compressed roughly half, but the compression needs that much
+free space next to the install image while it runs).
 
 ## Secure Boot and test signing
 
@@ -40,6 +50,35 @@ keys in the variable store), then boots once with Secure Boot off to set
 non-secboot OVMF build, same variable store), so test-signed drivers load;
 `winvm start --secure-boot` enforces it (and test-signed drivers then do not
 load).
+
+## WSL2 inside the VM (third level of virtualization)
+
+Works, with one change: boot with `WINVM_CPU=host` (plain host CPU model, no
+Hyper-V enlightenments). Tested on an AMD EPYC host with `kvm_amd nested=1`:
+`wsl --install --no-distribution` (WSL 2.7.14; it must run from the desktop,
+over SSH the inbox `wsl.exe` stub only prints "not installed"), reboot, then
+`wsl --import` of an Alpine minirootfs and `wsl -d alpine -- uname -a` runs the
+WSL2 kernel (6.18.33.2-microsoft-standard-WSL2, 4 CPUs, ~4 GB). WSL prints
+"Nested virtualization is not supported on this machine" but runs anyway.
+With the default enlightened CPU model, the guest reached the desktop with the
+hypervisor enabled and then hung (vCPUs spinning, no SSH). Expect the WSL2
+path to be slow; it is for functional tests, not timing.
+
+WSL is not in the base image: install it in an overlay (`start`, then the
+steps above, `start --keep` afterwards).
+
+## Findings from the first smoke run
+
+- `cargo xwin build -p paguro-win --release --target x86_64-pc-windows-msvc`
+  links the CRT dynamically; on a clean Windows 11 `paguro.exe` then exits
+  `0xC0000135` (VCRUNTIME140.dll not found) without printing anything. With
+  `RUSTFLAGS="-C target-feature=+crt-static"` it runs (`smoke.sh` does this).
+  The hosted CI runner hides this because Visual Studio is installed there.
+- Run unelevated from the desktop, `paguro status` reports `secure boot: null`
+  and `minifilter: not loaded` while PaguroFlt is loaded (elevated over SSH it
+  reports both correctly).
+- `Import-Certificate` into `LocalMachine\Root` fails with E_ACCESSDENIED over
+  SSH; `certutil -addstore` works.
 
 ## Host requirements
 
@@ -55,8 +94,8 @@ swtpm's AppArmor profile only lets it write under `$HOME`, so the TPM state
 ## Commands
 
 ```
-winvm build [--iso PATH|URL] [--skip-verify] [--force]   # ~1 h, unattended
-winvm start [--keep] [--secure-boot] [--vnc N] [--no-wait]
+winvm build [--iso PATH|URL] [--skip-verify] [--force]   # ~75 min, unattended
+winvm start [--keep] [--secure-boot] [--paguro-vm] [--vnc N] [--no-wait]
 winvm stop [--force]
 winvm status
 winvm ssh [<cmd ...>]                # cmd.exe command line, or an interactive shell
@@ -78,7 +117,14 @@ overlay. `start` returns once SSH answers (about 1 min).
 QEMU pid; it never kills by name.
 
 Environment: `WINVM_DIR`, `WINVM_SSH_PORT` (2222), `WINVM_MEM` (8G),
-`WINVM_CPUS` (4), `WINVM_TPM_DIR`.
+`WINVM_CPUS` (4), `WINVM_CPU` (QEMU `-cpu`; `host` for WSL2), `WINVM_TPM_DIR`.
+
+`start --paguro-vm` adds the SMBIOS type 11 `paguro-vm/1` OEM string, so the
+minifilter's release build loads active.
+
+`build --resume [--disk IMG] [--no-compress]` finishes a build whose phase 1
+is running or done (for example after moving the install image to another
+disk with a live `blockdev-snapshot-sync`/`drive-mirror` when space ran out).
 
 ## Layout of `$WINVM_DIR`
 
@@ -100,10 +146,15 @@ $W ssh ver
 $W ssh "bcdedit | findstr testsigning"
 $W screenshot /data/paguro-work/winvm/shots/desktop.png
 
-cargo xwin build -p paguro-win --release --target x86_64-pc-windows-msvc
+RUSTFLAGS="-C target-feature=+crt-static" \
+  cargo xwin build -p paguro-win --release --target x86_64-pc-windows-msvc
 $W ssh mkdir C:\\winvm\\t
 $W scp target/x86_64-pc-windows-msvc/release/paguro.exe :C:/winvm/t/
-$W ssh C:\\winvm\\t\\paguro.exe --json status
+$W ssh C:\\winvm\\t\\paguro.exe status --json
+
+# drive the desktop: Win+R, an elevated console, a screenshot, a click
+$W key win-r; $W type "cmd /k fltmc filters"; $W key ctrl-shift-ret
+$W wait-screen 30; $W screenshot /tmp/fltmc.png; $W click 1091 145
 
 # minifilter: the `paguro-minifilter` artifact of the windows workflow
 # (test-signed pkg/ + test/pgflt_test.exe); see smoke.sh for the full sequence
@@ -120,3 +171,5 @@ active tests).
 - `autounattend.xml` – unattended install (`@PASSWORD@` filled in at build)
 - `winvm-setup.ps1` – first-logon setup, then power-off
 - `smoke.sh` – smoke test
+- `minifilter-test.ps1` – runs on the VM: trust the CI test certificate,
+  install, load inert + `pgflt_test inert`, load active + `pgflt_test active`

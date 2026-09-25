@@ -45,10 +45,12 @@ say "paguro.exe status --json"
 grep -q '"paguro-cli/1"' "$DIR/logs/smoke-status.json"
 
 say "the same, typed into a console on the desktop"
+# right after logon the shell takes a while to accept Win+R
+"$W" wait-screen 180 --stable 15 >/dev/null || true
 "$W" key win-r
-sleep 2
+sleep 4
 "$W" type "cmd /k C:\\winvm\\t\\paguro.exe status" --enter
-sleep 5
+"$W" wait-screen 60 --stable 4 >/dev/null || true
 "$W" screenshot "$SHOTS/smoke-paguro-status.png"
 
 say "minifilter"
@@ -59,9 +61,9 @@ say "minifilter"
 "$W" ssh "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\winvm\\mf\\minifilter-test.ps1" \
     | tee "$DIR/logs/smoke-minifilter.log"
 "$W" key win-r
-sleep 2
+sleep 4
 "$W" type "cmd /k fltmc filters"
 "$W" key ctrl-shift-ret   # Run dialog: elevated (no prompt for admins on this VM)
-sleep 4
+"$W" wait-screen 60 --stable 4 >/dev/null || true
 "$W" screenshot "$SHOTS/smoke-fltmc.png"
 say "smoke passed; screenshots in $SHOTS"

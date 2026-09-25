@@ -27,6 +27,8 @@ SSH_PORT = int(os.environ.get("WINVM_SSH_PORT", "2222"))
 MEM = os.environ.get("WINVM_MEM", "8G")      # hard cap: 8G / 4 vCPUs
 CPUS = os.environ.get("WINVM_CPUS", "4")
 SCOPE_MEMORY_MAX = "10G"
+CPU_MODEL = os.environ.get("WINVM_CPU", "host,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_vpindex,"
+                           "hv_runtime,hv_synic,hv_stimer,hv_time,hv_frequencies,hv_reset")
 
 # Windows 11 Enterprise 25H2 evaluation, x64 en-US: the Evaluation Center's
 # en-US link (fwlink 2334167 -> aka.ms/Win11E-ISO-25H2-en-us) and the SHA-256
@@ -161,8 +163,7 @@ def qemu_argv(disk, vars_fd, secure_boot, cdroms=(), vnc=None, serial=None, pagu
     machine = "q35,accel=kvm" + (",smm=on" if secure_boot else "")
     a = ["qemu-system-x86_64", "-name", "winvm",
          "-machine", machine,
-         "-cpu", "host,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_vpindex,hv_runtime,"
-                 "hv_synic,hv_stimer,hv_time,hv_frequencies,hv_reset",
+         "-cpu", CPU_MODEL,
          "-smp", CPUS, "-m", MEM,
          "-rtc", "base=utc,driftfix=slew",
          "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={code}",
