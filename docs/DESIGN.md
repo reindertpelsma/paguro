@@ -4320,6 +4320,18 @@ strong offline gate by itself. paguro therefore treats the **passphrase and the
 recovery key as the robust baseline** of the dedicated disk and TPM + PIN as a
 convenience layered on top, with the gaps above closed by configuration.
 
+**The user chooses, and each choice is done completely.** The installer asks
+once, explains each option in plain words, and never mixes them:
+
+| Choice | What it is | What paguro guarantees |
+|---|---|---|
+| **TPM + PIN** (offered when Windows uses a TPM) | unlock with a short PIN at boot | matched to BitLocker, not to LUKS defaults: the PIN mixed into the keyslot passphrase through the token plugin (`HMAC(D, stretch(PIN))`), so a compromised TPM still leaves only an offline attack on a stretched PIN; PCR 7 + 15 (zero); volume key into PCR 15; the shell cap; the bypass only on a chain that measures the command line |
+| **Passphrase only** (the default when Windows has no TPM protector) | LUKS's own Argon2id keyslot, nothing else | the strongest offline gate there is, and no TPM, no bypass, no plugin in the path |
+| **TPM only** (opt-in, warned) | unlocks with no input | only with a UKI and the TPM-only obligations of §6 — `lockdown=confidentiality`, no shell before the passphrase prompt and a cap plus key wipe on any shell, IOMMU in strict DMA-remapping mode (not `iommu=pt`), Thunderbolt security — and the warning says why it is the weakest: TPM bus sniffing, the long list of TPM-only BitLocker bypasses (it is Windows Home's default for convenience, not strength), and a running, unlocked machine whose keys are in RAM for cold-boot and DMA attacks by any device with an identity-mapped or unrestricted DMA path |
+
+In every case the BitLocker recovery-password slot and the VMK slot are added
+as well (when BitLocker is on), so no choice can lock the user out.
+
 PCR 15 bound to zero also closes the published *fake volume* attack (swap in a
 LUKS volume with the same UUID whose `init` then asks the TPM): the fake
 volume's key moves PCR 15 before its `init` runs, so nothing unseals.
