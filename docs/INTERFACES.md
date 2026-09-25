@@ -339,6 +339,7 @@ Vendor GUID from §1.
 | `PaguroTpmBroken` | 1 | NV \| BS \| RT | loader | Windows tool |
 | `PaguroUninstall` | 1 | NV \| BS \| RT | Windows tool | loader, which deletes it |
 | `PaguroBootstrap` | ≤ 128 | NV \| BS \| RT | Windows tool, at install | loader, which deletes it first (§9) |
+| `PaguroBootTarget` | ≤ 64 | NV \| BS \| RT | Windows tool (*Restart into Linux* with a chosen entry) | loader: boots that `[Boot.*]` entry (or a dedicated-disk entry) instead of `default`, once |
 
 Plus the standard `BootNext` / `Boot####` (the bootstrap entry, §9).
 
@@ -350,6 +351,26 @@ last (an interrupted run repeats on the next boot). It unlocks and measures
 nothing, sets `BootNext` to the first `BootOrder` entry whose file path ends in
 `\EFI\Microsoft\Boot\bootmgfw.efi` (case-insensitive) and resets; with no such
 entry it halts with a message (DESIGN §6b).
+
+**One-shot variables never dangle.** `PaguroSetup`, `PaguroBootTarget` and
+`PaguroBootstrap` exist for exactly one boot. **All three parties delete them at
+startup**, whichever runs first:
+
+| Party | When |
+|---|---|
+| the loader | as soon as it has read them, before acting on them |
+| the Linux initrd | at startup (covers a loader that failed before deleting) |
+| the Windows service | at startup (covers the user choosing Windows at the firmware menu instead of going through paguro at all) |
+
+So a staged one-shot can only ever affect the next paguro boot, never a later
+one. The Windows tool stages them immediately before `BootNext` + restart, after
+its own startup cleanup has run. `PaguroTpmBroken` is a state, not a one-shot,
+and follows its own lifecycle below; `PaguroUninstall` is deleted only by the
+loader, last, so an interrupted uninstall repeats.
+
+`PaguroBootTarget` holds the `[Boot.*]` entry name (UTF-8, `[A-Za-z0-9_-]`, ≤ 32)
+or `disk:<Boot#### hex>` for a dedicated-disk entry, which the loader reaches by
+`BootNext` + reset (DESIGN §8d). An unknown name falls back to `default`.
 
 **`PaguroTpmBroken` lifecycle.** It means "the standing TPM seal does not match
 this machine any more", and whoever makes it match again clears it:

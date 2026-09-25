@@ -4210,23 +4210,32 @@ the image install, not replacing it.
 | Linux storage | fixed VHD in NTFS | the whole second disk, the distribution's own layout |
 | paguro kernel module, view C guard, minifilter | needed | **not needed** — Linux never lives inside Windows' filesystem |
 | installer | distribution ISO in a WSL2 container | the same, with the second disk attached whole (`wsl --mount` accepts non-system disks) |
-| encryption | BitLocker, inherited | **LUKS on the Linux disk when Windows uses BitLocker** |
+| encryption | BitLocker, inherited | **LUKS2 on the Linux disk when Windows uses BitLocker**, openable with the BitLocker recovery password |
 | Windows VM | view B: synthetic GPT, image extents refused | the **whole Windows disk** passed to QEMU; FVE substitution only if BitLocker is on (the VM still has no TPM) |
 | Fast Startup / hibernation | gates Linux read-write | irrelevant to booting Linux; the VM still requires a clean Windows volume, and the app says how to get one |
 
-**The LUKS key without a key file.** Rather than storing a LUKS key on the
-Windows disk, the LUKS keyslot's passphrase is derived from the VMK,
-`HMAC(VMK, "paguro/luks")`. The loader already obtains the VMK through the
-normal rungs (TPM + PIN, recovery key), so Linux unlocks both disks with one
-unlock and no key rests anywhere. Windows can derive the same value through its
-own BitLocker protector, which is how WSL2 opens the LUKS disk from Windows. On an
-unencrypted Windows volume LUKS stays optional, with its own passphrase.
+**Encryption: ordinary LUKS, with BitLocker's recovery password as a keyslot.**
+When Windows uses BitLocker, the Linux disk is standard LUKS2 with two kinds of
+keyslot:
 
-**Booting it** keeps the rest of the design: `paguro.efi` is the entry, unlocks
-BitLocker only as far as the FVE metadata (the NTFS volume is never read, so
-hibernation cannot matter), derives the LUKS key, and starts the next image
-from the Linux disk's own ESP. "Start Windows" and "Restart into Linux" remain
-`BootNext` + reset, so the TPM measurements stay those the seal expects.
+- **the BitLocker recovery password** (the 48 digits) as a LUKS passphrase. Its
+  entropy (~128 bits) makes the offline guessing a LUKS header allows useless,
+  and it gives Linux **Microsoft's recovery procedure for free**: whoever can
+  get the recovery key — printed, in the Microsoft account, in Active Directory
+  — can open Linux the same way. Windows reads it from its own protector (admin),
+  so `wsl --mount` + `cryptsetup` open the disk from Windows without asking.
+  When the recovery password is rotated in Windows, the Windows tool replaces
+  the keyslot using the old one;
+- **TPM + PIN through LUKS's own machinery** (`systemd-cryptenroll
+  --tpm2-with-pin`), sealed to the PCRs of a direct boot of that disk. No paguro
+  loader is in this path, so its measurements are the distribution's own.
+
+**Booting it** stays one click from either side: *Restart into Linux* in
+Windows, or the entry in `paguro.efi`'s picker, sets `BootNext` to the Linux
+disk's own boot entry and resets — never a chainload — so the TPM sees exactly
+the direct boot its seal expects, a few seconds later, just as "Start Windows"
+does. Firmware's boot menu reaches it too. The NTFS volume is never read on this
+path, so Windows' hibernation state cannot matter.
 
 **The Windows VM with the whole disk** needs its own safety rules: WinRE must
 still not be reachable (*Reset this PC* from the VM would reinstall the shared
