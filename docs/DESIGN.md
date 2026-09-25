@@ -3583,22 +3583,24 @@ disagreement is a reason to refuse, not to pick one.
 Opt-in, never default, and the opt-in screen shows this list.
 
 With no PIN the loader unseals unconditionally and hands the key to the initrd,
-so an induced failure reaches a
-shell holding the key. **The shell is authenticated, not removed:**
+so an induced failure could otherwise reach a shell with the volume open. **The
+shell stays available — as WinRE does — but arriving there costs the key:**
 
 ```text
-rootfs not mounted -> halt
-                     nobody to authenticate against
-rootfs mounted     -> prompt, then shell. Either:
-      1. a sudo account's password, via crypt(3)
-         on /etc/shadow
-      2. the BitLocker recovery key, or any
-         passphrase protector
+any shell in the initrd (emergency, rescue, debug, panic)
+    1. close every view and the decrypted volume
+       (dm remove: dm-crypt wipes the key it held)
+    2. wipe the handoff copy, B and anything unsealed from memory
+    3. cap PCR 12 (already capped by the loader's boot taint;
+       extended again so nothing depends on that alone)
+    4. then the shell
+to reopen: the recovery key or a passphrase protector, typed in that shell
 ```
 
-`rootfs mounted` is the discriminator because it is exactly when a user database
-exists. The **recovery entry is gated the same way** — it is a legitimately signed
-permissive path, so signature checking cannot distinguish it.
+After `switch_root` a shell is the operating system's own login, authenticated
+by it as usual. The **recovery entry is gated the same way** — it is a
+legitimately signed permissive path, so signature checking cannot distinguish
+it.
 
 | Obligation | Enforced by |
 |---|---|
