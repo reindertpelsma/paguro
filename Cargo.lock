@@ -738,6 +738,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "paguro-vm"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "paguro-boot",
+ "paguro-core",
+ "paguro-crypto",
+ "paguro-initrd",
+ "proptest",
+ "serde_json",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
 name = "paguro-win"
 version = "0.0.0"
 dependencies = [
