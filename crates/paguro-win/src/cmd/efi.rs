@@ -23,7 +23,7 @@ pub struct VarSpec {
     pub note: &'static str,
 }
 
-pub const VARS: [VarSpec; 5] = [
+pub const VARS: [VarSpec; 6] = [
     VarSpec {
         name: "PaguroB",
         size: 32,
@@ -58,6 +58,13 @@ pub const VARS: [VarSpec; 5] = [
         public: true,
         settable: true,
         note: "uninstall request: the loader deletes PaguroB on the next boot",
+    },
+    VarSpec {
+        name: "PaguroBootstrap",
+        size: paguro_core::bootstrap::PAYLOAD_LEN,
+        public: false,
+        settable: false,
+        note: "first-boot payload (wrapped VMK): written by install / repair --bootstrap, deleted by the loader",
     },
 ];
 

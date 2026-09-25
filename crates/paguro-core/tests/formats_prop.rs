@@ -150,18 +150,21 @@ proptest! {
         desc in "[ -~]{0,40}",
         p in path(),
     ) {
-        let od = bootstrap::write_optional_data(&Guid(volume), &salt, &wrapped);
+        let od = bootstrap::write_payload(&Guid(volume), &salt, &wrapped);
+        let bs = bootstrap::parse_payload(&od).unwrap();
+        prop_assert_eq!((bs.volume, bs.salt, bs.wrapped_vmk), (Guid(volume), &salt, &wrapped));
         let mut buf = [0u8; 1024];
         let n = bootstrap::write_load_option(1, &desc, &p, &od, &mut buf).unwrap();
-        let bs = bootstrap::parse(&buf[..n]).unwrap();
-        prop_assert_eq!((bs.volume, bs.salt, bs.wrapped_vmk), (Guid(volume), &salt, &wrapped));
+        let lo = bootstrap::parse_load_option(&buf[..n]).unwrap();
+        prop_assert_eq!(lo.optional_data, &od[..]);
     }
 
     #[test]
     fn bootstrap_never_panics(b in bytes(1024)) {
-        let _ = bootstrap::parse(&b);
+        let _ = bootstrap::parse_payload(&b);
         if let Ok(lo) = bootstrap::parse_load_option(&b) {
             let _ = lo.is_windows_boot_manager();
+            let _ = lo.is_paguro();
         }
     }
 

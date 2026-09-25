@@ -302,11 +302,21 @@ fn write_fuzz_seeds() {
     put("handoff", "bitlocker-password", &b[..n]);
 
     // bootstrap
-    let od = bootstrap::write_optional_data(&mock::VOLUME, &[1; 16], &[2; 32]);
+    let od = bootstrap::write_payload(&mock::VOLUME, &[1; 16], &[2; 32]);
+    put("bootstrap", "payload", &od);
+    let second: Vec<u8> = "\\EFI\\paguro\\paguro.efi\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
     let mut lo = [0u8; 512];
-    let n =
-        bootstrap::write_load_option(1, "paguro setup", "\\EFI\\paguro\\paguro.efi", &od, &mut lo)
-            .unwrap();
+    let n = bootstrap::write_load_option(
+        1,
+        "paguro setup",
+        "\\EFI\\paguro\\shimx64.efi",
+        &second,
+        &mut lo,
+    )
+    .unwrap();
     put("bootstrap", "entry", &lo[..n]);
     let n = bootstrap::write_load_option(
         1,

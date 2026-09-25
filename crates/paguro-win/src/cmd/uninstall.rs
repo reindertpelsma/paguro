@@ -22,7 +22,8 @@
 //!          -- reboot (exit code 8, Pending) --
 //! phase 2  boot-entries     our Boot####, BootOrder, BootNext
 //!          esp              \EFI\paguro\, PaguroConfigHash, PaguroSetup,
-//!                           PaguroTpmBroken, PaguroUninstall, the MOK key
+//!                           PaguroTpmBroken, PaguroBootstrap,
+//!                           PaguroUninstall, the MOK key
 //!          driver-remove    sc delete; pnputil /delete-driver
 //!          images           only with --delete-images
 //!          store            %ProgramData%\paguro
@@ -249,6 +250,7 @@ fn step(
                     cfgfile::HASH_VAR,
                     "PaguroSetup",
                     "PaguroTpmBroken",
+                    paguro_core::bootstrap::VAR_NAME,
                     UNINSTALL_VAR,
                 ] {
                     api.fw_delete(v, &PAGURO_VENDOR)?;

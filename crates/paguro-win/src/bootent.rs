@@ -11,8 +11,10 @@
 //!   optional data becomes `second_stage`; a path starting `\EFI\` is taken
 //!   as absolute on shim's device, `generate_path_from_image_path`);
 //! - the **bootstrap entry** (`paguro setup`, INTERFACES.md §9): the same
-//!   device, `\EFI\paguro\paguro.efi` directly, optional data = the 72-byte
-//!   bootstrap payload. One-shot: `BootNext` only, never in `BootOrder`.
+//!   shape as the standing entry (shim, `paguro.efi` as its second stage),
+//!   told apart by its description. One-shot: `BootNext` only, never in
+//!   `BootOrder` — which is also how the loader knows it may delete it. The
+//!   payload travels in the `PaguroBootstrap` variable, not in the entry.
 //!
 //! Install only adds (DESIGN.md §6b): a new entry is appended to
 //! `BootOrder`, and removal takes out exactly our numbers.
@@ -45,7 +47,7 @@ pub struct BootEntry {
     pub in_boot_order: bool,
     /// Its file lives under `\EFI\paguro\`.
     pub ours: bool,
-    /// Its optional data is a well-formed bootstrap payload.
+    /// paguro's one-shot bootstrap entry (ours, described `paguro setup`).
     pub bootstrap: bool,
     /// The variable parsed as an `EFI_LOAD_OPTION`.
     pub well_formed: bool,
@@ -125,7 +127,7 @@ pub fn describe(number: u16, data: &[u8], order: &[u16]) -> BootEntry {
         .path
         .as_deref()
         .is_some_and(|p| p.to_ascii_lowercase().starts_with("\\efi\\paguro\\"));
-    e.bootstrap = bootstrap::parse_optional_data(lo.optional_data).is_ok();
+    e.bootstrap = e.ours && e.description == BOOTSTRAP_DESCRIPTION;
     e
 }
 
@@ -203,14 +205,14 @@ pub fn load_option(
     Ok(b)
 }
 
-pub fn standing_option(api: &dyn WinApi, esp: &Volume) -> Result<Vec<u8>, CmdError> {
+/// shim with `paguro.efi` as its second stage (shim `load-options.c`).
+fn shim_option(api: &dyn WinApi, esp: &Volume, description: &str) -> Result<Vec<u8>, CmdError> {
     let shim = format!("\\EFI\\paguro\\{}", crate::esp::shim_name(api.arch()));
-    load_option(
-        esp,
-        STANDING_DESCRIPTION,
-        &shim,
-        &ucs2z("\\EFI\\paguro\\paguro.efi"),
-    )
+    load_option(esp, description, &shim, &ucs2z("\\EFI\\paguro\\paguro.efi"))
+}
+
+pub fn standing_option(api: &dyn WinApi, esp: &Volume) -> Result<Vec<u8>, CmdError> {
+    shim_option(api, esp, STANDING_DESCRIPTION)
 }
 
 /// Create (or rewrite in place) the standing entry and make sure it is in
@@ -258,14 +260,10 @@ pub fn ensure_standing(
     Ok((n, changed))
 }
 
-/// Write a one-shot bootstrap entry (not in `BootOrder`) and return its number.
-pub fn create_bootstrap(api: &dyn WinApi, esp: &Volume, payload: &[u8]) -> Result<u16, CmdError> {
-    let opt = load_option(
-        esp,
-        BOOTSTRAP_DESCRIPTION,
-        "\\EFI\\paguro\\paguro.efi",
-        payload,
-    )?;
+/// Write a one-shot bootstrap entry (not in `BootOrder`) and return its
+/// number. The payload goes in `PaguroBootstrap`, not here (INTERFACES.md §9).
+pub fn create_bootstrap(api: &dyn WinApi, esp: &Volume) -> Result<u16, CmdError> {
+    let opt = shim_option(api, esp, BOOTSTRAP_DESCRIPTION)?;
     let n = free_number(api)?;
     api.fw_set(&var_name(n), &EFI_GLOBAL_VARIABLE, &opt, attr::NV_BS_RT)?;
     Ok(n)

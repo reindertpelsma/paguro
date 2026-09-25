@@ -199,6 +199,9 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
 
         // 0 — the bootstrap entry goes first, before anything can fail.
         self.take_bootstrap(var);
+        if self.uninstall_requested() {
+            return Ok(Step::Done(self.uninstall(var)));
+        }
 
         // 1 — read, hash, compare. No parser.
         let ini_len = go!(self.stage1(ini, var));
@@ -373,9 +376,89 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
     // -----------------------------------------------------------------------
     // Stage 0
 
-    /// If this boot came through the installer's one-shot entry, keep its
-    /// payload and delete the entry — the first firmware write of every boot.
+    /// Take the installer's `PaguroBootstrap` payload and delete it — the
+    /// first firmware write of every boot, before anything can fail, and
+    /// whether or not it parses (INTERFACES.md §9). With it goes the
+    /// one-shot entry this boot came through: `BootCurrent`'s `Boot####`,
+    /// provided it is paguro's (a file under `\EFI\paguro\`) and not in
+    /// `BootOrder` (the standing entry is; a one-shot entry never is).
     fn take_bootstrap(&mut self, var: &mut [u8]) {
+        let mut payload = [0u8; bootstrap::MAX_VAR + 1];
+        let got = self
+            .p
+            .get_var(bootstrap::VAR_NAME, &PAGURO_VENDOR, &mut payload);
+        let n = match got {
+            Ok(None) => return,
+            Ok(Some(n)) => Some(n),
+            // Present but unreadable (larger than any payload): still deleted.
+            Err(_) => None,
+        };
+        match self.p.delete_var(bootstrap::VAR_NAME, &PAGURO_VENDOR) {
+            Ok(()) => self.log(format_args!("paguro: {} deleted", bootstrap::VAR_NAME)),
+            Err(e) => self.log(format_args!(
+                "paguro: deleting {} failed: {e:?}",
+                bootstrap::VAR_NAME
+            )),
+        }
+        let parsed = n
+            .and_then(|n| payload.get(..n))
+            .map(bootstrap::parse_payload);
+        match parsed {
+            Some(Ok(bs)) => {
+                self.st.bootstrap = Some(BootstrapData {
+                    volume: bs.volume,
+                    salt: *bs.salt,
+                    wrapped: *bs.wrapped_vmk,
+                });
+            }
+            Some(Err(e)) => self.log(format_args!("paguro: malformed bootstrap payload: {e:?}")),
+            None => self.log(format_args!(
+                "paguro: malformed bootstrap payload: unreadable"
+            )),
+        }
+        payload.zeroize();
+        self.delete_one_shot_entry(var);
+    }
+
+    /// `PaguroUninstall`, exactly one byte (any other size is absent, §5).
+    fn uninstall_requested(&mut self) -> bool {
+        let mut b = [0u8; 2];
+        matches!(
+            self.p.get_var(names::VAR_UNINSTALL, &PAGURO_VENDOR, &mut b),
+            Ok(Some(1))
+        )
+    }
+
+    /// The final uninstall boot (INTERFACES.md §5, DESIGN.md §6b): delete
+    /// paguro's variables — `B` is boot-services-only, so only this can —
+    /// and the request last, so an interrupted run repeats on the next boot;
+    /// unlock nothing, measure nothing, and reset into Windows.
+    fn uninstall(&mut self, var: &mut [u8]) -> Outcome {
+        self.log(format_args!("paguro: uninstall request"));
+        for name in [
+            names::VAR_B,
+            names::VAR_CONFIG_HASH,
+            names::VAR_SETUP,
+            names::VAR_TPM_BROKEN,
+            names::VAR_BOOTSTRAP,
+            names::VAR_UNINSTALL,
+        ] {
+            let mut probe = [0u8; 1];
+            if let Ok(None) = self.p.get_var(name, &PAGURO_VENDOR, &mut probe) {
+                continue;
+            }
+            probe.zeroize();
+            match self.p.delete_var(name, &PAGURO_VENDOR) {
+                Ok(()) => self.log(format_args!("paguro: uninstall: {name} deleted")),
+                Err(e) => self.log(format_args!(
+                    "paguro: uninstall: deleting {name} failed: {e:?}"
+                )),
+            }
+        }
+        self.start_windows(var)
+    }
+
+    fn delete_one_shot_entry(&mut self, var: &mut [u8]) {
         let mut cur = [0u8; 2];
         let Ok(Some(2)) = self
             .p
@@ -383,26 +466,41 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
         else {
             return;
         };
-        let name_b = boot_var_name(u16::from_le_bytes(cur));
+        let id = u16::from_le_bytes(cur);
+        let name_b = boot_var_name(id);
         let name = ascii(&name_b);
+        let mut order = [0u8; 512];
+        let in_order = match self
+            .p
+            .get_var("BootOrder", &EFI_GLOBAL_VARIABLE, &mut order)
+        {
+            Ok(Some(n)) => order
+                .get(..n)
+                .unwrap_or(&[])
+                .chunks_exact(2)
+                .any(|c| c == id.to_le_bytes()),
+            Ok(None) => false,
+            // Cannot tell: keep it (the Windows tool tears it down).
+            Err(_) => true,
+        };
+        if in_order {
+            self.log(format_args!(
+                "paguro: {name} may be in BootOrder: not the one-shot entry, kept"
+            ));
+            return;
+        }
         let Ok(Some(n)) = self.p.get_var(name, &EFI_GLOBAL_VARIABLE, var) else {
             return;
         };
-        let Ok(lo) = bootstrap::parse_load_option(var.get(..n).unwrap_or(&[])) else {
-            return;
-        };
-        match bootstrap::parse_optional_data(lo.optional_data) {
-            Ok(bs) => {
-                self.st.bootstrap = Some(BootstrapData {
-                    volume: bs.volume,
-                    salt: *bs.salt,
-                    wrapped: *bs.wrapped_vmk,
-                });
-            }
-            Err(bootstrap::BootstrapError::NotBootstrap) => return,
-            Err(e) => self.log(format_args!("paguro: malformed bootstrap entry: {e:?}")),
-        }
+        let ours = bootstrap::parse_load_option(var.get(..n).unwrap_or(&[]))
+            .is_ok_and(|lo| lo.is_paguro());
         var.zeroize();
+        if !ours {
+            self.log(format_args!(
+                "paguro: {name} is not paguro's: not the one-shot entry, kept"
+            ));
+            return;
+        }
         match self.p.delete_var(name, &EFI_GLOBAL_VARIABLE) {
             Ok(()) => self.log(format_args!("paguro: bootstrap entry {name} deleted")),
             Err(e) => self.log(format_args!("paguro: deleting {name} failed: {e:?}")),

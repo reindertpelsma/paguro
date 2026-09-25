@@ -10,7 +10,8 @@
 //! wsl-unmount wsl --unmount <path>                             (step 5)
 //! esp         shim, MokManager, paguro.efi                     (§2)
 //! mok         MokNew/MokAuth for --mok-cert                    (§11.6)
-//! bootstrap   one-shot Boot#### with the wrapped VMK, BootNext (§9, DESIGN §6)
+//! bootstrap   PaguroBootstrap (the wrapped VMK), one-shot Boot####, BootNext
+//!             (§9, DESIGN §6)
 //! ```
 //!
 //! **The build step is a stub**: the distribution's ISO in a privileged
@@ -86,8 +87,9 @@ fn run_ok(ctx: &Ctx<'_>, prog: &str, args: &[&str]) -> Result<String, CmdError> 
     }
 }
 
-/// Write the bootstrap entry for `volume` and point `BootNext` at it
-/// (DESIGN.md §6 "Bootstrap", §7's NVRAM-clear repair).
+/// Write the `PaguroBootstrap` payload for `volume` and a one-shot entry
+/// (shim, `paguro.efi` as its second stage), and point `BootNext` at it
+/// (INTERFACES.md §9; DESIGN.md §6 "Bootstrap", §7's NVRAM-clear repair).
 pub fn write_bootstrap(
     ctx: &Ctx<'_>,
     esp_vol: &crate::api::Volume,
@@ -106,7 +108,9 @@ pub fn write_bootstrap(
     ctx.api.random(&mut salt)?;
     let ph = keys::pass_hash(&pass, &salt);
     let wrapped = keys::wrap_bootstrap(&keys.vmk, &salt, &ph);
-    let payload = paguro_core::bootstrap::write_optional_data(volume, &salt, &wrapped);
+    let payload = zeroize::Zeroizing::new(paguro_core::bootstrap::write_payload(
+        volume, &salt, &wrapped,
+    ));
     // Idempotent: at most one bootstrap entry exists.
     for e in bootent::list(ctx.api)?
         .iter()
@@ -114,10 +118,16 @@ pub fn write_bootstrap(
     {
         bootent::delete(ctx.api, e.number)?;
     }
-    let n = bootent::create_bootstrap(ctx.api, esp_vol, &payload)?;
+    ctx.api.fw_set(
+        paguro_core::bootstrap::VAR_NAME,
+        &paguro_core::guid::PAGURO_VENDOR,
+        &payload[..],
+        crate::api::attr::NV_BS_RT,
+    )?;
+    let n = bootent::create_bootstrap(ctx.api, esp_vol)?;
     bootent::set_boot_next(ctx.api, n)?;
     Ok(
-        json!({ "volume": guid_text(volume), "vmk_source": keys.source, "entry": bootent::var_name(n) }),
+        json!({ "volume": guid_text(volume), "vmk_source": keys.source, "entry": bootent::var_name(n), "variable": paguro_core::bootstrap::VAR_NAME }),
     )
 }
 

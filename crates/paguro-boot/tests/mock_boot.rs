@@ -436,41 +436,66 @@ fn bootstrap_world(pw: &str) -> World {
     let salt = [0x99; 16];
     let ph = pass_hash(pw, &salt);
     let wrapped = kdf::xor32(&kdf::bootstrap_key(&ph, &salt), &VMK);
-    let od = bootstrap::write_optional_data(&VOLUME, &salt, &wrapped);
+    let od = bootstrap::write_payload(&VOLUME, &salt, &wrapped);
+    w.m.put_var("PaguroBootstrap", PAGURO_VENDOR, 7, &od);
+    // The one-shot entry, as the Windows tool writes it: shim, with
+    // paguro.efi as its second stage (INTERFACES.md §9).
+    let second: Vec<u8> = "\\EFI\\paguro\\paguro.efi\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
     let mut lo = [0u8; 512];
-    let n =
-        bootstrap::write_load_option(1, "paguro setup", "\\EFI\\paguro\\paguro.efi", &od, &mut lo)
-            .unwrap();
+    let n = bootstrap::write_load_option(
+        1,
+        "paguro setup",
+        "\\EFI\\paguro\\shimx64.efi",
+        &second,
+        &mut lo,
+    )
+    .unwrap();
     w.m.put_var("Boot0005", EFI_GLOBAL_VARIABLE, 7, &lo[..n]);
     w.m.put_var("BootCurrent", EFI_GLOBAL_VARIABLE, 6, &[5, 0]);
     w
 }
 
+fn deletes(m: &Mock) -> Vec<String> {
+    m.events
+        .iter()
+        .filter_map(|e| match e {
+            Event::DeleteVar(n) => Some(n.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
-fn bootstrap_entry_is_deleted_first() {
+fn bootstrap_payload_and_entry_are_deleted_first() {
     let mut w = bootstrap_world(PIN);
     pin(&mut w, PIN);
     assert_eq!(w.run(), Outcome::Started(Rung::Bootstrap));
-    assert_eq!(w.m.events[0], Event::DeleteVar("Boot0005".into()));
+    assert_eq!(w.m.events[0], Event::DeleteVar("PaguroBootstrap".into()));
+    assert_eq!(w.m.events[1], Event::DeleteVar("Boot0005".into()));
     assert!(w.m.var("Boot0005").is_none());
+    assert!(w.m.var("PaguroBootstrap").is_none());
     assert!(w.m.logged("bootstrap entry Boot0005 deleted"));
     assert!(unlock_menus(&w.m)[0].first_boot);
 }
 
 #[test]
-fn bootstrap_entry_deleted_even_when_the_boot_fails() {
+fn bootstrap_deleted_even_when_the_boot_fails() {
     let mut w = bootstrap_world(PIN);
     w.m.disks.clear();
     w.m.input(Input::Recover);
     assert_eq!(w.run(), Outcome::Halted(BootError::NoVolume));
-    assert_eq!(w.m.events[0], Event::DeleteVar("Boot0005".into()));
+    assert_eq!(w.m.events[0], Event::DeleteVar("PaguroBootstrap".into()));
+    assert_eq!(w.m.events[1], Event::DeleteVar("Boot0005".into()));
     // The payload's volume is missing: the same choice as a configured one.
     assert!(w.m.screens.contains(&Screen::Notice(Notice::VolumeMissing)));
     assert!(w.m.logged(&format!("configured volume {VOLUME} not found")));
 }
 
 #[test]
-fn a_non_bootstrap_boot_current_is_left_alone() {
+fn without_a_payload_boot_current_is_left_alone() {
     let mut w = World::new();
     w.m.put_var("BootCurrent", EFI_GLOBAL_VARIABLE, 6, &[0, 0]); // Windows' entry
     w.with_tpm_seal(PIN);
@@ -478,20 +503,134 @@ fn a_non_bootstrap_boot_current_is_left_alone() {
     assert_eq!(w.run(), Outcome::Started(Rung::Tpm));
     assert!(w.m.var("Boot0000").is_some());
     assert!(!w.m.events.iter().any(|e| matches!(e, Event::DeleteVar(_))));
+    // Nor is a paguro one-shot entry without the payload variable.
+    let mut w = bootstrap_world(PIN);
+    w.m.vars
+        .remove(&("PaguroBootstrap".to_string(), PAGURO_VENDOR));
+    w.m.input(Input::Recover);
+    w.run();
+    assert!(w.m.var("Boot0005").is_some());
+    assert!(deletes(&w.m).is_empty());
 }
 
 #[test]
 fn malformed_bootstrap_payload_is_deleted_but_not_used() {
+    for bad in [
+        b"PGRBST\x00\x01short".to_vec(),
+        b"NOTPAGURO".to_vec(),
+        vec![0u8; 72],
+        vec![0x41; 200], // larger than any payload: unreadable, still deleted
+        vec![],
+    ] {
+        let mut w = bootstrap_world(PIN);
+        w.m.put_var("PaguroBootstrap", PAGURO_VENDOR, 7, &bad);
+        w.v.recovery = Some((RECOVERY_KEY, VMK));
+        w.m.input(Input::Select(Row::RecoveryKey))
+            .secret(RECOVERY_PW);
+        assert_eq!(w.run(), Outcome::Started(Rung::RecoveryKey), "{bad:?}");
+        assert_eq!(w.m.events[0], Event::DeleteVar("PaguroBootstrap".into()));
+        assert_eq!(w.m.events[1], Event::DeleteVar("Boot0005".into()));
+        assert!(w.m.logged("malformed bootstrap payload"));
+        assert!(!unlock_menus(&w.m).iter().any(|m| m.first_boot));
+    }
+}
+
+#[test]
+fn only_a_one_shot_paguro_entry_is_deleted() {
+    // BootCurrent in BootOrder (the standing entry): the payload is still
+    // taken and deleted, the entry kept.
+    let mut w = bootstrap_world(PIN);
+    w.m.put_var("BootOrder", EFI_GLOBAL_VARIABLE, 7, &[0, 0, 5, 0]);
+    pin(&mut w, PIN);
+    assert_eq!(w.run(), Outcome::Started(Rung::Bootstrap));
+    assert_eq!(deletes(&w.m)[0], "PaguroBootstrap");
+    assert!(w.m.var("Boot0005").is_some());
+    assert!(w.m.logged("Boot0005 may be in BootOrder"));
+
+    // BootCurrent not paguro's (a file outside \EFI\paguro\): kept.
     let mut w = bootstrap_world(PIN);
     let mut lo = [0u8; 512];
-    let n = bootstrap::write_load_option(1, "x", "\\p", b"PGRBST\x00\x01short", &mut lo).unwrap();
+    let n =
+        bootstrap::write_load_option(1, "x", "\\EFI\\other\\grubx64.efi", &[], &mut lo).unwrap();
     w.m.put_var("Boot0005", EFI_GLOBAL_VARIABLE, 7, &lo[..n]);
-    w.v.recovery = Some((RECOVERY_KEY, VMK));
-    w.m.input(Input::Select(Row::RecoveryKey))
-        .secret(RECOVERY_PW);
-    assert_eq!(w.run(), Outcome::Started(Rung::RecoveryKey));
-    assert_eq!(w.m.events[0], Event::DeleteVar("Boot0005".into()));
-    assert!(w.m.logged("malformed bootstrap entry"));
+    pin(&mut w, PIN);
+    assert_eq!(w.run(), Outcome::Started(Rung::Bootstrap));
+    assert_eq!(deletes(&w.m)[0], "PaguroBootstrap");
+    assert!(w.m.var("Boot0005").is_some());
+
+    // Without shim (non-Secure-Boot test machines) the entry points at
+    // paguro.efi directly: still paguro's, deleted.
+    let mut w = bootstrap_world(PIN);
+    let n =
+        bootstrap::write_load_option(1, "paguro setup", "\\EFI\\paguro\\paguro.efi", &[], &mut lo)
+            .unwrap();
+    w.m.put_var("Boot0005", EFI_GLOBAL_VARIABLE, 7, &lo[..n]);
+    pin(&mut w, PIN);
+    assert_eq!(w.run(), Outcome::Started(Rung::Bootstrap));
+    assert_eq!(deletes(&w.m)[..2], ["PaguroBootstrap", "Boot0005"]);
+}
+
+// ---------------------------------------------------------------------------
+// Uninstall (INTERFACES.md §5, DESIGN.md §6b)
+
+const PAGURO_VARS: [&str; 6] = [
+    "PaguroB",
+    "PaguroConfigHash",
+    "PaguroSetup",
+    "PaguroTpmBroken",
+    "PaguroBootstrap",
+    "PaguroUninstall",
+];
+
+#[test]
+fn an_uninstall_request_deletes_every_variable_and_starts_windows() {
+    let mut w = World::new();
+    w.with_setup_seal(PIN).with_tpm_seal(PIN);
+    w.m.put_var("PaguroTpmBroken", PAGURO_VENDOR, 7, &[1]);
+    w.m.put_var("PaguroBootstrap", PAGURO_VENDOR, 7, b"junk");
+    w.m.put_var("PaguroUninstall", PAGURO_VENDOR, 7, &[1]);
+    assert_eq!(w.run(), Outcome::StartWindows);
+    for v in PAGURO_VARS {
+        assert!(w.m.var(v).is_none(), "{v} left behind");
+    }
+    // The request goes last: an interrupted run repeats next boot.
+    assert_eq!(
+        deletes(&w.m).last().map(String::as_str),
+        Some("PaguroUninstall")
+    );
+    // BootNext = Windows Boot Manager's entry from BootOrder, then reset.
+    assert_eq!(w.m.var("BootNext").unwrap().1, vec![0, 0]);
+    assert_eq!(w.m.events.last(), Some(&Event::Reset));
+    // Nothing unlocked, measured, prompted or handed off.
+    assert!(w.m.handoff.is_none());
+    assert!(w.m.extends().is_empty());
+    assert!(w.m.screens.is_empty());
+    assert_eq!(w.m.tpm().commands.len(), 0);
+    // Other firmware variables are untouched.
+    assert!(w.m.var("Boot0000").is_some() && w.m.var("BootOrder").is_some());
+}
+
+#[test]
+fn an_uninstall_request_of_the_wrong_size_is_absent() {
+    let mut w = World::new();
+    w.with_tpm_seal(PIN);
+    w.m.put_var("PaguroUninstall", PAGURO_VENDOR, 7, &[1, 1]);
+    pin(&mut w, PIN);
+    assert_eq!(w.run(), Outcome::Started(Rung::Tpm));
+    assert!(w.m.var("PaguroB").is_some());
+}
+
+#[test]
+fn uninstall_with_only_some_variables_present_and_no_windows_entry() {
+    let mut w = World::new();
+    w.m.vars
+        .remove(&("PaguroConfigHash".to_string(), PAGURO_VENDOR));
+    w.m.vars
+        .remove(&("Boot0000".to_string(), EFI_GLOBAL_VARIABLE));
+    w.m.put_var("PaguroUninstall", PAGURO_VENDOR, 7, &[1]);
+    assert_eq!(w.run(), Outcome::Halted(BootError::NoWindowsEntry));
+    assert_eq!(deletes(&w.m), ["PaguroB", "PaguroUninstall"]);
+    assert!(w.m.handoff.is_none());
 }
 
 #[test]

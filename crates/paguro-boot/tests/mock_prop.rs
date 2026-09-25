@@ -45,6 +45,8 @@ proptest! {
         s in blob(40),
         boot_current in blob(3),
         boot_var in blob(300),
+        bootstrap_var in blob(200),
+        uninstall in blob(3),
         sb in any::<bool>(),
         tpm in any::<bool>(),
         pcr12 in any::<bool>(),
@@ -66,6 +68,8 @@ proptest! {
         set("PaguroSetup", PAGURO_VENDOR, s);
         set("BootCurrent", EFI_GLOBAL_VARIABLE, boot_current);
         set("Boot0001", EFI_GLOBAL_VARIABLE, boot_var);
+        set("PaguroBootstrap", PAGURO_VENDOR, bootstrap_var);
+        set("PaguroUninstall", PAGURO_VENDOR, uninstall);
         w.m.secure_boot = sb;
         if !tpm { w.m.tpm = None; } else if pcr12 { w.m.tpm().pcrs[12] = [9; 32]; }
         for (at, v) in disk_noise { w.m.disks[0].data[at] = v; }

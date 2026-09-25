@@ -1029,20 +1029,31 @@ fn repair_bootstrap_after_an_nvram_clear() {
     *m.stdin.borrow_mut() = b"pass phrase\n".to_vec();
     let r = run(&m, &["--passphrase-stdin", "repair", "--bootstrap"]);
     assert_eq!(r.code, 0, "{}", r.stdout);
-    let next = m.var("BootNext", &EFI_GLOBAL_VARIABLE).unwrap();
-    let v = m
-        .var(
-            &format!("Boot{:04X}", u16::from_le_bytes([next[0], next[1]])),
-            &EFI_GLOBAL_VARIABLE,
-        )
-        .unwrap();
-    check_bootstrap(&v, "pass phrase");
+    check_bootstrap(&m, "pass phrase");
+    // Re-running replaces the payload and the entry: still exactly one.
+    *m.stdin.borrow_mut() = b"pass phrase\n".to_vec();
+    let r = run(&m, &["--passphrase-stdin", "repair", "--bootstrap"]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    check_bootstrap(&m, "pass phrase");
+    let r = run(&m, &["efi", "boot-entry", "list"]);
+    let setups = r.json["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["bootstrap"] == true)
+        .count();
+    assert_eq!(setups, 1);
 }
 
-/// A bootstrap entry opens the fixture with the loader's derivation
-/// (paguro-boot machine.rs, bootstrap row).
-fn check_bootstrap(var: &[u8], pass: &str) {
-    let bs = bootstrap::parse(var).unwrap();
+/// The bootstrap as INTERFACES.md §9 has it: `PaguroBootstrap` opens the
+/// fixture with the loader's derivation (paguro-boot machine.rs, bootstrap
+/// row), and `BootNext` names a one-shot entry that starts shim with
+/// `paguro.efi` as its second stage.
+fn check_bootstrap(m: &MockApi, pass: &str) {
+    let payload = m.var(bootstrap::VAR_NAME, &PAGURO_VENDOR).unwrap();
+    let attrs = m.vars.borrow()[&(bootstrap::VAR_NAME.to_string(), PAGURO_VENDOR.0)].attributes;
+    assert_eq!(attrs, attr::NV_BS_RT);
+    let bs = bootstrap::parse_payload(&payload).unwrap();
     assert_eq!(bs.volume, c_guid());
     let ph = paguro_crypto::bitlocker_stretch(
         &paguro_crypto::user_password_hash(pass),
@@ -1051,22 +1062,44 @@ fn check_bootstrap(var: &[u8], pass: &str) {
     );
     let k = paguro_crypto::bootstrap_key(&ph, bs.salt);
     assert!(vmk_opens_fixture(&paguro_crypto::xor32(&k, bs.wrapped_vmk)));
-    let lo = bootstrap::parse_load_option(var).unwrap();
+
+    let next = m.var("BootNext", &EFI_GLOBAL_VARIABLE).unwrap();
+    let n = u16::from_le_bytes([next[0], next[1]]);
+    let var = m
+        .var(&format!("Boot{n:04X}"), &EFI_GLOBAL_VARIABLE)
+        .unwrap();
+    let lo = bootstrap::parse_load_option(&var).unwrap();
+    assert!(lo.is_paguro());
+    let utf16 = |d: &[u8]| {
+        let u: Vec<u16> = d
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&u)
+    };
+    assert_eq!(utf16(lo.description), "paguro setup");
     let mut path = String::new();
     bootstrap::walk_device_path(lo.file_path, |n| {
         if n.sub == bootstrap::DP_MEDIA_FILE_PATH {
-            let u: Vec<u16> = n
-                .data
-                .chunks(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            path = String::from_utf16_lossy(&u);
+            path = utf16(n.data);
         }
     })
     .unwrap();
     assert_eq!(
-        path, "\\EFI\\paguro\\paguro.efi\0",
-        "INTERFACES §9: the entry points at paguro.efi"
+        path, "\\EFI\\paguro\\shimx64.efi\0",
+        "INTERFACES §9: the entry points at shim"
+    );
+    assert_eq!(
+        utf16(lo.optional_data),
+        "\\EFI\\paguro\\paguro.efi\0",
+        "paguro.efi is shim's second stage"
+    );
+    let order = m.var("BootOrder", &EFI_GLOBAL_VARIABLE).unwrap_or_default();
+    assert!(
+        !order
+            .chunks(2)
+            .any(|c| u16::from_le_bytes([c[0], c[1]]) == n),
+        "one-shot: not in BootOrder"
     );
 }
 
@@ -1142,20 +1175,7 @@ fn install_runs_resumes_and_bootstraps() {
         !m.exists(&esp_file("paguro.ini")),
         "the first boot authors paguro.ini (INTERFACES §11.2)"
     );
-    let next = m.var("BootNext", &EFI_GLOBAL_VARIABLE).unwrap();
-    let n = u16::from_le_bytes([next[0], next[1]]);
-    check_bootstrap(
-        &m.var(&format!("Boot{n:04X}"), &EFI_GLOBAL_VARIABLE)
-            .unwrap(),
-        "hunter2",
-    );
-    let order = m.var("BootOrder", &EFI_GLOBAL_VARIABLE).unwrap();
-    assert!(
-        !order
-            .chunks(2)
-            .any(|c| u16::from_le_bytes([c[0], c[1]]) == n),
-        "one-shot: not in BootOrder"
-    );
+    check_bootstrap(&m, "hunter2");
     // Run again: everything already done.
     let r = run(&m, &[&["--passphrase-stdin"][..], &args[..]].concat());
     assert_eq!(r.code, 0);
@@ -1185,6 +1205,13 @@ fn install_without_wsl_is_refused_and_names_are_checked() {
 fn uninstall_two_phases_and_leaves_the_rest_alone() {
     let m = installed();
     ok(&m, &["efi", "boot-entry", "create"]);
+    // A bootstrap that never ran (INTERFACES.md §9): its payload goes too.
+    m.set_var_raw(
+        "PaguroBootstrap",
+        &PAGURO_VENDOR,
+        &[0x42; 72],
+        attr::NV_BS_RT,
+    );
     m.put_file("C:\\ProgramData\\paguro\\mok\\mok.der", &der());
     // The key is enrolled: the final boot queues its removal.
     let mut list = vec![0u8; efisig::x509_list_len(der().len())];
@@ -1233,6 +1260,7 @@ fn uninstall_two_phases_and_leaves_the_rest_alone() {
         "PaguroConfigHash",
         "PaguroSetup",
         "PaguroTpmBroken",
+        "PaguroBootstrap",
         "PaguroUninstall",
     ] {
         assert_eq!(m.var(v, &PAGURO_VENDOR), None, "{v}");

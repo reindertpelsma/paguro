@@ -3,7 +3,9 @@
 //! and in the mock boot tests.
 //!
 //! ```text
-//! 0  delete the bootstrap Boot#### entry            -- first action
+//! 0  take and delete PaguroBootstrap (and the        -- first action
+//!    one-shot Boot####); an uninstall request:
+//!    delete paguro's variables, reset into Windows
 //! 1  read paguro.ini (64 KiB cap), SHA-256, compare  -- Secure Boot only
 //! 2  parse; PCR 12 must be zero; LOAD TAINT          -- or the sentinel
 //!    (recovery: cap PCR 12 first, never parse)
@@ -66,6 +68,8 @@ pub mod names {
     pub const VAR_CONFIG_HASH: &str = "PaguroConfigHash";
     pub const VAR_SETUP: &str = "PaguroSetup";
     pub const VAR_TPM_BROKEN: &str = "PaguroTpmBroken";
+    pub const VAR_UNINSTALL: &str = "PaguroUninstall";
+    pub const VAR_BOOTSTRAP: &str = paguro_core::bootstrap::VAR_NAME;
     /// ASCII hashed for the boot taint (INTERFACES.md §6).
     pub const BOOT_TAINT: &[u8] = b"paguro/boot-taint/v1";
     /// Event-log text for the load taint (the hashed data is the `.ini`).
@@ -111,7 +115,7 @@ pub enum Outcome {
 /// Why the recovery path was entered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecoveryReason {
-    /// No `paguro.ini` and no bootstrap entry.
+    /// No `paguro.ini` and no bootstrap payload.
     NoConfig,
     /// `paguro.ini` over 64 KiB, or unreadable.
     ConfigUnreadable,
@@ -135,7 +139,7 @@ pub enum Mode {
     Normal,
     /// Never parses the configuration; PCR 12 capped on entry.
     Recovery(RecoveryReason),
-    /// No configuration, bootstrap entry present: compiled-in defaults.
+    /// No configuration, bootstrap payload present: compiled-in defaults.
     FirstBoot,
 }
 

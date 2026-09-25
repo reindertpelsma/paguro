@@ -1,18 +1,24 @@
-//! The installer's one-shot bootstrap entry (INTERFACES.md §9) and the
-//! `EFI_LOAD_OPTION` container it travels in (UEFI 2.10 §3.1.3).
+//! The installer's bootstrap payload (INTERFACES.md §9), the
+//! `EFI_LOAD_OPTION` container of `Boot####` entries (UEFI 2.10 §3.1.3), and
+//! the recognition of paguro's own one-shot entry.
 //!
-//! `Boot####` variables are runtime-writable by any OS administrator, so both
-//! layers are parsed as hostile input: the whole option is capped at
-//! [`MAX_LOAD_OPTION`], the description must terminate inside the declared
-//! bounds, the device path is walked node by node and must end in an
-//! End-Entire node exactly at `FilePathListLength`, and the paguro payload is a
-//! fixed 72-byte layout. The wrapped VMK needs the passphrase to open and
-//! nothing can test a guess against it, so a forged entry yields a wrong key,
-//! never a decision.
+//! The payload travels in the `PaguroBootstrap` firmware variable, not in the
+//! entry: under Secure Boot the entry points at shim, which reads the entry's
+//! load options as its second-stage path. The loader reads the variable and
+//! deletes it as its first action, malformed or not.
+//!
+//! Runtime variables are writable by any OS administrator, so both the
+//! payload and `Boot####` values are parsed as hostile input: the variable is
+//! capped at [`MAX_VAR`] and must be exactly the fixed 72-byte layout; a load
+//! option is capped at [`MAX_LOAD_OPTION`], the description must terminate
+//! inside the declared bounds, the device path is walked node by node and
+//! must end in an End-Entire node exactly at `FilePathListLength`. The
+//! wrapped VMK needs the passphrase to open and nothing can test a guess
+//! against it, so a forged payload yields a wrong key, never a decision.
 //!
 //! ```text
-//! OptionalData   magic "PGRBST\0\x01" | volume GUID[16] | salt[16] | wrapped_vmk[32]
-//! wrapped_vmk  = VMK XOR HMAC(pass_hash, "paguro/bootstrap" || salt)
+//! PaguroBootstrap  magic "PGRBST\0\x01" | volume GUID[16] | salt[16] | wrapped_vmk[32]
+//! wrapped_vmk    = VMK XOR HMAC(pass_hash, "paguro/bootstrap" || salt)
 //! ```
 //!
 //! The volume GUID names the NTFS volume to unlock on the first boot (there is
@@ -24,7 +30,12 @@ use crate::bytes::{Full, Reader, Writer};
 use crate::guid::Guid;
 
 pub const MAGIC: &[u8; 8] = b"PGRBST\x00\x01";
-pub const OPTIONAL_DATA_LEN: usize = 8 + 16 + 16 + 32;
+pub const PAYLOAD_LEN: usize = 8 + 16 + 16 + 32;
+/// The payload's firmware variable (INTERFACES.md §5, §9), under the paguro
+/// vendor GUID.
+pub const VAR_NAME: &str = "PaguroBootstrap";
+/// Largest `PaguroBootstrap` value (INTERFACES.md §5).
+pub const MAX_VAR: usize = 128;
 /// Largest `Boot####` value the loader reads.
 pub const MAX_LOAD_OPTION: usize = 8192;
 /// `LOAD_OPTION_ACTIVE`.
@@ -32,7 +43,8 @@ pub const LOAD_OPTION_ACTIVE: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BootstrapError {
-    /// Load option larger than [`MAX_LOAD_OPTION`].
+    /// Load option larger than [`MAX_LOAD_OPTION`], or payload larger than
+    /// [`MAX_VAR`].
     TooLarge,
     Truncated,
     /// No NUL terminator for the description inside the option.
@@ -43,9 +55,9 @@ pub enum BootstrapError {
     BadDevicePathNode,
     /// The list does not end with exactly one End-Entire node at its end.
     MissingEndNode,
-    /// OptionalData is not the paguro bootstrap magic.
+    /// The payload does not start with the bootstrap magic.
     NotBootstrap,
-    /// OptionalData carries the magic but has the wrong length.
+    /// The payload carries the magic but has the wrong length.
     BadLength,
 }
 
@@ -146,12 +158,15 @@ pub fn parse_load_option(var: &[u8]) -> Result<LoadOption<'_>, BootstrapError> {
     })
 }
 
-/// The paguro payload of a bootstrap entry's OptionalData.
-pub fn parse_optional_data(data: &[u8]) -> Result<Bootstrap<'_>, BootstrapError> {
+/// The `PaguroBootstrap` payload.
+pub fn parse_payload(data: &[u8]) -> Result<Bootstrap<'_>, BootstrapError> {
+    if data.len() > MAX_VAR {
+        return Err(BootstrapError::TooLarge);
+    }
     if data.get(..8) != Some(&MAGIC[..]) {
         return Err(BootstrapError::NotBootstrap);
     }
-    if data.len() != OPTIONAL_DATA_LEN {
+    if data.len() != PAYLOAD_LEN {
         return Err(BootstrapError::BadLength);
     }
     let mut r = Reader::new(data.get(8..).unwrap_or(&[]));
@@ -165,11 +180,6 @@ pub fn parse_optional_data(data: &[u8]) -> Result<Bootstrap<'_>, BootstrapError>
     })
 }
 
-/// Parse a whole `Boot####` value and its bootstrap payload.
-pub fn parse(var: &[u8]) -> Result<Bootstrap<'_>, BootstrapError> {
-    parse_optional_data(parse_load_option(var)?.optional_data)
-}
-
 fn eq_ignore_case_utf16(a: &[u8], ascii: &str) -> bool {
     a.len() == ascii.len() * 2
         && a.chunks_exact(2).zip(ascii.bytes()).all(|(u, c)| {
@@ -181,7 +191,37 @@ fn eq_ignore_case_utf16(a: &[u8], ascii: &str) -> bool {
         })
 }
 
+/// The UCS-2 text of a File Path node, without its terminator, when the
+/// node is one.
+fn file_path_text<'a>(n: &Node<'a>) -> Option<&'a [u8]> {
+    if n.kind != DP_MEDIA || n.sub != DP_MEDIA_FILE_PATH {
+        return None;
+    }
+    let d = n.data;
+    Some(match d.len().checked_sub(2) {
+        Some(end) if d.get(end..) == Some(&[0, 0][..]) => d.get(..end).unwrap_or(&[]),
+        _ => d,
+    })
+}
+
 impl LoadOption<'_> {
+    /// Whether this entry starts a file under `\EFI\paguro\` (shim or
+    /// `paguro.efi`, case-insensitive): paguro's own entries, standing or
+    /// one-shot. The loader deletes only such an entry as the bootstrap's
+    /// one-shot entry.
+    pub fn is_paguro(&self) -> bool {
+        const DIR: &str = "\\EFI\\paguro\\";
+        let mut found = false;
+        let _ = walk_device_path(self.file_path, |n| {
+            if let Some(t) = file_path_text(&n) {
+                found |= t
+                    .get(..DIR.len() * 2)
+                    .is_some_and(|head| eq_ignore_case_utf16(head, DIR));
+            }
+        });
+        found
+    }
+
     /// Whether this entry starts Windows Boot Manager: a File Path node ending
     /// in `\EFI\Microsoft\Boot\bootmgfw.efi` (case-insensitive). Used only to
     /// pick a `BootNext` target for "Start Windows" — the loader never
@@ -190,12 +230,8 @@ impl LoadOption<'_> {
         const TAIL: &str = "\\EFI\\Microsoft\\Boot\\bootmgfw.efi";
         let mut found = false;
         let _ = walk_device_path(self.file_path, |n| {
-            if n.kind == DP_MEDIA && n.sub == DP_MEDIA_FILE_PATH {
-                // NUL-terminated UTF-16; compare the tail before the NUL.
-                let mut d = n.data;
-                if d.len() >= 2 && d.get(d.len() - 2..) == Some(&[0, 0][..]) {
-                    d = d.get(..d.len() - 2).unwrap_or(&[]);
-                }
+            // NUL-terminated UTF-16; compare the tail before the NUL.
+            if let Some(d) = file_path_text(&n) {
                 if let Some(tail) = d
                     .len()
                     .checked_sub(TAIL.len() * 2)
@@ -239,13 +275,9 @@ pub fn write_load_option(
     Ok(w.len())
 }
 
-/// Serialise the bootstrap OptionalData.
-pub fn write_optional_data(
-    volume: &Guid,
-    salt: &[u8; 16],
-    wrapped_vmk: &[u8; 32],
-) -> [u8; OPTIONAL_DATA_LEN] {
-    let mut out = [0u8; OPTIONAL_DATA_LEN];
+/// Serialise the `PaguroBootstrap` payload.
+pub fn write_payload(volume: &Guid, salt: &[u8; 16], wrapped_vmk: &[u8; 32]) -> [u8; PAYLOAD_LEN] {
+    let mut out = [0u8; PAYLOAD_LEN];
     let mut w = Writer::new(&mut out);
     // 72 bytes into a 72-byte buffer cannot fail.
     let _ = w.put(MAGIC);
@@ -351,14 +383,17 @@ mod tests {
             size_lba: 204_800,
             partition_guid: Guid([0x5a; 16]),
         };
-        let od = write_optional_data(&Guid([9; 16]), &[1; 16], &[2; 32]);
+        let second: std::vec::Vec<u8> = "\\EFI\\paguro\\paguro.efi\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
         let mut b = [0u8; 512];
         let n = write_load_option_hd(
             LOAD_OPTION_ACTIVE,
             "paguro",
             &hd,
             "\\EFI\\paguro\\shimx64.efi",
-            &od,
+            &second,
             &mut b,
         )
         .unwrap();
@@ -367,7 +402,8 @@ mod tests {
         assert_eq!(walk_device_path(lo.file_path, |nd| nodes.push(nd)), Ok(2));
         assert_eq!(parse_hard_drive(&nodes[0]), Some(hd));
         assert_eq!(parse_hard_drive(&nodes[1]), None);
-        assert_eq!(parse(&b[..n]).unwrap().volume, Guid([9; 16]));
+        assert_eq!(lo.optional_data, &second[..]);
+        assert!(lo.is_paguro());
         // An MBR-signature node is not ours.
         let mut data = [0u8; 38];
         data[36] = 1;
@@ -381,17 +417,37 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let od = write_optional_data(&Guid([9; 16]), &[1; 16], &[2; 32]);
+        let od = write_payload(&Guid([9; 16]), &[1; 16], &[2; 32]);
         assert_eq!(od.len(), 72);
         assert_eq!(&od[8..24], &[9; 16], "the volume follows the magic");
-        let (b, n) = option("paguro setup", "\\EFI\\paguro\\paguro.efi", &od);
+        let bs = parse_payload(&od).unwrap();
+        assert_eq!(bs.volume, Guid([9; 16]));
+        assert_eq!((bs.salt, bs.wrapped_vmk), (&[1; 16], &[2; 32]));
+        let (b, n) = option("paguro setup", "\\EFI\\paguro\\paguro.efi", &[]);
         let lo = parse_load_option(&b[..n]).unwrap();
         assert_eq!(lo.attributes, LOAD_OPTION_ACTIVE);
         assert_eq!(lo.description.len(), 24);
         assert!(!lo.is_windows_boot_manager());
-        let bs = parse(&b[..n]).unwrap();
-        assert_eq!(bs.volume, Guid([9; 16]));
-        assert_eq!((bs.salt, bs.wrapped_vmk), (&[1; 16], &[2; 32]));
+        assert!(lo.is_paguro());
+    }
+
+    #[test]
+    fn recognises_paguro_entries_only() {
+        for (path, ours) in [
+            ("\\EFI\\paguro\\shimx64.efi", true),
+            ("\\efi\\PAGURO\\paguro.efi", true),
+            ("\\EFI\\paguro", false),
+            ("\\EFI\\paguro2\\x.efi", false),
+            ("\\EFI\\Microsoft\\Boot\\bootmgfw.efi", false),
+            ("\\x\\EFI\\paguro\\paguro.efi", false),
+        ] {
+            let (b, n) = option("d", path, &[]);
+            assert_eq!(
+                parse_load_option(&b[..n]).unwrap().is_paguro(),
+                ours,
+                "{path}"
+            );
+        }
     }
 
     #[test]
@@ -403,7 +459,7 @@ mod tests {
         );
         let lo = parse_load_option(&b[..n]).unwrap();
         assert!(lo.is_windows_boot_manager());
-        assert_eq!(parse(&b[..n]), Err(BootstrapError::NotBootstrap));
+        assert!(!lo.is_paguro());
         let (b, n) = option("x", "\\bootmgfw.efi", &[]);
         assert!(
             !parse_load_option(&b[..n])
@@ -420,12 +476,24 @@ mod tests {
 
     #[test]
     fn every_error_variant() {
-        let od = write_optional_data(&Guid([9; 16]), &[1; 16], &[2; 32]);
+        let od = write_payload(&Guid([9; 16]), &[1; 16], &[2; 32]);
         let (b, n) = option("d", "\\p", &od);
+        // The load option alone, then its optional data as a payload.
+        let parse = |v: &[u8]| -> Result<(), BootstrapError> {
+            parse_payload(parse_load_option(v)?.optional_data).map(|_| ())
+        };
+        assert_eq!(parse(&b[..n]), Ok(()));
         assert_eq!(
             parse(&[0; MAX_LOAD_OPTION + 1]),
             Err(BootstrapError::TooLarge)
         );
+        assert_eq!(
+            parse_payload(&[0; MAX_VAR + 1]),
+            Err(BootstrapError::TooLarge)
+        );
+        let mut long = [0u8; MAX_VAR];
+        long[..72].copy_from_slice(&od);
+        assert_eq!(parse_payload(&long), Err(BootstrapError::BadLength));
         assert_eq!(parse(&b[..5]), Err(BootstrapError::Truncated));
         assert_eq!(parse(&b[..7]), Err(BootstrapError::UnterminatedDescription));
         let mut z = b;
@@ -458,15 +526,10 @@ mod tests {
         assert_eq!(parse(&b[..n - 1]), Err(BootstrapError::BadLength));
         let (b2, n2) = option("d", "\\p", b"PGRBST\x00\x02rest");
         assert_eq!(parse(&b2[..n2]), Err(BootstrapError::NotBootstrap));
-        assert_eq!(
-            parse_optional_data(&od[..8]),
-            Err(BootstrapError::BadLength)
-        );
+        assert_eq!(parse_payload(&od[..8]), Err(BootstrapError::BadLength));
         // The pre-volume 56-byte layout is refused, not misread.
-        assert_eq!(
-            parse_optional_data(&od[..56]),
-            Err(BootstrapError::BadLength)
-        );
+        assert_eq!(parse_payload(&od[..56]), Err(BootstrapError::BadLength));
+        assert_eq!(parse_payload(&[]), Err(BootstrapError::NotBootstrap));
         assert_eq!(
             write_load_option(0, "d", "\\p", &od, &mut [0u8; 10]),
             Err(Full)
