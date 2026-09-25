@@ -2220,6 +2220,35 @@ quality-of-experience property, since §4.3 holds with or without it.
 - **stops the VM** if no driver has reported within ~60 s (§4.4) — a
   quality-of-experience gate, since §4.3 enforces regardless
 
+#### Memory: giving Windows' unused RAM back to Linux (later)
+
+The Windows VM should behave like WSL2 in reverse — hold memory while it uses
+it, return it when it does not — without Windows seeing a balloon eat its RAM.
+The pieces, cheapest first:
+
+1. **Discarded guest memory costs nothing already.** KVM guest RAM is ordinary
+   anonymous memory in QEMU: once a range is discarded (`MADV_DONTNEED`), reads
+   map the shared zero page and the first write allocates a fresh page — for the
+   guest's own writes through the EPT and for QEMU's DMA alike. No custom KVM
+   code is needed for the "read-only zero page, allocate on write" behaviour.
+2. **Getting Windows' free memory discarded**: free-page reporting through the
+   virtio balloon where the Windows driver supports it; otherwise KSM with
+   `use_zero_pages`, which merges the pages Windows' zero-page thread has
+   already cleared.
+3. **Windows' standby list is the real prize** — SysMain and the cache fill RAM
+   with reclaimable pages. Under host memory pressure (PSI), the guest agent asks
+   Windows to purge its standby list (the documented-in-practice
+   `SystemMemoryListInformation` call RAMMap uses); the freed pages are zeroed
+   and returned by (2). Windows keeps its cache whenever the host is not short.
+4. **The balloon** stays the last resort, and host memory limits (a cgroup for
+   the VM) keep the worst case bounded.
+
+A cleverer scheme — a guest driver keeping known-zero pages in Windows' cache
+and a KVM module trapping writes to them — was considered: (1) already provides
+the host half, and the guest half would fight Windows' memory manager (page
+combining, compaction, repurposing) through undocumented behaviour for a gain
+(3) mostly delivers.
+
 ### 4.6 Windows-side transition app
 
 A "**Restart into Linux**" action that:
