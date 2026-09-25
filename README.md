@@ -41,6 +41,10 @@ uninstalling is deleting a handful of files.
 - **Your WSL2 distributions on the metal**, as they are.
 - **BitLocker keeps working** without recovery-key prompts: Windows' boot path
   is never touched.
+- **Got a second disk? Give Linux all of it** *(planned)*. Native speed on its
+  own drive, still one click from Windows and back, still with your Windows as
+  a VM — and encrypted with the keys you already have: your BitLocker recovery
+  key opens it too.
 
 ## Status
 
