@@ -25,6 +25,49 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use toml::{Table, Value};
 
+// Limits a theme is validated against (INTERFACES.md §13.1).
+/// The smallest reference size a layout may be designed for.
+const MIN_REFERENCE: [u32; 2] = [320, 240];
+const MAX_SCALES: usize = 8;
+const SCALE_MIN: f64 = 0.25;
+const SCALE_MAX: f64 = 4.0;
+const FONT_SIZE_MIN: f64 = 6.0;
+const FONT_SIZE_MAX: f64 = 200.0;
+/// A style's line height, as a multiple of its size.
+const LINE_MIN: f64 = 0.9;
+const LINE_MAX: f64 = 3.0;
+/// An image's declared size, per side.
+const IMAGE_SIDE_MAX: u32 = 1024;
+/// Images are indexed by a `u8`.
+const MAX_IMAGES: usize = 255;
+/// Every layout length.
+const LENGTH_MAX: i32 = 2000;
+const CONTENT_WIDTH_MIN: i32 = 240;
+const ROW_HEIGHT_MIN: i32 = 16;
+const ROW_HEIGHT_MAX: i32 = 400;
+const CURSOR_WIDTH_MIN: i32 = 1;
+const CURSOR_WIDTH_MAX: i32 = 40;
+/// A source PNG, per side.
+const PNG_SIDE_MAX: u32 = 4096;
+
+/// RGBA / BGRA pixels: four bytes, alpha last.
+const RGBA: usize = 4;
+const RGB: usize = 3;
+const ALPHA: usize = 3;
+const OPAQUE: u8 = 255;
+
+/// Glyph advances are 26.6 fixed point (`paguro_ui::theme::SUBPX`).
+const SUBPX: f32 = 64.0;
+/// Scales are emitted ×1000 (`paguro_ui::theme::MILLI`), pixel sizes ×10.
+const MILLI: f64 = 1000.0;
+const PX_X10: f32 = 10.0;
+/// The emitted `paguro_ui::theme::Glyph`: u16, u16, i16, i16, u16, u16, u32.
+const GLYPH_BYTES: usize = 16;
+
+/// Printable ASCII, and Latin-1's printable upper half.
+const ASCII_PRINTABLE: std::ops::Range<u8> = 0x20..0x7f;
+const LATIN1_UPPER: std::ops::Range<u32> = 0xa0..0x100;
+
 pub type Error = String;
 
 /// What to compile.
@@ -332,11 +375,11 @@ fn load_theme(dir: &Path, t: &Table, file: &str) -> Result<Theme, Error> {
             meta.name
         ));
     }
-    if meta.reference[0] < 320 || meta.reference[1] < 240 {
+    if meta.reference[0] < MIN_REFERENCE[0] || meta.reference[1] < MIN_REFERENCE[1] {
         return Err(format!("{file}: [theme] reference is too small"));
     }
-    if meta.scales.is_empty() || meta.scales.len() > 8 {
-        return Err(format!("{file}: [theme] scales: 1 to 8 entries"));
+    if meta.scales.is_empty() || meta.scales.len() > MAX_SCALES {
+        return Err(format!("{file}: [theme] scales: 1 to {MAX_SCALES} entries"));
     }
     for w in meta.scales.windows(2) {
         if w[0] >= w[1] {
@@ -345,8 +388,14 @@ fn load_theme(dir: &Path, t: &Table, file: &str) -> Result<Theme, Error> {
             ));
         }
     }
-    if meta.scales.iter().any(|&s| !(0.25..=4.0).contains(&s)) {
-        return Err(format!("{file}: [theme] scales must be within 0.25..=4"));
+    if meta
+        .scales
+        .iter()
+        .any(|&s| !(SCALE_MIN..=SCALE_MAX).contains(&s))
+    {
+        return Err(format!(
+            "{file}: [theme] scales must be within {SCALE_MIN}..={SCALE_MAX}"
+        ));
     }
 
     let mut fonts = BTreeMap::new();
@@ -373,9 +422,12 @@ fn load_theme(dir: &Path, t: &Table, file: &str) -> Result<Theme, Error> {
                 s.font
             ));
         }
-        if !(6.0..=200.0).contains(&s.size) || s.line < s.size * 0.9 || s.line > s.size * 3.0 {
+        if !(FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&s.size)
+            || s.line < s.size * LINE_MIN
+            || s.line > s.size * LINE_MAX
+        {
             return Err(format!(
-                "{file}: [text] {name}: size must be 6..200 and line between 0.9 and 3 times the size"
+                "{file}: [text] {name}: size must be {FONT_SIZE_MIN}..{FONT_SIZE_MAX} and line between {LINE_MIN} and {LINE_MAX} times the size"
             ));
         }
         let need = match needs {
@@ -433,14 +485,20 @@ fn load_theme(dir: &Path, t: &Table, file: &str) -> Result<Theme, Error> {
                 .clone()
                 .try_into()
                 .map_err(|e: toml::de::Error| format!("{file}: [images] {k}: {}", e.message()))?;
-            if s.size[0] == 0 || s.size[1] == 0 || s.size[0] > 1024 || s.size[1] > 1024 {
-                return Err(format!("{file}: [images] {k}: size must be 1..=1024"));
+            if s.size[0] == 0
+                || s.size[1] == 0
+                || s.size[0] > IMAGE_SIDE_MAX
+                || s.size[1] > IMAGE_SIDE_MAX
+            {
+                return Err(format!(
+                    "{file}: [images] {k}: size must be 1..={IMAGE_SIDE_MAX}"
+                ));
             }
             images.insert(k.clone(), s);
         }
     }
-    if images.len() > 255 {
-        return Err(format!("{file}: at most 255 images"));
+    if images.len() > MAX_IMAGES {
+        return Err(format!("{file}: at most {MAX_IMAGES} images"));
     }
 
     let options: OptionsSpec = section(t, "options", file)?;
@@ -571,18 +629,25 @@ fn load_theme(dir: &Path, t: &Table, file: &str) -> Result<Theme, Error> {
             ),
         ];
         for (what, v) in nonneg {
-            if !(0..=2000).contains(&v) {
-                return Err(format!("{ctx}: {what} must be within 0..=2000"));
+            if !(0..=LENGTH_MAX).contains(&v) {
+                return Err(format!("{ctx}: {what} must be within 0..={LENGTH_MAX}"));
             }
         }
-        if ls.content.max_width < 240 {
-            return Err(format!("{ctx}: content max_width must be at least 240"));
+        if ls.content.max_width < CONTENT_WIDTH_MIN {
+            return Err(format!(
+                "{ctx}: content max_width must be at least {CONTENT_WIDTH_MIN}"
+            ));
         }
-        if !(16..=400).contains(&ls.row.height) || !(16..=400).contains(&ls.field.height) {
-            return Err(format!("{ctx}: row and field heights must be 16..=400"));
+        let heights = ROW_HEIGHT_MIN..=ROW_HEIGHT_MAX;
+        if !heights.contains(&ls.row.height) || !heights.contains(&ls.field.height) {
+            return Err(format!(
+                "{ctx}: row and field heights must be {ROW_HEIGHT_MIN}..={ROW_HEIGHT_MAX}"
+            ));
         }
-        if !(1..=40).contains(&ls.field.cursor) {
-            return Err(format!("{ctx}: field cursor must be 1..=40"));
+        if !(CURSOR_WIDTH_MIN..=CURSOR_WIDTH_MAX).contains(&ls.field.cursor) {
+            return Err(format!(
+                "{ctx}: field cursor must be {CURSOR_WIDTH_MIN}..={CURSOR_WIDTH_MAX}"
+            ));
         }
         layouts.push(ls);
     }
@@ -732,12 +797,12 @@ pub fn rle_encode(nibbles: &[u8], out: &mut Vec<u8>) {
         let Some(&v) = nibbles.get(i) else {
             return 0;
         };
-        if v != 0 && v != 15 {
+        if v != 0 && v != NIBBLE_MAX {
             return 0;
         }
         nibbles[i..]
             .iter()
-            .take(64)
+            .take(RLE_MAX_RUN)
             .take_while(|&&x| x == v)
             .count()
     };
@@ -745,26 +810,41 @@ pub fn rle_encode(nibbles: &[u8], out: &mut Vec<u8>) {
     while i < nibbles.len() {
         let run = run_at(i);
         if run >= MIN_RUN || (run > 0 && i + run == nibbles.len()) {
-            out.push(if nibbles[i] == 0 { 0 } else { 0x40 } | (run - 1) as u8);
+            let tag = if nibbles[i] == 0 {
+                RLE_TRANSPARENT
+            } else {
+                RLE_COVERED
+            };
+            out.push(tag | (run - 1) as u8);
             i += run;
             continue;
         }
         // A literal until the next worthwhile run (at most 64 values).
         let start = i;
         let mut end = i + 1;
-        while end < nibbles.len() && end - start < 64 && run_at(end) < MIN_RUN {
+        while end < nibbles.len() && end - start < RLE_MAX_RUN && run_at(end) < MIN_RUN {
             end += 1;
         }
         let lit = &nibbles[start..end];
-        out.push(0x80 | (lit.len() - 1) as u8);
+        out.push(RLE_LITERAL | (lit.len() - 1) as u8);
         for pair in lit.chunks(2) {
-            out.push(pair[0] | pair.get(1).map_or(0, |b| b << 4));
+            out.push(pair[0] | pair.get(1).map_or(0, |b| b << NIBBLE_BITS));
         }
         i = end;
     }
 }
 
 const RLE_MIN_RUN: usize = 4;
+/// The tags in a run's top two bits, and the longest run (six bits of
+/// length − 1).
+const RLE_TRANSPARENT: u8 = 0x00;
+const RLE_COVERED: u8 = 0x40;
+const RLE_LITERAL: u8 = 0x80;
+const RLE_MAX_RUN: usize = 64;
+/// 4-bit coverage: 0..=15, ×17 back to 0..=255.
+const NIBBLE_BITS: u32 = 4;
+const NIBBLE_MAX: u8 = 15;
+const NIBBLE_TO_ALPHA: u32 = 17;
 
 fn rasterise(font: &fontdue::Font, px: f32, line: i32, chars: &BTreeSet<char>) -> Raster {
     let lm = font.horizontal_line_metrics(px);
@@ -778,18 +858,20 @@ fn rasterise(font: &fontdue::Font, px: f32, line: i32, chars: &BTreeSet<char>) -
             continue;
         }
         let (m, cov) = font.rasterize(c, px);
-        if c as u32 > 0xffff || m.width > 0xffff || m.height > 0xffff {
+        // The emitted Glyph's fields are u16.
+        let max = usize::from(u16::MAX);
+        if c as u32 > u32::from(u16::MAX) || m.width > max || m.height > max {
             continue;
         }
         let off = alpha.len() as u32;
         let nibbles: Vec<u8> = cov
             .iter()
-            .map(|a| ((u32::from(*a) + 8) / 17) as u8)
+            .map(|a| ((u32::from(*a) + NIBBLE_TO_ALPHA / 2) / NIBBLE_TO_ALPHA) as u8)
             .collect();
         rle_encode(&nibbles, &mut alpha);
         glyphs.push(Glyph {
             ch: c as u32,
-            adv: ((m.advance_width * 64.0).round().max(0.0) as u32).min(0xffff),
+            adv: ((m.advance_width * SUBPX).round().max(0.0) as u32).min(u32::from(u16::MAX)),
             x: m.xmin,
             // Top of the bitmap relative to the baseline, y down.
             y: -(m.ymin + m.height as i32),
@@ -814,8 +896,10 @@ fn decode_png(bytes: &[u8], file: &str) -> Result<(u32, u32, Vec<u8>), Error> {
     dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut r = dec.read_info().map_err(|e| format!("{file}: {e}"))?;
     let (w, h) = (r.info().width, r.info().height);
-    if w == 0 || h == 0 || w > 4096 || h > 4096 {
-        return Err(format!("{file}: images must be 1..=4096 pixels a side"));
+    if w == 0 || h == 0 || w > PNG_SIDE_MAX || h > PNG_SIDE_MAX {
+        return Err(format!(
+            "{file}: images must be 1..={PNG_SIDE_MAX} pixels a side"
+        ));
     }
     let mut buf = vec![
         0u8;
@@ -825,12 +909,12 @@ fn decode_png(bytes: &[u8], file: &str) -> Result<(u32, u32, Vec<u8>), Error> {
     let info = r.next_frame(&mut buf).map_err(|e| format!("{file}: {e}"))?;
     let data = &buf[..info.buffer_size()];
     let n = (w * h) as usize;
-    let mut out = Vec::with_capacity(n * 4);
+    let mut out = Vec::with_capacity(n * RGBA);
     match info.color_type {
-        png::ColorType::Rgba => out.extend_from_slice(&data[..n * 4]),
+        png::ColorType::Rgba => out.extend_from_slice(&data[..n * RGBA]),
         png::ColorType::Rgb => {
-            for p in data.chunks_exact(3).take(n) {
-                out.extend_from_slice(&[p[0], p[1], p[2], 255]);
+            for p in data.chunks_exact(RGB).take(n) {
+                out.extend_from_slice(&[p[0], p[1], p[2], OPAQUE]);
             }
         }
         png::ColorType::GrayscaleAlpha => {
@@ -840,7 +924,7 @@ fn decode_png(bytes: &[u8], file: &str) -> Result<(u32, u32, Vec<u8>), Error> {
         }
         png::ColorType::Grayscale => {
             for p in data.iter().take(n) {
-                out.extend_from_slice(&[*p, *p, *p, 255]);
+                out.extend_from_slice(&[*p, *p, *p, OPAQUE]);
             }
         }
         png::ColorType::Indexed => return Err(format!("{file}: palette PNG was not expanded")),
@@ -850,25 +934,25 @@ fn decode_png(bytes: &[u8], file: &str) -> Result<(u32, u32, Vec<u8>), Error> {
 
 /// Premultiplied area-average resample to `tw`×`th`, emitted as BGRA.
 fn resample(w: u32, h: u32, rgba: &[u8], tw: u32, th: u32) -> Vec<u8> {
-    let pm: Vec<[f64; 4]> = rgba
-        .chunks_exact(4)
+    let pm: Vec<[f64; RGBA]> = rgba
+        .chunks_exact(RGBA)
         .map(|p| {
-            let a = f64::from(p[3]) / 255.0;
+            let a = f64::from(p[ALPHA]) / f64::from(OPAQUE);
             [
                 f64::from(p[0]) * a,
                 f64::from(p[1]) * a,
                 f64::from(p[2]) * a,
-                f64::from(p[3]),
+                f64::from(p[ALPHA]),
             ]
         })
         .collect();
     let (sx, sy) = (f64::from(w) / f64::from(tw), f64::from(h) / f64::from(th));
-    let mut out = Vec::with_capacity((tw * th * 4) as usize);
+    let mut out = Vec::with_capacity((tw * th) as usize * RGBA);
     for ty in 0..th {
         let (y0, y1) = (f64::from(ty) * sy, f64::from(ty + 1) * sy);
         for tx in 0..tw {
             let (x0, x1) = (f64::from(tx) * sx, f64::from(tx + 1) * sx);
-            let mut acc = [0.0f64; 4];
+            let mut acc = [0.0f64; RGBA];
             let mut area = 0.0;
             let mut y = y0.floor() as u32;
             while f64::from(y) < y1 && y < h {
@@ -878,7 +962,7 @@ fn resample(w: u32, h: u32, rgba: &[u8], tw: u32, th: u32) -> Vec<u8> {
                     let wx = (f64::from(x + 1).min(x1) - f64::from(x).max(x0)).max(0.0);
                     let k = wx * wy;
                     let p = pm[(y * w + x) as usize];
-                    for c in 0..4 {
+                    for c in 0..RGBA {
                         acc[c] += p[c] * k;
                     }
                     area += k;
@@ -886,7 +970,7 @@ fn resample(w: u32, h: u32, rgba: &[u8], tw: u32, th: u32) -> Vec<u8> {
                 }
                 y += 1;
             }
-            let v = |c: usize| (acc[c] / area).round().clamp(0.0, 255.0) as u8;
+            let v = |c: usize| (acc[c] / area).round().clamp(0.0, f64::from(OPAQUE)) as u8;
             // BGRA, premultiplied.
             out.extend_from_slice(&[v(2), v(1), v(0), v(3)]);
         }
@@ -897,16 +981,20 @@ fn resample(w: u32, h: u32, rgba: &[u8], tw: u32, th: u32) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 // Emission
 
-/// FNV-1a: a stable name for identical blobs, so variants share them.
+/// FNV-1a (64-bit): a stable name for identical blobs, so variants share them.
 fn fnv(parts: &[&[u8]]) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
+    /// Mixed in after each part, so part boundaries count.
+    const SEPARATOR: u64 = 0xff;
+    let mut h = OFFSET_BASIS;
     for p in parts {
         for b in *p {
             h ^= u64::from(*b);
-            h = h.wrapping_mul(0x0100_0000_01b3);
+            h = h.wrapping_mul(PRIME);
         }
-        h ^= 0xff;
-        h = h.wrapping_mul(0x0100_0000_01b3);
+        h ^= SEPARATOR;
+        h = h.wrapping_mul(PRIME);
     }
     h
 }
@@ -956,7 +1044,7 @@ impl Emitter {
             return Ok(name);
         }
         let data = self.blob(&format!("a_{h:016X}"), &r.alpha)?;
-        self.font_bytes += r.alpha.len() + r.glyphs.len() * 16;
+        self.font_bytes += r.alpha.len() + r.glyphs.len() * GLYPH_BYTES;
         self.glyph_count += r.glyphs.len();
         let mut g = String::new();
         for x in &r.glyphs {
@@ -971,7 +1059,7 @@ impl Emitter {
             "static G_{h:016X}: [Glyph; {}] = [{g}];\n\
              static {name}: Font = Font {{ px_x10: {}, ascent: {}, descent: {}, line: {}, glyphs: &G_{h:016X}, alpha: {data} }};",
             r.glyphs.len(),
-            (r.px * 10.0).round() as u32,
+            (r.px * PX_X10).round() as u32,
             r.ascent,
             r.descent,
             r.line,
@@ -1239,8 +1327,8 @@ pub fn compile(o: &Options) -> Result<Output, Error> {
             }
         }
     }
-    let latin1: BTreeSet<char> = (0x20u32..0x7f)
-        .chain(0xa0..0x100)
+    let latin1: BTreeSet<char> = (u32::from(ASCII_PRINTABLE.start)..u32::from(ASCII_PRINTABLE.end))
+        .chain(LATIN1_UPPER)
         .filter_map(char::from_u32)
         .collect();
 
@@ -1293,7 +1381,7 @@ pub fn compile(o: &Options) -> Result<Output, Error> {
                 }
                 match ts.charset {
                     Charset::Latin1 => chars.extend(latin1.iter().copied()),
-                    Charset::Ascii => chars.extend((0x20u8..0x7f).map(char::from)),
+                    Charset::Ascii => chars.extend(ASCII_PRINTABLE.map(char::from)),
                     Charset::Strings => {}
                 }
                 let px = (ts.size * scale) as f32;
@@ -1310,7 +1398,7 @@ pub fn compile(o: &Options) -> Result<Output, Error> {
             }
             steps.push(format!(
                 "Step {{ milli: {}, fonts: [{}], images: &[{}] }}",
-                (scale * 1000.0).round() as u32,
+                (scale * MILLI).round() as u32,
                 fonts
                     .iter()
                     .map(|f| format!("&{f}"))
