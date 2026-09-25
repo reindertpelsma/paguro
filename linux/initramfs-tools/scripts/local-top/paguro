@@ -1,0 +1,36 @@
+#!/bin/sh
+# initramfs-tools local-top: on a paguro boot, build the root (DESIGN.md
+# §4.3) and name it for local_mount_root via /conf/param.conf, which
+# initramfs-tools sources after every local-top script.
+#
+# Not a paguro boot (no handoff table from paguro.efi): nothing happens.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+    prereqs) prereqs; exit 0 ;;
+esac
+
+. /scripts/functions
+
+st=$(paguro-initrd systab 2>/dev/null) || exit 0
+modprobe -q paguro-handoff systab="$st" 2>/dev/null || exit 0
+[ -c /dev/paguro-handoff ] || exit 0
+modprobe -q dm-paguro || panic "paguro: dm-paguro did not load"
+for m in dm-crypt dm-zero ntfs3 vfat nls_cp437 nls_iso8859-1 efivarfs; do
+    modprobe -q "$m" 2>/dev/null
+done
+mkdir -p /run/paguro
+if ! paguro-initrd setup --env /run/paguro/root.env; then
+    rmmod paguro_handoff 2>/dev/null
+    panic "paguro: could not build the root from the handoff"
+fi
+# Consumed and wiped; nothing is left for the module to hold.
+rmmod paguro_handoff 2>/dev/null
+. /run/paguro/root.env
+{
+    echo "ROOT=$PAGURO_ROOT"
+    echo "ROOTFSTYPE=$PAGURO_ROOTFSTYPE"
+    # A dirty or hibernated Windows: the device is read-only regardless.
+    [ "$PAGURO_ROOT_RO" = 1 ] && echo "readonly=y"
+} >> /conf/param.conf
+exit 0
