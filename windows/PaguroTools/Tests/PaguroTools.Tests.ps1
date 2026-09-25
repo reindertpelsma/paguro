@@ -8,7 +8,7 @@
 # 'real binary' block runs read-only and dry-run commands against it.
 
 BeforeAll {
-    Import-Module (Join-Path $PSScriptRoot '..' 'PaguroTools.psd1') -Force
+    Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'PaguroTools.psd1') -Force
     function New-Envelope($Command, $Data, [string[]] $Warnings = @()) {
         [pscustomobject]@{
             ExitCode = 0

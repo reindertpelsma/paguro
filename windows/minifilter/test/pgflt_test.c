@@ -19,6 +19,7 @@
  *        x86_64-w64-mingw32-gcc -Wall -Wextra -Werror -I.. pgflt_test.c -lfltlib
  */
 #define WIN32_LEAN_AND_MEAN
+#define _CRT_SECURE_NO_WARNINGS /* swscanf/swprintf on fixed, bounded buffers */
 #include <windows.h>
 #include <winioctl.h>
 #include <fltuser.h>
