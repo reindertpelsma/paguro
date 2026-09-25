@@ -8,71 +8,88 @@
 *Paguroidea: the hermit crabs. They occupy a shell they did not build, leave its
 structure unaltered, and can move out without damaging it.*
 
-**Status: design only.** Architecturally mature, experimentally unproven. The
-design is [`docs/DESIGN.md`](docs/DESIGN.md); this repository is the skeleton it
-will be built into. Nothing here touches a real disk yet.
+## What you get
+
+- **Space shared with Windows, not carved from it.** Linux lives in image files
+  on your Windows drive, so it draws from the same free space: no partition
+  sized up front, no starving one side to feed the other. An image grows when
+  it needs to.
+- **As many distributions as you like.** Each is a file. Trying one out is
+  creating a file; removing it is deleting one — not repartitioning, twice.
+- **Your Windows, both ways.** The same installation boots natively and runs as
+  a VM on the Linux desktop.
+- **Windows can reach Linux**, even on a single-disk laptop: the image is a file
+  that WSL2 mounts, which a Linux partition on the Windows disk never is.
+- **Your WSL2 distributions on the metal**, as they are.
+- **BitLocker keeps working** without recovery-key prompts: Windows' boot path
+  is never touched.
+
+## Status
+
+Work in progress; nothing here is ready for a real machine. Built and tested so
+far, in QEMU and in CI:
+
+- **the loader** (`paguro.efi`, x86_64 and aarch64): configuration check, PCR 12
+  ratchet, TPM sealing and unsealing (swtpm), finding a disk image on NTFS,
+  publishing it read-only so the firmware's own FAT driver binds it, and
+  starting the next UEFI image from inside it; recovery with a file browser; a
+  themed graphical UI with text mode, tested without firmware;
+- **the kernel module's trusted core** (~800 lines of dependency-free C),
+  differential-tested against a Rust reference, fuzzed, model-checked with
+  CBMC, and run in a VM against real NTFS volumes;
+- in progress: BitLocker unlock, the Windows command-line tools and minifilter,
+  and the coexistence and power-loss tests.
+
+The design is [`docs/DESIGN.md`](docs/DESIGN.md); the exact contracts between
+components are [`docs/INTERFACES.md`](docs/INTERFACES.md).
 
 ## How it works, in one paragraph
 
-Linux lives in a fixed-VHD image file on the Windows NTFS volume — anywhere, and
-more than one. A small UEFI loader (`paguro.efi`, beside Windows Boot Manager,
-never replacing it) unlocks BitLocker, finds the image, and boots a UKI from it.
-In Linux, a kernel module exposes the image as a block device and refuses every
+Linux lives in an image file on the Windows NTFS volume — anywhere, and more
+than one. A small UEFI loader (`paguro.efi`, beside Windows Boot Manager, never
+replacing it) unlocks BitLocker, finds the image, and starts the next boot
+stage from it: a UKI, systemd-boot, or the distribution's own shim and GRUB. In
+Linux, a kernel module exposes the image as a block device and refuses every
 other access to its sectors, so the same Windows installation can run as a VM
 over the rest of the volume — or be mounted natively — without ever being able
 to move or overwrite Linux. Windows stays the default boot and never learns
-paguro exists; uninstall is six deletions and a reboot.
-
-## Where to start
-
-The design is explicit that **the first artifact is not paguro — it is the
-storage torture harness** (§1b, §11 Q1–Q3): a sacrificial NTFS volume, a Windows
-VM, and a block layer refusing exactly what the module would refuse, then
-defrag, `chkdsk`, shrink, conversion and power loss at every write boundary. If
-NTFS can be driven into an unrecoverable state, the design stops there.
+paguro exists; uninstall is a handful of deletions and a reboot.
 
 ## Layout
 
-| Path | What | Design | Runs in |
-|---|---|---|---|
-| `crates/paguro-core` | range test, NTFS runlist decoder, fixed-VHD, `paguro.ini` grammar, seal-file layouts, bounded FVE walk | §2, §4.3, §6 | everywhere — `no_std`, no deps, no alloc |
-| `crates/paguro-crypto` | the §6 key-derivation chain, `bitlocker_stretch` | §6 | everywhere — `no_std`, symmetric only |
-| `crates/paguro-efi` | the loader: the four-stage contract | §4.1 | UEFI (`x86_64-unknown-uefi`) |
-| `crates/paguro-initrd` | build the views, write seals, record PCRs | §4.3, §6 | the initrd |
-| `crates/paguro-win` | Restart into Linux, pre-flight, repair hook | §4.6, §7 | Windows |
-| `crates/paguro-harness` | the storage torture harness; today a model check of the range test and a C-vs-Rust differential test | §11 | Linux host |
-| `kernel/dm-paguro` | the enforcement module: a device-mapper target (C) | §4.3 | Linux kernel |
-| `windows/minifilter` | clean refusals in the guest (C/WDK) | §4.4 | Windows kernel |
+| Path | What | Runs in |
+|---|---|---|
+| `crates/paguro-core` | every format and parser: NTFS, VHD, GPT, FAT32, BitLocker metadata, `paguro.ini`, seals, handoff, TPM responses | everywhere — `no_std`, no alloc |
+| `crates/paguro-crypto` | key derivation, XTS-AES, AES-CCM, BitLocker's stretch | everywhere — `no_std`, symmetric only |
+| `crates/paguro-boot` | the loader's stage machine behind a platform trait | UEFI, and the host for tests |
+| `crates/paguro-efi` | the UEFI adapter: firmware calls, GOP, block device publishing | UEFI (x86_64, aarch64) |
+| `crates/paguro-ui`, `paguro-theme`, `paguro-ui-preview` | the loader's UI renderer, the build-time theme compiler, a preview tool | UEFI / build / host |
+| `themes/` | themes: layout, colours, fonts, images, strings | build time |
+| `crates/paguro-initrd` | builds the views, writes seals, records PCRs | the initrd |
+| `crates/paguro-win` | the Windows command-line tool | Windows |
+| `crates/paguro-harness` | differential and model tests, the BitLocker test-volume writer | Linux host |
+| `kernel/dm-paguro` | the enforcement module (C) | Linux kernel |
+| `windows/minifilter` | clean refusals in Windows (C/WDK) | Windows kernel |
+| `test/qemu`, `test/uefi-probe`, `test/fixtures` | QEMU scenarios, the probe payload, disk fixtures | Linux host |
+| `fuzz/` | fuzz targets for every parser | Linux host |
 
-**The trusted core is one module we write**, a few hundred lines of C. Its
-runtime logic, `pg_range.c`, is compiled into userspace too and
-differential-tested against the Rust specification `paguro-core/src/range.rs`;
-the module itself is loaded in a throwaway QEMU VM in CI and exercised with real
-I/O.
+**The trusted core is one module we write.** Its runtime logic is a few hundred
+lines of dependency-free C, compiled into userspace too and differential-tested
+against the Rust reference in `paguro-core`.
 
 **Language rule: Rust by default, C where the platform's interface is C** — the
-device-mapper target and the Windows minifilter. Both are thin; the logic they
-run is specified and tested in Rust.
+device-mapper target and the Windows minifilter.
 
 ## Build
 
 ```sh
-cargo test                                                     # all pure logic
-cargo run -p paguro-harness -- 1000000                         # model + C-vs-Rust checks
-cargo build -p paguro-efi --target x86_64-unknown-uefi         # the loader
-make -C kernel/dm-paguro && kernel/dm-paguro/test/vm-test.sh   # module, in a VM
-```
-
-Boot the loader under OVMF (it stops at the unimplemented stage 1):
-
-```sh
-mkdir -p esp/EFI/BOOT
-cp target/x86_64-unknown-uefi/debug/paguro.efi esp/EFI/BOOT/BOOTX64.EFI
-cp /usr/share/OVMF/OVMF_VARS_4M.fd vars.fd
-qemu-system-x86_64 -machine q35 -m 256 -nographic -net none \
-  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
-  -drive if=pflash,format=raw,file=vars.fd \
-  -drive format=raw,file=fat:rw:esp
+cargo test                                                   # all logic, incl. mock boots
+cargo run --release -p paguro-harness -- 100000              # C-vs-Rust differential checks
+cargo build --release -p paguro-efi --target x86_64-unknown-uefi
+test/qemu/run.sh                                             # the loader under OVMF + swtpm
+test/qemu/arm64-smoke.sh                                     # the loader under AAVMF
+make -C kernel/dm-paguro && kernel/dm-paguro/test/vm-test.sh # the module, in a VM
+cargo run -p paguro-ui-preview -- --all --out-dir target/ui-gallery   # render every screen
 ```
 
 ## Rules the code must keep
@@ -86,6 +103,8 @@ qemu-system-x86_64 -machine q35 -m 256 -nographic -net none \
 - **No authentication tag, no convenience check** on wrapped keys.
 - **Install only adds.** Nothing existing — partition table, BitLocker
   configuration, BCD — is ever modified.
+- **Never break Windows booting, never leak the BitLocker key, never corrupt
+  a disk.** Everything else ranks below these.
 
 ## Licence
 
