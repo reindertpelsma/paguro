@@ -25,7 +25,8 @@ vm_root "$r"
 cp "$here/../dm-paguro.ko" "$r/"
 cp "$here/../tools/pgctl" "$r/bin/"
 # dm, loop and ntfs3 may be modules on this kernel; ship them uncompressed.
-vm_modules "$moddir" drivers/md/dm-mod drivers/block/loop fs/ntfs3/ntfs3 drivers/md/dm-log-writes
+vm_modules "$moddir" drivers/md/dm-mod drivers/block/loop fs/ntfs3/ntfs3 drivers/md/dm-log-writes \
+    fs/fat/vfat fs/nls/nls_cp437 fs/nls/nls_iso8859-1
 
 # Fixtures, identities from the manifest, and a dirty copy of vol512.
 for v in vol512 vol4k vol4kn; do gzip -dc "$fix/$v.img.gz" > "$r/fx/$v.img"; done

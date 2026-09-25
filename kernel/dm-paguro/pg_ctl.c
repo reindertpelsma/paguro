@@ -474,6 +474,7 @@ static long pg_grow_ioctl(struct pg_grow *a)
 	pg_size nfile, nnorm;
 	struct pg_work *w;
 	u64 size, limit = 0;
+	bool moved;
 	s32 err;
 
 	if (!c)
@@ -483,12 +484,22 @@ static long pg_grow_ioctl(struct pg_grow *a)
 	w = kvmalloc(sizeof(*w), GFP_KERNEL);
 	if (!w)
 		return -ENOMEM;
+	/*
+	 * INTERFACES 10.2: the claim goes read-only only if its old extents
+	 * may have changed -- the derived map moved or shrank them, or no map
+	 * could be derived at all (nothing then shows they are intact). New
+	 * extents that are valid but collide with a reserved range or another
+	 * claim just refuse the growth: the old ones stay, writable.
+	 */
 	err = pg_derive(c->vol, c->rec, c->seq, w, &nfile, &nnorm, &size);
+	moved = err != 0;
 	if (!err) {
 		limit = pg_limit(c->format, size);
 		if (!pg_claim_grows(c->file, c->nfile, w->file, nfile) ||
-		    limit < c->limit)
+		    limit < c->limit) {
 			err = PG_ERR_NOT_APPEND;
+			moved = true;
+		}
 	}
 	if (!err)
 		err = pg_conflict(c->vol, c, w->norm, nnorm);
@@ -507,9 +518,11 @@ static long pg_grow_ioctl(struct pg_grow *a)
 	write_lock(&pg_lock);
 	oldf = file ? c->file : NULL;
 	oldn = norm ? c->norm : NULL;
-	if (err) {
+	if (moved) {
 		/* Not append-only, or unparseable: keep the old map, stop writes. */
 		c->state |= PG_CLAIM_READONLY;
+	} else if (err) {
+		/* Refused growth, old extents intact: nothing changes. */
 	} else if (file) {
 		c->file = file;
 		c->nfile = nfile;

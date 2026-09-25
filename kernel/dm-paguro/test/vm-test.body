@@ -226,6 +226,38 @@ dmc pa9 --readonly --table "0 $(lim "$C9") paguro-image $C9" && cmp /dev/mapper/
     ok "read-only view A reads the file" || bad "ro view A"
 umount /mnt4; dmsetup remove pa9; dmsetup remove pvc7; pgctl release "$C9"; pgctl remove "$V7"; losetup -d "$L7"
 
+# ---- a refused growth keeps the old extents writable (INTERFACES 10.2) ---------
+# Reserved ranges on both sides of contig.img: any cluster ntfs3 gives it
+# collides, so PG_GROW must refuse -- and the ESP mounted from view A must
+# keep working, read-write.
+cp /fx/vol512.img /tmp/rg.img
+LR=$(losetup -f); losetup "$LR" /tmp/rg.img
+mount -t ntfs3 -o ro "$LR" /mnt4 && set -- $(pgctl fiemap /mnt4/contig.img) && umount /mnt4
+RS=$1 RL=$2
+VR=$(pgctl add "$LR" "$LR" 2>/dev/null); NS=$(vstat "$VR" sectors); pgctl remove "$VR"
+VR=$(pgctl add "$LR" "$LR" R0+$RS R$((RS + RL))+$((NS - RS - RL)) 2>/dev/null) || bad "add with reserved ranges around contig.img"
+set -- $ID_vol512_img_contig_img
+CR=$(pgctl claim "$VR" "$1" "$2" 2>/dev/null) && ok "claim beside reserved ranges" || bad "claim beside reserved: $CR"
+NR=$(blockdev --getsz "$LR")
+dmc pvr --table "0 $NR paguro-volume $VR c" && mount -t ntfs3 /dev/mapper/pvr /mnt4 &&
+    pgctl crosscheck "$CR" /mnt4/contig.img > /dev/null &&
+    dmc par --table "0 $(lim "$CR") paguro-image $CR" &&
+    dmc pare --table "0 832 linear /dev/mapper/par 64" &&
+    mkdir -p /mnt5 && mount -t vfat /dev/mapper/pare /mnt5 &&
+    echo before > /mnt5/before.txt && sync && ok "ESP from view A mounted read-write" || bad "refused-grow setup: $(cat /tmp/dmerr)"
+head -c 65536 /tmp/pat >> /mnt4/contig.img && sync
+set -- $(pgctl grow "$CR")
+[ "$8" = 100 ] && [ $(($2 & 1)) = 0 ] && [ "$4" = "$(lim "$CR")" ] &&
+    ok "growth into reserved clusters refused (error 100), claim still writable" || bad "refused grow: $*"
+echo after > /mnt5/after.txt && sync && echo 3 > /proc/sys/vm/drop_caches &&
+    [ "$(cat /mnt5/before.txt /mnt5/after.txt)" = "$(printf 'before\nafter')" ] &&
+    ok "the mounted view A keeps working after the refused growth" || bad "view A after a refused growth"
+[ "$(pgctl status | awk -v c=$CR '$1 == "claim" && $2 == c {print $16}')" = 0 ] &&
+    ok "no view-A refusals" || bad "view A refused I/O: $(pgctl status)"
+umount /mnt5; umount /mnt4
+for d in pare par pvr; do dmsetup remove $d; done
+pgctl release "$CR"; pgctl remove "$VR"; losetup -d "$LR"
+
 # ---- growth: append-only extends, anything else goes read-only ----------------
 umount /mnt
 mount -t ntfs3 /dev/mapper/pvc /mnt || bad "ntfs3 read-write on view C"
