@@ -124,6 +124,22 @@ pub fn check_layout(volume_sectors: u64, l: &FveLayout) -> Result<u64, LayoutErr
             }
         }
     }
+    // Windows 10+'s further region beside the metadata: reserved (never
+    // part of a claim) but, like libbde, dislocker and cryptsetup, not
+    // hidden from the decrypted view.
+    if let Some(x) = extra(l) {
+        if x % bps != 0 || l.region_size % bps != 0 {
+            return Err(LayoutError::Unaligned);
+        }
+        if x.checked_add(l.region_size).is_none_or(|end| end > volume) {
+            return Err(LayoutError::Outside);
+        }
+        if r.iter()
+            .any(|&(o, len)| x < o.saturating_add(len) && o < x + l.region_size)
+        {
+            return Err(LayoutError::Overlap);
+        }
+    }
     if l.encrypted_size > volume || l.encrypted_size % bps != 0 {
         return Err(LayoutError::EncryptedSize);
     }
@@ -256,9 +272,17 @@ pub fn crypt_table(
 /// `PG_VOLUME_ADD`'s reserved ranges (INTERFACES.md §10.2), 512-byte
 /// sectors: BitLocker's non-data regions.
 pub fn reserved_ranges(l: &FveLayout) -> Vec<(u64, u64)> {
-    regions(l)
+    let mut out: Vec<(u64, u64)> = regions(l)
         .map(|r| r.iter().map(|&(o, len)| (o / 512, len / 512)).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(x) = extra(l) {
+        out.push((x / 512, l.region_size / 512));
+    }
+    out
+}
+
+fn extra(l: &FveLayout) -> Option<u64> {
+    (l.extra_region_offset != 0).then_some(l.extra_region_offset)
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +382,7 @@ mod tests {
             boot_sector_reloc_sectors: reloc_sectors,
             encrypted_size: enc,
             sector_size: bps,
+            extra_region_offset: 0,
         }
     }
 
@@ -371,6 +396,7 @@ mod tests {
             metadata_offsets: l.metadata_offsets,
             reloc_len: u64::from(l.boot_sector_reloc_sectors) * 512,
             reloc_offset: l.boot_sector_reloc_offset,
+            extra_region: extra(l),
             encrypted_size: l.encrypted_size,
             cipher: Cipher::XtsAes128,
             partial: l.encrypted_size < volume,
@@ -514,6 +540,11 @@ mod tests {
                 boot_sector_reloc_sectors: reloc_sectors,
                 encrypted_size: enc,
                 sector_size: bps as u32,
+                extra_region_offset: if next(2) == 0 {
+                    0
+                } else {
+                    next(vol_units) * bps
+                },
             };
             let sectors = vol_units * bps / 512 + next(8);
             if check_layout(sectors, &l).is_err() {
@@ -619,6 +650,18 @@ mod tests {
             reserved_ranges(&l),
             vec![(0, 16), (256, 16), (128, 128), (512, 128), (1024, 128)]
         );
+        // Windows 10+: reserved, but still data in the table.
+        let x = FveLayout {
+            extra_region_offset: 0x30000,
+            ..l
+        };
+        assert_eq!(reserved_ranges(&x).last(), Some(&(384, 128)));
+        assert_eq!(crypt_segments(2048, &x).unwrap(), segs);
+        let bad = FveLayout {
+            extra_region_offset: 0x18000,
+            ..l
+        };
+        assert_eq!(check_layout(2048, &bad).unwrap_err(), LayoutError::Overlap);
     }
 
     fn entry(ty: &str, uniq: &str) -> Entry {
