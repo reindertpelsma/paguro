@@ -1,15 +1,53 @@
 [package]
 name = "paguro-win"
 license.workspace = true
-description = "Windows side: Restart into Linux, pre-flight, repair hook (DESIGN.md §4.6, §7)"
+description = "Windows side: the `paguro` CLI (INTERFACES.md §11.2), pre-flight, repair, install (DESIGN.md §4.6, §6b, §7)"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "paguro"
+path = "src/main.rs"
+
 [dependencies]
 paguro-core.workspace = true
 paguro-crypto.workspace = true
+# The loader's pure logic: its TPM client and BitLocker unlock are reused, so
+# Windows and the loader share one implementation of each.
+paguro-boot.workspace = true
+sha2 = { workspace = true, features = ["std"] }
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1", features = ["std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Vhd",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_Shutdown",
+    "Win32_System_TpmBaseServices",
+    "Win32_System_Com",
+    "Win32_System_Wmi",
+    "Win32_System_Variant",
+    "Win32_System_Ole",
+    "Win32_System_Console",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Security_Cryptography",
+] }
+
+[dev-dependencies]
+paguro-boot.workspace = true
 
 [lints]
 workspace = true
