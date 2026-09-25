@@ -44,7 +44,18 @@ public sealed class RestartViewModel : ObservableObject
         Entry = defaultEntry ?? Entries.FirstOrDefault();
     }
 
+    readonly SemaphoreSlim planning = new(1, 1);
+
+    /// <summary>The dry run for the chosen entry. One at a time: choosing an
+    /// entry plans too, and two plans must not fill the lists at once.</summary>
     public async Task PlanAsync()
+    {
+        await planning.WaitAsync();
+        try { await PlanOnceAsync(); }
+        finally { planning.Release(); }
+    }
+
+    async Task PlanOnceAsync()
     {
         var r = await session.CallAsync<Preflight>(PaguroMethods.RestartLinux, Params(dry: true));
         var data = r?.Data;
