@@ -17,7 +17,12 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::windows::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
+use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
+
+/// Helpers (sc.exe, reg.exe, pnputil…) get no console window of their own:
+/// paguro.exe started from Explorer or Settings has none to share.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use paguro_core::guid::Guid;
@@ -1043,6 +1048,7 @@ impl WinApi for RealApi {
 
     fn run(&self, program: &str, args: &[&str], stdin: Option<&[u8]>) -> ApiResult<Output> {
         let mut c = Command::new(program);
+        c.creation_flags(CREATE_NO_WINDOW);
         c.args(args)
             .stdin(if stdin.is_some() {
                 Stdio::piped()
@@ -1071,6 +1077,7 @@ impl WinApi for RealApi {
     fn run_limited(&self, program: &str, args: &[&str], secs: u64) -> ApiResult<Output> {
         use std::time::{Duration, Instant};
         let mut child = Command::new(program)
+            .creation_flags(CREATE_NO_WINDOW)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
