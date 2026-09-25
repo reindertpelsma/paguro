@@ -2240,6 +2240,12 @@ The pieces, cheapest first:
    Windows to purge its standby list (the documented-in-practice
    `SystemMemoryListInformation` call RAMMap uses); the freed pages are zeroed
    and returned by (2). Windows keeps its cache whenever the host is not short.
+   **Graded, not all at once**: the same call can purge only the
+   *low-priority* standby pages (prefetched and least recently useful) first,
+   and the whole list only if pressure continues — the nearest thing to cache
+   ballooning Windows offers, since its cache is invisible to a plain balloon;
+   `SetSystemFileCacheSize` can additionally cap the cache while the host stays
+   tight.
 4. **The balloon** stays the last resort, and host memory limits (a cgroup for
    the VM) keep the worst case bounded.
 
