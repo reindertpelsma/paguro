@@ -4210,25 +4210,36 @@ the image install, not replacing it.
 | Linux storage | fixed VHD in NTFS | the whole second disk, the distribution's own layout |
 | paguro kernel module, view C guard, minifilter | needed | **not needed** — Linux never lives inside Windows' filesystem |
 | installer | distribution ISO in a WSL2 container | the same, with the second disk attached whole (`wsl --mount` accepts non-system disks) |
-| encryption | BitLocker, inherited | **LUKS2 on the Linux disk when Windows uses BitLocker**, openable with the BitLocker recovery password |
+| encryption | BitLocker, inherited | **LUKS2 on the Linux disk when Windows uses BitLocker**: TPM + PIN, a VMK-derived slot for Windows, and the BitLocker recovery password |
 | Windows VM | view B: synthetic GPT, image extents refused | the **whole Windows disk** passed to QEMU; FVE substitution only if BitLocker is on (the VM still has no TPM) |
 | Fast Startup / hibernation | gates Linux read-write | irrelevant to booting Linux; the VM still requires a clean Windows volume, and the app says how to get one |
 
-**Encryption: ordinary LUKS, with BitLocker's recovery password as a keyslot.**
-When Windows uses BitLocker, the Linux disk is standard LUKS2 with two kinds of
-keyslot:
+**Encryption: ordinary LUKS2, three keyslots, each labelled.** When Windows
+uses BitLocker, the Linux disk is standard LUKS2 with:
 
-- **the BitLocker recovery password** (the 48 digits) as a LUKS passphrase. Its
-  entropy (~128 bits) makes the offline guessing a LUKS header allows useless,
-  and it gives Linux **Microsoft's recovery procedure for free**: whoever can
-  get the recovery key — printed, in the Microsoft account, in Active Directory
-  — can open Linux the same way. Windows reads it from its own protector (admin),
-  so `wsl --mount` + `cryptsetup` open the disk from Windows without asking.
-  When the recovery password is rotated in Windows, the Windows tool replaces
-  the keyslot using the old one;
-- **TPM + PIN through LUKS's own machinery** (`systemd-cryptenroll
-  --tpm2-with-pin`), sealed to the PCRs of a direct boot of that disk. No paguro
-  loader is in this path, so its measurements are the distribution's own.
+| Keyslot | Opened by | Purpose |
+|---|---|---|
+| **TPM + PIN** (`systemd-cryptenroll --tpm2-with-pin`) | the daily Linux boot | sealed to the PCRs of a direct boot of that disk; no paguro loader in this path, so the measurements are the distribution's own |
+| **derived from the Windows VMK**: `HMAC(VMK, "paguro/luks")`, as a hex passphrase | Windows, through its own BitLocker protector | WSL2 opens the disk from Windows without asking; changes only when BitLocker re-keys |
+| **the BitLocker recovery password** (48 digits) | a person | Microsoft's recovery procedure opens Linux too — printed, in the Microsoft account, or in Active Directory; ~128 bits of entropy make the offline guessing a LUKS header allows useless |
+
+Whoever holds Windows' key can therefore open Linux — parity with the rest of
+the design, where Windows is trusted (§6).
+
+**Every paguro keyslot says what it is.** LUKS2 keyslots have no names, so each
+gets a LUKS2 token of type `paguro` naming its purpose, shown by
+`cryptsetup luksDump` and by the Windows app, and the recovery prompt says it
+in words. For the recovery slot:
+
+> *This is your Microsoft BitLocker recovery key — the 48-digit key of your
+> Windows installation. Find it at aka.ms/myrecoverykey.*
+
+and for the other two, what depends on them: *"Lets Windows open this Linux disk
+(WSL). Managed by paguro — removing it stops Windows from opening Linux."* /
+*"Your Linux PIN."* The tokens say **removing a paguro keyslot is discouraged**;
+the Windows tool re-creates a missing one, and replaces the recovery slot when
+the recovery password is rotated in Windows, using the VMK-derived slot to
+authorise the change.
 
 **Booting it** stays one click from either side: *Restart into Linux* in
 Windows, or the entry in `paguro.efi`'s picker, sets `BootNext` to the Linux
