@@ -131,7 +131,9 @@ check_offline() {
         grep -q "processed successfully" /tmp/ntfsfix.out &&
         ok "$tag: ntfsfix -n finds nothing on the NTFS" || { bad "$tag: ntfsfix"; cat /tmp/ntfsfix.out; }
     if [ -x /sbin/ntfsck ]; then
-        ntfsck -n -q /dev/mapper/pvc > /tmp/ntfsck.out 2>&1 &&
+        # On the volume itself: ntfsck reads more than ntfs3 does, and what
+        # it reads of a claimed file through view C is refused (see below).
+        ntfsck -n -q "$VDEV" > /tmp/ntfsck.out 2>&1 &&
             ok "$tag: ntfsck -n clean" || { bad "$tag: ntfsck"; tail -15 /tmp/ntfsck.out; }
     fi
 }
@@ -271,6 +273,11 @@ growth() {
     umount_all
     check_offline "$gtag"
     maps_agree "$gtag" "$VDEV"; guard_quiet "$gtag" "$V"
+    if [ -x /sbin/ntfsck ]; then
+        h0=$(vstat "$V" guard)
+        ntfsck -n -q /dev/mapper/pvc > /tmp/ntfsck.out 2>&1; rc=$?
+        info "$gtag: ntfsck -n through view C: exit $rc, $(($(vstat "$V" guard) - h0)) refused reads of claimed sectors"
+    fi
 }
 
 # ---- power-loss replay (INTERFACES 12.1) ------------------------------------
