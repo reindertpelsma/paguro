@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+# The same paguro.exe users download: it is its own installer
+# (`paguro.exe install`), and Apps & Features runs its repair copy for
+# repair and uninstall. InstallerSha256 is filled in per release.
+PackageIdentifier: paguro.paguro
+PackageVersion: 0.1.0
+MinimumOSVersion: 10.0.19041.0
+InstallerType: exe
+Scope: machine
+ElevationRequirement: elevatesSelf
+InstallModes:
+  - interactive
+  - silent
+InstallerSwitches:
+  Silent: install
+  SilentWithProgress: install
+  Interactive: install
+  Upgrade: install
+UpgradeBehavior: install
+Commands:
+  - paguro
+ProductCode: paguro
+AppsAndFeaturesEntries:
+  - DisplayName: paguro
+    Publisher: paguro
+    ProductCode: paguro
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/reindertpelsma/paguro/releases/download/v0.1.0/paguro.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: installer
+ManifestVersion: 1.6.0

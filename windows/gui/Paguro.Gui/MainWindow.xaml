@@ -38,6 +38,9 @@
                 <NavigationViewItem Tag="restart" AutomationProperties.AutomationId="nav_restart" Content="{local:Str Key=page_restart}">
                     <NavigationViewItem.Icon><FontIcon Glyph="&#xE777;" /></NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem Tag="setup" AutomationProperties.AutomationId="nav_setup" Content="{local:Str Key=page_setup}">
+                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE90F;" /></NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItem Tag="uninstall" AutomationProperties.AutomationId="nav_uninstall" Content="{local:Str Key=page_uninstall}">
                     <NavigationViewItem.Icon><FontIcon Glyph="&#xE74D;" /></NavigationViewItem.Icon>
                 </NavigationViewItem>

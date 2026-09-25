@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: paguro.paguro
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: paguro
+PublisherUrl: https://github.com/reindertpelsma/paguro
+PackageName: paguro
+PackageUrl: https://github.com/reindertpelsma/paguro
+License: Apache-2.0 OR GPL-2.0-only
+LicenseUrl: https://github.com/reindertpelsma/paguro/blob/main/LICENSE-APACHE
+ShortDescription: Linux next to Windows, from a file on the Windows drive, under Windows' own BitLocker.
+Description: paguro starts Linux on the metal from a disk image on the Windows drive, protected by Windows' BitLocker, and installs distributions with their own installers through WSL2. paguro.exe is the command line, the Windows service and its own installer.
+Moniker: paguro
+Tags:
+  - linux
+  - dual-boot
+  - bitlocker
+  - uefi
+  - wsl
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

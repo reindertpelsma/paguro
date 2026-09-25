@@ -1,4 +1,3 @@
-using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Paguro.Gui.ViewModels;
 
@@ -11,8 +10,9 @@ public sealed partial class UninstallPage : Page
     public UninstallPage()
     {
         InitializeComponent();
-        DeleteBox.IsChecked = VM.DeleteImages;
+        ImagesChoice.SelectedIndex = VM.DeleteImages switch { false => 0, true => 1, null => -1 };
     }
 
-    void Delete_Click(object sender, RoutedEventArgs e) => VM.DeleteImages = DeleteBox.IsChecked == true;
+    void Images_Changed(object sender, SelectionChangedEventArgs e) =>
+        VM.DeleteImages = ImagesChoice.SelectedIndex switch { 0 => false, 1 => true, _ => null };
 }

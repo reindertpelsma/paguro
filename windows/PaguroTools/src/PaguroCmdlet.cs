@@ -235,5 +235,56 @@ public abstract class PaguroCmdlet : PSCmdlet
             ? p
             : GetUnresolvedProviderPathFromPSPath(p);
 
+    /// <summary>paguro.exe: $env:PAGURO_EXE, the repair copy, Program Files, PATH.</summary>
+    protected static string PaguroExe()
+    {
+        if (Environment.GetEnvironmentVariable("PAGURO_EXE") is { Length: > 0 } e) return e;
+        foreach (var p in new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "paguro", "setup", "paguro.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "paguro", "paguro.exe"),
+        })
+            if (File.Exists(p)) return p;
+        return "paguro.exe";
+    }
+
+    /// <summary>Run paguro.exe itself (install and uninstall run there, never in
+    /// the service), elevated when this session is not, and return its --json
+    /// envelope's data; its error becomes an ErrorRecord.</summary>
+    protected JsonNode? RunPaguro(string exe, params string[] args)
+    {
+        var report = Path.Combine(Path.GetTempPath(), $"paguro-{Environment.ProcessId}-{Guid.NewGuid():N}.json");
+        var psi = new System.Diagnostics.ProcessStartInfo(exe) { UseShellExecute = !IsElevated() };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        foreach (var a in new[] { "--json", "--direct", "--report", report }) psi.ArgumentList.Add(a);
+        if (psi.UseShellExecute) { psi.Verb = "runas"; psi.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden; }
+        else psi.RedirectStandardOutput = true;
+        using (var p = System.Diagnostics.Process.Start(psi) ?? throw new InvalidOperationException($"cannot start {exe}"))
+        {
+            if (!psi.UseShellExecute) p.StandardOutput.ReadToEnd();
+            p.WaitForExit();
+        }
+        var text = File.Exists(report) ? File.ReadAllText(report) : "";
+        try { File.Delete(report); File.Delete(report + ".err"); } catch (IOException) { }
+        var env = text.Length > 0 ? JsonNode.Parse(text) : null;
+        if (env?["ok"]?.GetValue<bool>() == true)
+        {
+            foreach (var w in env["warnings"]?.AsArray() ?? []) WriteWarning(w!.GetValue<string>());
+            return env["data"];
+        }
+        var err = env?["error"];
+        var ex = new PaguroException(-32000 - (err?["exit"]?.GetValue<long>() ?? 1), err?["message"]?.GetValue<string>() ?? $"{exe} reported nothing (cancelled at the UAC prompt?)",
+            err == null ? null : new JsonObject { ["code"] = err["code"]?.DeepClone(), ["exit"] = err["exit"]?.DeepClone(), ["data"] = err["data"]?.DeepClone() });
+        WriteError(new ErrorRecord(ex, "paguro." + ex.Code, ErrorCategory.InvalidOperation, exe));
+        return null;
+    }
+
+    static bool IsElevated()
+    {
+        if (!OperatingSystem.IsWindows()) return true;
+        using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+        return new System.Security.Principal.WindowsPrincipal(id).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+    }
+
     protected static JsonNode? Node(object? o) => o is null ? null : JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(o, PaguroJson.Options));
 }

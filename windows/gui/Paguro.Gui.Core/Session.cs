@@ -125,11 +125,42 @@ public sealed class Session : ObservableObject
         _ => e.Message,
     };
 
+    /// <summary>paguro.exe: the one next to the GUI's folder (Program Files\paguro),
+    /// else the repair copy (INTERFACES §11.7a).</summary>
+    public static string PaguroExe()
+    {
+        if (Environment.GetEnvironmentVariable("PAGURO_EXE") is { Length: > 0 } e) return e;
+        var beside = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "paguro.exe"));
+        if (File.Exists(beside)) return beside;
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "paguro", "setup", "paguro.exe");
+    }
+
+    /// <summary>Run paguro.exe itself, elevated (the one UAC prompt), for what the
+    /// service cannot do: install it, uninstall it. Returns its --json envelope
+    /// (null: cancelled or no report).</summary>
+    public async Task<System.Text.Json.Nodes.JsonObject?> RunPaguroAsync(params string[] args)
+    {
+        var report = Path.Combine(Path.GetTempPath(), $"paguro-gui-{Guid.NewGuid():N}.json");
+        var all = args.Concat(new[] { "--json", "--direct", "--report", report }).ToArray();
+        var code = await Dialogs.RunAsync(PaguroExe(), all, elevated: true);
+        try
+        {
+            if (!File.Exists(report)) { LastError = S.F("err_not_run", ("code", code)); return null; }
+            var env = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(report))?.AsObject();
+            if (env?["ok"]?.GetValue<bool>() != true)
+                LastError = env?["error"]?["message"]?.GetValue<string>() ?? S.F("err_not_run", ("code", code));
+            return env;
+        }
+        finally
+        {
+            try { File.Delete(report); File.Delete(report + ".err"); } catch (IOException) { }
+        }
+    }
+
     /// <summary>Install the service (the one UAC prompt: INTERFACES §11.7).</summary>
     public async Task<bool> InstallServiceAsync()
     {
-        var paguro = Path.Combine(AppContext.BaseDirectory, "paguro.exe");
-        var code = await Dialogs.RunAsync(paguro, ["--direct", "service", "install"], elevated: true);
+        var code = await Dialogs.RunAsync(PaguroExe(), ["--direct", "service", "install"], elevated: true);
         if (code != 0) { LastError = S.F("err_service_install", ("code", code)); return false; }
         await ReconnectAsync();
         return Connected;

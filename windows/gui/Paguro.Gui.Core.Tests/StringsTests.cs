@@ -24,6 +24,7 @@ public partial class StringsTests
         foreach (var st in new[] { "ok", "warn", "fail" }) yield return $"state_{st}";
         foreach (var st in DistributionsViewModel.InstallSteps) yield return $"step_install_{st.Replace('-', '_')}";
         foreach (var st in UninstallViewModel.Steps) yield return $"step_uninstall_{st.Replace('-', '_')}";
+        foreach (var st in new[] { "files", "setup-copy", "driver", "service", "apps-and-features", "shortcut" }) yield return $"step_repair_{st.Replace('-', '_')}";
         foreach (var k in new[] { "gpu", "wifi", "network", "storage" }) yield return $"hw_{k}";
         foreach (var w in new[] { "off", "tpm_pin", "tpm_startup_key", "tpm_only", "no_tpm" }) yield return $"windows_{w}";
         foreach (var c in new[] { "tpm_pin", "passphrase", "tpm_only", "unprotected" })

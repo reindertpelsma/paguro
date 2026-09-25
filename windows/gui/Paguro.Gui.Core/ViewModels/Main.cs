@@ -16,12 +16,13 @@ public sealed class MainViewModel : ObservableObject
         SecureBoot = new SecureBootViewModel(session);
         Restart = new RestartViewModel(session);
         Uninstall = new UninstallViewModel(session);
+        Setup = new SetupViewModel(session);
         InstallService = new AsyncCommand(async () => { await session.InstallServiceAsync(); await StartAsync(); }, () => session.NoService);
         session.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(Session.State)) InstallService.Refresh(); };
         foreach (var k in PageKeys) Pages.Add(new PageItem(k, S[$"page_{k}"]));
     }
 
-    public static readonly string[] PageKeys = ["checks", "distributions", "hardware", "protection", "secureboot", "restart", "uninstall"];
+    public static readonly string[] PageKeys = ["checks", "distributions", "hardware", "protection", "secureboot", "restart", "setup", "uninstall"];
 
     public Session Session { get; }
     public Strings S => Session.S;
@@ -34,6 +35,7 @@ public sealed class MainViewModel : ObservableObject
     public SecureBootViewModel SecureBoot { get; }
     public RestartViewModel Restart { get; }
     public UninstallViewModel Uninstall { get; }
+    public SetupViewModel Setup { get; }
     public AsyncCommand InstallService { get; }
 
     /// <summary>Connect, then the first screen's data.</summary>
@@ -51,6 +53,7 @@ public sealed class MainViewModel : ObservableObject
         "protection" => Protection.LoadAsync(null),
         "secureboot" => SecureBoot.LoadAsync(),
         "restart" => Restart.LoadAsync(),
+        "setup" => Setup.LoadAsync(),
         "uninstall" => Uninstall.LoadAsync(),
         _ => Task.CompletedTask,
     };

@@ -36,6 +36,7 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
         ["protection"] = typeof(ProtectionPage),
         ["secureboot"] = typeof(SecureBootPage),
         ["restart"] = typeof(RestartPage),
+        ["setup"] = typeof(SetupPage),
         ["uninstall"] = typeof(UninstallPage),
     };
 

@@ -33,7 +33,10 @@
                     </ItemsControl>
                 </StackPanel>
             </Grid>
-            <CheckBox x:Name="DeleteBox" Content="{local:Str Key=uninstall_delete_images}" AutomationProperties.AutomationId="DeleteImages" Click="Delete_Click" />
+            <RadioButtons x:Name="ImagesChoice" Header="{local:Str Key=uninstall_images_choose}" AutomationProperties.AutomationId="ImagesChoice" SelectionChanged="Images_Changed">
+                <RadioButton Content="{local:Str Key=uninstall_images_keep}" AutomationProperties.AutomationId="KeepImages" />
+                <RadioButton Content="{local:Str Key=uninstall_images_delete}" AutomationProperties.AutomationId="DeleteImages" />
+            </RadioButtons>
             <TextBlock Style="{StaticResource Error}" Text="{x:Bind VM.Error, Mode=OneWay}" />
             <Button Content="{local:Str Key=uninstall_now}" AutomationProperties.AutomationId="Uninstall" Command="{x:Bind VM.Uninstall}" />
             <ProgressBar Value="{x:Bind VM.Operation.Percent, Mode=OneWay, FallbackValue=0}" Maximum="100" />

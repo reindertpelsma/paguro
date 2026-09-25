@@ -15,6 +15,7 @@
         'Get-PaguroBootEntry', 'New-PaguroBootEntry', 'Remove-PaguroBootEntry', 'Set-PaguroBootNext',
         'Install-PaguroEsp', 'Test-PaguroEsp', 'Repair-PaguroEsp', 'Register-PaguroMok', 'Get-PaguroMok',
         'Test-PaguroPreflight', 'Restart-PaguroLinux', 'Request-PaguroSetupTpm', 'Repair-Paguro', 'Uninstall-Paguro',
+        'Install-Paguro', 'Get-PaguroSetup',
         'Get-PaguroDistribution', 'Rename-PaguroDistribution', 'Remove-PaguroDistribution', 'Resize-PaguroDistribution',
         'Enter-PaguroDistro', 'Dismount-PaguroDistro', 'Install-PaguroDistro', 'Enter-PaguroInstaller',
         'Get-PaguroProtection', 'Set-PaguroProtection', 'Test-PaguroSecret'

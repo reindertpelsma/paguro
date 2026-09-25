@@ -31,6 +31,22 @@ Describe 'PaguroTools' {
             $n.GetValue[object]().ToString()
         }
         function script:Secure([string] $s) { ConvertTo-SecureString $s -AsPlainText -Force }
+        # A stand-in paguro.exe: logs its arguments, writes a --json envelope
+        # to the --report file (as the real one does).
+        $script:FakeLog = Join-Path ([IO.Path]::GetTempPath()) "paguro-fake-$PID.log"
+        Remove-Item $script:FakeLog -ErrorAction SilentlyContinue
+        $data = '{"schema":"paguro-cli/1","command":"x","ok":true,"dry_run":false,"warnings":[],"data":{"finished":true,"steps":[],"state":{"installed":true,"version":"0","install_dir":"x","setup_copy":true,"app":true,"apps_and_features":true,"service":true}}}'
+        if ($IsWindows) {
+            $script:FakeExe = Join-Path ([IO.Path]::GetTempPath()) "paguro-fake-$PID.cmd"
+            Set-Content $script:FakeExe -Encoding ascii -Value @(
+                '@echo off', "echo %*>>`"$script:FakeLog`"", ':loop', 'if "%~1"=="" goto done',
+                'if "%~1"=="--report" set "R=%~2"', 'shift', 'goto loop', ':done', ">`"%R%`" echo $data")
+        } else {
+            $script:FakeExe = Join-Path ([IO.Path]::GetTempPath()) "paguro-fake-$PID.sh"
+            Set-Content $script:FakeExe -Value @('#!/bin/sh', "echo `"`$*`" >> '$script:FakeLog'",
+                'while [ $# -gt 0 ]; do [ "$1" = --report ] && R="$2"; shift; done', "printf '%s' '$data' > `"`$R`"")
+            chmod +x $script:FakeExe
+        }
     }
 
     AfterAll {
@@ -78,7 +94,7 @@ Describe 'PaguroTools' {
         It 'Get-PaguroService' {
             $s = Get-PaguroService
             $s | Should -BeOfType [Paguro.Api.ServiceInfo]
-            $s.ApiVersion | Should -Be '1.0'
+            $s.ApiVersion | Should -Be '1.1'
             (Last).Method | Should -Be 'service.info'
         }
         It 'Get-PaguroStatus' {
@@ -261,12 +277,34 @@ Describe 'PaguroTools' {
             P 'stage' | Should -Be 'True'
         }
         It 'Uninstall-Paguro -WhatIf is the summary of what is and is not touched' {
-            $u = Uninstall-Paguro -WhatIf
+            $u = Uninstall-Paguro -KeepImages -WhatIf
             $u.Steps.Count | Should -BeGreaterThan 3
             P 'dry_run' | Should -Be 'True'
-            Uninstall-Paguro -DeleteImages -Confirm:$false | Out-Null
-            P 'yes' | Should -Be 'True'
-            P 'delete_images' | Should -Be 'True'
+        }
+        It 'Uninstall-Paguro needs a choice about the images' {
+            { Uninstall-Paguro -Confirm:$false -ErrorAction Stop } | Should -Throw
+        }
+        It 'Uninstall-Paguro and Install-Paguro run paguro.exe itself, not the service' {
+            $env:PAGURO_EXE = $script:FakeExe
+            try {
+                $srv.ClearCalls()
+                $u = Uninstall-Paguro -DeleteImages -Confirm:$false
+                $u.Finished | Should -BeTrue
+                $i = Install-Paguro -Confirm:$false
+                $i.State.Installed | Should -BeTrue
+                $srv.Calls.Count | Should -Be 0
+                $log = Get-Content $script:FakeLog
+                $log[0] | Should -BeLike 'uninstall --yes --delete-images --json --direct --report *'
+                $log[1] | Should -BeLike 'install --json --direct --report *'
+            } finally { Remove-Item env:PAGURO_EXE }
+        }
+        It 'Get-PaguroSetup' {
+            (Get-PaguroSetup).Installed | Should -BeFalse
+            (Last).Method | Should -Be 'setup.status'
+        }
+        It 'Repair-Paguro -AppOnly' {
+            Repair-Paguro -AppOnly -Confirm:$false | Out-Null
+            P 'app_only' | Should -Be 'True'
         }
     }
 

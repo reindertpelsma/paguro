@@ -293,7 +293,7 @@ public class ViewModelTests
     }
 
     [Fact]
-    public async Task Uninstall_says_what_is_and_is_not_touched()
+    public async Task Uninstall_says_what_is_and_is_not_touched_and_needs_a_choice()
     {
         using var rig = new Rig(Admin);
         var vm = new UninstallViewModel(rig.Session);
@@ -302,14 +302,32 @@ public class ViewModelTests
         Assert.DoesNotContain(rig.S["step_uninstall_images"], vm.Touched);
         Assert.Contains(rig.S["untouched_images"], vm.Untouched);
         Assert.Contains(rig.S["untouched_windows"], vm.Untouched);
+        Assert.False(vm.Uninstall.CanExecute(null), "no choice about the images yet");
         vm.DeleteImages = true;
         await vm.LoadAsync();
         Assert.Contains(rig.S["step_uninstall_images"], vm.Touched);
         Assert.DoesNotContain(rig.S["untouched_images"], vm.Untouched);
+        Assert.True(vm.Uninstall.CanExecute(null));
+        // It runs paguro.exe itself, elevated, not the service.
+        rig.Server.ClearCalls();
         await vm.UninstallAsync();
-        var last = rig.Last("uninstall");
-        Assert.Equal("true", last.Params["yes"]?.ToString());
-        Assert.Equal("true", last.Params["delete_images"]?.ToString());
+        Assert.DoesNotContain(rig.Server.Calls, c => c.Method == "uninstall");
+        var ran = Assert.Single(rig.Dialogs.Ran);
+        Assert.StartsWith("elevated ", ran);
+        Assert.Contains("uninstall --yes --delete-images --json --direct --report ", ran);
+    }
+
+    [Fact]
+    public async Task Setup_shows_what_is_installed_and_repairs()
+    {
+        using var rig = new Rig(Admin);
+        var vm = new SetupViewModel(rig.Session);
+        await vm.LoadAsync();
+        Assert.Equal(5, vm.Rows.Count);
+        Assert.Contains(vm.Rows, r => r.Contains(rig.S["setup_service"]));
+        await vm.RepairAsync();
+        Assert.Contains(rig.Server.Calls, c => c.Method == "repair");
+        Assert.DoesNotContain(rig.Server.Calls, c => c.Method == "uninstall");
     }
 
     [Fact]
@@ -337,6 +355,7 @@ public class ViewModelTests
     [InlineData("secureboot", "secure-boot.status")]
     [InlineData("restart", "distro.list")]
     [InlineData("uninstall", "uninstall")]
+    [InlineData("setup", "setup.status")]
     public async Task Each_screen_loads_its_method(string page, string method)
     {
         using var rig = new Rig(Admin);

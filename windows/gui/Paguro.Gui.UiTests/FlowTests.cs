@@ -136,7 +136,7 @@ public class FlowTests
     public void Every_other_screen_renders()
     {
         using var g = new GuiApp();
-        foreach (var p in new[] { "distributions", "hardware", "secureboot", "uninstall" })
+        foreach (var p in new[] { "distributions", "hardware", "secureboot", "setup", "uninstall" })
         {
             g.Go(p);
             Assert.Equal(g.S[$"{p}_title"], g.Find("PageTitle").Name);
