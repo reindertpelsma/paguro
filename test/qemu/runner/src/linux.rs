@@ -299,6 +299,7 @@ pub fn plain(env: &Env) -> R<()> {
         &n,
         NTFS_VOLUME,
         &[],
+        None,
     )?;
     let e = Expect {
         root: ROOT_P2,
@@ -330,6 +331,7 @@ pub fn persist(env: &Env) -> R<()> {
         &n,
         NTFS_VOLUME,
         &[],
+        None,
     )?;
     for boot in 1..=2 {
         let e = Expect {
@@ -425,6 +427,7 @@ fn bde_case(env: &Env, name: &str, extra: &[&str]) -> R<()> {
         &enc,
         NTFS_VOLUME,
         &[],
+        None,
     )?;
     let unlock = |vm: &mut Vm| -> R<()> {
         vm.expect("Unlock Linux", 60)?;
@@ -502,6 +505,7 @@ pub fn bare(env: &Env) -> R<()> {
         &n,
         NTFS_VOLUME,
         &[],
+        None,
     )?;
     let e = Expect {
         root: "/dev/mapper/paguro-linux",
@@ -537,6 +541,7 @@ pub fn frag(env: &Env) -> R<()> {
         &n,
         NTFS_VOLUME,
         &[],
+        None,
     )?;
     let e = Expect {
         root: ROOT_P2,
@@ -582,6 +587,7 @@ fn degraded(
         &n,
         NTFS_VOLUME,
         &[],
+        None,
     )?;
     let ntfs_before = n.with_extension("before");
     ntfs_of(&disk, &ntfs_before)?;
