@@ -5,6 +5,9 @@
 #![cfg(unix)]
 #![allow(clippy::indexing_slicing)]
 
+#[path = "watchdog.rs"]
+mod watchdog;
+
 use std::cell::RefCell;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -127,6 +130,7 @@ const SAME: &[&[&str]] = &[
 
 #[test]
 fn direct_and_through_the_service_render_the_same() {
+    let _watchdog = watchdog::watchdog(120, "direct_and_through_the_service_render_the_same");
     for args in SAME {
         let d = run(args, None, &|_| {});
         let s = run(args, Some(admin()), &|_| {});
@@ -137,6 +141,7 @@ fn direct_and_through_the_service_render_the_same() {
 
 #[test]
 fn secrets_asked_back_are_prompted_by_the_front_end() {
+    let _watchdog = watchdog::watchdog(120, "secrets_asked_back_are_prompted_by_the_front_end");
     let secret = |m: &MockApi| {
         m.push_secret("azerty");
         m.push_secret("azerty");
@@ -185,6 +190,7 @@ fn secrets_asked_back_are_prompted_by_the_front_end() {
 
 #[test]
 fn progress_is_shown_live_through_the_service() {
+    let _watchdog = watchdog::watchdog(120, "progress_is_shown_live_through_the_service");
     let s = run(
         &[
             "install",
@@ -211,6 +217,7 @@ fn progress_is_shown_live_through_the_service() {
 
 #[test]
 fn the_front_end_writes_its_own_files_and_runs_the_shell() {
+    let _watchdog = watchdog::watchdog(120, "the_front_end_writes_its_own_files_and_runs_the_shell");
     let s = run(
         &["hw", "export", "-o", "C:\\ProgramData\\hw.json"],
         Some(admin()),
@@ -240,6 +247,7 @@ fn the_front_end_writes_its_own_files_and_runs_the_shell() {
 
 #[test]
 fn a_read_only_caller_is_refused_what_needs_an_administrator() {
+    let _watchdog = watchdog::watchdog(120, "a_read_only_caller_is_refused_what_needs_an_administrator");
     let s = run(
         &["config", "set", "--tpm", "0"],
         Some(Caller {

@@ -7,6 +7,9 @@
 #![cfg(windows)]
 #![allow(unsafe_code, clippy::indexing_slicing)]
 
+#[path = "watchdog.rs"]
+mod watchdog;
+
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::AsRawHandle;
@@ -82,6 +85,7 @@ fn call(f: &File, method: &str, params: Value) -> Value {
 
 #[test]
 fn acl_owner_and_calls() {
+    let _watchdog = watchdog::watchdog(60, "acl_owner_and_calls");
     let name = unique("acl");
     let _w = start(&name);
     let f = open(&name).expect("connect");
@@ -111,6 +115,7 @@ fn acl_owner_and_calls() {
 /// has full control; the ACL is what keeps the interactive user from it.
 #[test]
 fn generic_write_is_more_than_a_client_needs() {
+    let _watchdog = watchdog::watchdog(60, "generic_write_is_more_than_a_client_needs");
     let name = unique("gw");
     let _w = start(&name);
     let f = OpenOptions::new()
@@ -122,6 +127,7 @@ fn generic_write_is_more_than_a_client_needs() {
 
 #[test]
 fn a_squatted_name_is_refused() {
+    let _watchdog = watchdog::watchdog(60, "a_squatted_name_is_refused");
     let name = unique("squat");
     let _w = start(&name);
     let w2 = Arc::new(Worker::spawn(
@@ -188,6 +194,7 @@ fn as_token<T: Send + 'static>(tok: HANDLE, f: impl FnOnce() -> T + Send + 'stat
 /// unelevated administrator.
 #[test]
 fn a_filtered_administrator_is_admin_but_not_elevated() {
+    let _watchdog = watchdog::watchdog(60, "a_filtered_administrator_is_admin_but_not_elevated");
     let name = unique("uac");
     let _w = start(&name);
     let mut me = HANDLE::default();
@@ -246,6 +253,7 @@ impl Drop for TempUser {
 /// logon (no interactive group) is not admitted at all.
 #[test]
 fn a_standard_user_is_read_only_and_a_network_logon_is_refused() {
+    let _watchdog = watchdog::watchdog(60, "a_standard_user_is_read_only_and_a_network_logon_is_refused");
     if std::env::var_os("PAGURO_PIPE_ACCOUNT_TESTS").is_none() {
         eprintln!("skipped: set PAGURO_PIPE_ACCOUNT_TESTS=1 (creates a local user)");
         return;

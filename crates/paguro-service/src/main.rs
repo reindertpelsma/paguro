@@ -80,7 +80,7 @@ fn main() {
 /// and on older Windows the one created for us is released at once.
 fn no_arguments() {
     #[cfg(windows)]
-    let (api, console) = (paguro_win::real::RealApi::new(), release_own_console());
+    let (api, console) = (paguro_win::real::RealApi::new(), has_console());
     #[cfg(not(windows))]
     let (api, console) = (paguro_win::mock::MockApi::standard(), true);
     use paguro_win::cmd::setup::{Launch, launch};
@@ -192,18 +192,32 @@ fn windowed(args: &[String]) {
     std::process::exit(r.code);
 }
 
+/// Whether a person can read our output and answer at a terminal. No:
+/// started from Explorer, the Start menu or Apps & Features (no console, and
+/// no redirected standard output either). A process with redirected output
+/// (CI, a script, another program) is never "windowed": nobody would see a
+/// message box, and it would wait for ever.
 #[cfg(windows)]
 fn has_console() -> bool {
-    use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList, GetConsoleWindow};
+    use windows::Win32::System::Console::{
+        FreeConsole, GetConsoleProcessList, GetConsoleWindow, GetStdHandle, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
     // SAFETY: plain calls; the buffer outlives them.
     unsafe {
-        if GetConsoleWindow().is_invalid() {
-            return false;
+        let usable = |h: windows::core::Result<windows::Win32::Foundation::HANDLE>| {
+            h.is_ok_and(|h| !h.is_invalid() && !h.0.is_null())
+        };
+        let console = !GetConsoleWindow().is_invalid();
+        if !console {
+            // Output goes somewhere a caller reads: stay a command line.
+            return usable(GetStdHandle(STD_OUTPUT_HANDLE))
+                || usable(GetStdHandle(STD_ERROR_HANDLE));
         }
         let mut pids = [0u32; 4];
         if GetConsoleProcessList(&mut pids) == 1 {
-            // Made for us alone (older Windows, started from Explorer or
-            // Settings): give it back and use dialogs instead.
+            // A console made for us alone (older Windows, started from
+            // Explorer or Settings): give it back and use dialogs instead.
             let _ = FreeConsole();
             return false;
         }
@@ -221,25 +235,6 @@ fn start_gui(app: &str) {
         eprintln!("paguro: cannot start {app}: {e}");
         std::process::exit(1);
     }
-}
-
-#[cfg(windows)]
-fn release_own_console() -> bool {
-    use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList, GetConsoleWindow};
-    // SAFETY: plain calls; the buffer outlives them.
-    unsafe {
-        if GetConsoleWindow().is_invalid() {
-            return false;
-        }
-        let mut pids = [0u32; 4];
-        // Only us: Windows made this console for a double-click (older
-        // Windows, no detached policy). Give it back at once.
-        if GetConsoleProcessList(&mut pids) == 1 {
-            let _ = FreeConsole();
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(windows)]
@@ -288,6 +283,14 @@ fn tell(console: bool, title: &str, text: &str) {
 fn ask(console: bool, title: &str, text: &str) -> bool {
     if !console {
         return msgbox(title, text, true);
+    }
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        // Nobody to answer (a script, CI): never wait for input.
+        eprintln!(
+            "{title}: {text}\n(not asked: standard input is not a terminal; run `paguro install`)"
+        );
+        return false;
     }
     eprint!("{text} [Y/n] ");
     let mut l = String::new();

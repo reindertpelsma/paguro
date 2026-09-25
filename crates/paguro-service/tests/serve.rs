@@ -4,6 +4,9 @@
 #![cfg(unix)]
 #![allow(clippy::indexing_slicing)]
 
+#[path = "watchdog.rs"]
+mod watchdog;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -79,6 +82,7 @@ impl Conn {
 
 #[test]
 fn calls_on_one_connection() {
+    let _watchdog = watchdog::watchdog(60, "calls_on_one_connection");
     let w = worker_with(MockApi::demo);
     let mut c = Conn::open(&w, caller(false));
     let (_, r) = c.call(1, "service.info", json!({}));
@@ -96,6 +100,7 @@ fn calls_on_one_connection() {
 
 #[test]
 fn progress_arrives_before_the_response() {
+    let _watchdog = watchdog::watchdog(60, "progress_arrives_before_the_response");
     let w = worker_with(MockApi::demo);
     let mut c = Conn::open(&w, caller(true));
     let (notes, r) = c.call(
@@ -116,6 +121,7 @@ fn progress_arrives_before_the_response() {
 
 #[test]
 fn hostile_input() {
+    let _watchdog = watchdog::watchdog(60, "hostile_input");
     let w = worker_with(MockApi::demo);
     let mut c = Conn::open(&w, caller(true));
     c.send("{not json");
@@ -137,6 +143,7 @@ fn hostile_input() {
 
 #[test]
 fn one_call_at_a_time_and_the_second_is_told() {
+    let _watchdog = watchdog::watchdog(60, "one_call_at_a_time_and_the_second_is_told");
     let w = worker_with(|| {
         let m = MockApi::demo();
         m.set_runner(|prog, _| {
@@ -164,6 +171,7 @@ fn one_call_at_a_time_and_the_second_is_told() {
 
 #[test]
 fn startup_deletes_one_shots() {
+    let _watchdog = watchdog::watchdog(60, "startup_deletes_one_shots");
     let w = worker_with(|| {
         let m = MockApi::demo();
         for v in ["PaguroSetup", "PaguroBootTarget", "PaguroBootstrap"] {

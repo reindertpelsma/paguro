@@ -33,6 +33,7 @@ jobs:
   rust:
     name: paguro.exe (build, clippy, mock, real-API and pipe tests)
     runs-on: windows-2022
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -40,8 +41,10 @@ jobs:
           components: clippy
       - run: cargo clippy -p paguro-win -p paguro-service --all-targets -- -D warnings
       - name: tests (mock machine, and real Win32 in tests/real_api.rs; the runner is elevated)
+        timeout-minutes: 15
         run: cargo test -p paguro-win -- --nocapture
       - name: service tests (the pipe, its ACL, callers as a filtered administrator and as a standard user)
+        timeout-minutes: 15
         env:
           PAGURO_PIPE_ACCOUNT_TESTS: '1'
         run: cargo test -p paguro-service -- --nocapture --test-threads=1
@@ -57,6 +60,7 @@ jobs:
             if ($deps -match '(?i)vcruntime|msvcp|api-ms-win-crt|ucrtbase') { throw "$b depends on the C runtime" }
           }
       - name: the CLI runs read-only commands on the runner
+        timeout-minutes: 10
         shell: pwsh
         run: |
           $exe = "target\release\paguro.exe"
@@ -74,6 +78,7 @@ jobs:
           & $exe --json disk inspect "$env:RUNNER_TEMP\real.vhd"
           if ($LASTEXITCODE -ne 0) { throw "disk inspect exited $LASTEXITCODE" }
       - name: the real service - install it, call it through paguro.exe, remove it
+        timeout-minutes: 10
         shell: pwsh
         run: |
           $exe = (Resolve-Path target\release\paguro.exe).Path
@@ -113,6 +118,7 @@ jobs:
     name: PaguroTools binary module (Pester, fake service and the real service --mock)
     needs: rust
     runs-on: windows-2022
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -128,6 +134,7 @@ jobs:
           dotnet publish PaguroTools/PaguroTools.csproj -c Release -m:1 -o PaguroTools/bin/module
           dotnet build dotnet/Paguro.Testing -c Release -m:1 -o PaguroTools/bin/testing
       - name: Pester 5 (pwsh 7.4); the service's demo machine on a pipe for the end-to-end block
+        timeout-minutes: 20
         shell: pwsh
         run: |
           $svc = Start-Process -PassThru -NoNewWindow (Resolve-Path bin\target\release\paguro.exe).Path -ArgumentList 'service', 'console', '--mock', '--pipe', 'paguro-e2e'
@@ -145,6 +152,7 @@ jobs:
   gui:
     name: GUI (WinUI 3 build, view models, FlaUI UI automation with screenshots)
     runs-on: windows-2022
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -160,6 +168,7 @@ jobs:
           msbuild Paguro.Gui.csproj /restore /t:Publish /m:1 /v:m /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishSingleFile=true "/p:PublishDir=$env:GITHUB_WORKSPACE\publish\app\"
           Get-ChildItem $env:GITHUB_WORKSPACE\publish\app | Format-Table Name, Length
       - name: UI automation (FlaUI, a fake service)
+        timeout-minutes: 25
         shell: pwsh
         working-directory: windows/gui
         run: |
@@ -182,6 +191,7 @@ jobs:
   esp-payload:
     name: ESP payload (paguro.efi; shim and MokManager from Ubuntu's shim-signed, unchanged)
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -208,6 +218,7 @@ jobs:
     name: paguro.exe with its payloads, the CLI-only build, and an install / repair / uninstall cycle (no firmware writes)
     needs: [rust, gui, driver, esp-payload]
     runs-on: windows-2022
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -248,6 +259,7 @@ jobs:
           $c = & dist\paguro-cli.exe --json setup status | ConvertFrom-Json
           if ($c.data.has_gui) { throw 'paguro-cli.exe carries the GUI' }
       - name: install, repair, uninstall on the runner (the runner is elevated; nothing touches firmware)
+        timeout-minutes: 15
         shell: pwsh
         run: |
           $pf = "$env:ProgramFiles\paguro"
@@ -287,6 +299,7 @@ jobs:
   api:
     name: API contract, method coverage, PaguroTools on Linux
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -305,6 +318,7 @@ jobs:
           dotnet build windows/dotnet/Paguro.Testing -c Release -m:1 -o windows/PaguroTools/bin/testing
           cargo build -p paguro-service
       - name: every API method has a CLI command and a cmdlet (nothing is GUI-only)
+        timeout-minutes: 15
         shell: pwsh
         run: |
           cargo test -p paguro-win --test api_contract -- every_method_has_a_cli_command methods_match_the_schema
@@ -317,6 +331,7 @@ jobs:
           $c.Output.Verbosity = 'Detailed'
           Invoke-Pester -Configuration $c
       - name: Pester on Linux (.NET pipes are Unix sockets), with paguro service console --mock for the end-to-end block
+        timeout-minutes: 15
         shell: pwsh
         run: |
           $svc = Start-Process -PassThru target/debug/paguro -ArgumentList 'service', 'console', '--mock', '--unix', '/tmp/CoreFxPipe_paguro-e2e'
@@ -332,6 +347,7 @@ jobs:
   linux:
     name: cross-compile, SMBIOS parser (ASan/UBSan), fuzz
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -360,6 +376,7 @@ jobs:
   driver:
     name: minifilter (build, /analyze, test-sign, load inert and active, deny-path tests)
     runs-on: windows-2022
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: microsoft/setup-msbuild@v2
@@ -467,6 +484,7 @@ jobs:
   codeql:
     name: CodeQL (C, the driver and its tests)
     runs-on: windows-2022
+    timeout-minutes: 45
     permissions:
       security-events: write
       contents: read
