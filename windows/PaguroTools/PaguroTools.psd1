@@ -3,7 +3,7 @@
     ModuleVersion     = '0.1.0'
     GUID              = '5d0b7c1e-7a0e-4f55-9d3c-2f5e8f0c6a41'
     Author            = 'paguro'
-    Description       = 'PowerShell front end for paguro.exe (INTERFACES.md §11.2): a thin script module over `paguro --json` (schema paguro-cli/1).'
+    Description       = 'PowerShell front end for paguro.exe (INTERFACES.md sec. 11.2): a thin script module over `paguro --json` (schema paguro-cli/1).'
     PowerShellVersion = '5.1'
     CompatiblePSEditions = @('Desktop', 'Core')
     FunctionsToExport = @(

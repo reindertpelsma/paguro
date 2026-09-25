@@ -1,4 +1,5 @@
-# PaguroTools — a thin script module over `paguro.exe --json`.
+# ASCII only: Windows PowerShell 5.1 reads BOM-less files as ANSI.
+# PaguroTools - a thin script module over `paguro.exe --json`.
 #
 # Every cmdlet builds a paguro command line, runs it with --json and returns
 # the `data` of the paguro-cli/1 envelope (crates/paguro-win/JSON.md). No
@@ -133,7 +134,7 @@ function Invoke-Paguro {
         $PSCmdlet.ThrowTerminatingError($rec)
     }
     if ($r.ExitCode -eq 8) {
-        Write-Warning "paguro $($doc.command): not finished — restart, then run it again"
+        Write-Warning "paguro $($doc.command): not finished - restart, then run it again"
     }
     $doc.data
 }

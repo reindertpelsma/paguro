@@ -1,7 +1,7 @@
 # Pester 5+ tests for PaguroTools.
 #
 # The module is a thin layer, so what is tested is the layer: the command
-# line each cmdlet builds, -WhatIf → --dry-run, confirmation → --yes, the
+# line each cmdlet builds, -WhatIf -> --dry-run, confirmation -> --yes, the
 # passphrase on stdin and never in argv, the envelope's errors and warnings.
 # The process is mocked (Invoke-PaguroProcess), so these run anywhere pwsh
 # runs. When $env:PAGURO_EXE names a built paguro.exe (CI on Windows), the
