@@ -25,9 +25,10 @@
 
 use core::cmp::Ordering;
 
+use super::layout::*;
 use super::{
-    ATTR_DATA, ATTR_LIST, E, MAX_ALIST, MAX_RECORD, Mft, NtfsError, SECTOR, Seg, attr_at, g8, g16,
-    g32, g64, load_list, read_record, sector_of, segment, us,
+    ATTR_DATA, ATTR_LIST, E, MAX_ALIST, MAX_RECORD, Mft, NtfsError, SECTOR, Seg, attr_at, g16,
+    load_list, read_record, sector_of, segment, us,
 };
 use super::{Disk, Volume};
 use crate::runlist::Run;
@@ -51,19 +52,19 @@ pub const MAX_NAME: usize = 255;
 /// Path components followed.
 pub const MAX_COMPONENTS: usize = 32;
 
-const ATTR_FILE_NAME: u64 = 0x30;
-const ATTR_INDEX_ROOT: u64 = 0x90;
-const ATTR_INDEX_ALLOCATION: u64 = 0xa0;
-const ATTR_BITMAP: u64 = 0xb0;
-const COLLATION_FILE_NAME: u64 = 1;
+const ATTR_FILE_NAME: u64 = NTFS_AT_FILE_NAME;
+const ATTR_INDEX_ROOT: u64 = NTFS_AT_INDEX_ROOT;
+const ATTR_INDEX_ALLOCATION: u64 = NTFS_AT_INDEX_ALLOCATION;
+const ATTR_BITMAP: u64 = NTFS_AT_BITMAP;
+const COLLATION_FILE_NAME: u64 = NTFS_COLLATION_FILE_NAME;
 const I30: [u16; 4] = [b'$' as u16, b'I' as u16, b'3' as u16, b'0' as u16];
 /// `FILE_NAME` flags: a directory (its record carries an `$I30` index).
-const FN_DIRECTORY: u64 = 0x1000_0000;
+const FN_DIRECTORY: u64 = NTFS_FILE_ATTR_DUP_FILE_NAME_INDEX_PRESENT;
 /// `FILE_NAME` flags: a reparse point (junction, symlink…): never followed.
-const FN_REPARSE: u64 = 0x0400;
+const FN_REPARSE: u64 = NTFS_FILE_ATTR_REPARSE_POINT;
 /// Index entry flags.
-const IE_SUBNODE: u64 = 1;
-const IE_LAST: u64 = 2;
+const IE_SUBNODE: u64 = NTFS_INDEX_ENTRY_NODE;
+const IE_LAST: u64 = NTFS_INDEX_ENTRY_END;
 /// `FILE_NAME` namespace of a DOS-only (8.3) alias.
 pub const NAMESPACE_DOS: u8 = 2;
 
@@ -134,8 +135,8 @@ impl FileRef {
     };
     fn from_raw(v: u64) -> FileRef {
         FileRef {
-            record: v & 0xffff_ffff_ffff,
-            seq: (v >> 48) as u16,
+            record: v & NTFS_MFT_REF_RECORD_MASK,
+            seq: (v >> NTFS_MFT_REF_SEQ_SHIFT) as u16,
         }
     }
 }
@@ -221,20 +222,23 @@ fn name_at(b: &[u8], at: usize, len: usize, want: &[u16]) -> bool {
 /// The attribute `(ty, name)` at `pos` of a checked record?
 fn attr_is(rec: &[u8], pos: usize, ty: u64, name: &[u16]) -> bool {
     // attr_at() checked the name lies inside the attribute.
-    g32(rec, pos) == ty
+    get_at!(rec, pos, ntfs_attr, r#type) == ty
         && name_at(
             rec,
-            pos + us(g16(rec, pos + 0x0a)),
-            us(g8(rec, pos + 9)),
+            pos + us(get_at!(rec, pos, ntfs_attr, name_offset)),
+            us(get_at!(rec, pos, ntfs_attr, name_length)),
             name,
         )
 }
 
 /// Offset of the attribute `(ty, name)` with this instance, if present.
 fn find_instance(rec: &[u8], ty: u64, name: &[u16], instance: u64) -> Result<Option<usize>> {
-    let mut pos = us(g16(rec, 0x14));
+    let mut pos = us(get!(rec, ntfs_file_record, attrs_offset));
     while let Some((t, len)) = attr_at(rec, pos)? {
-        if t == ty && attr_is(rec, pos, ty, name) && g16(rec, pos + 0x0e) == instance {
+        if t == ty
+            && attr_is(rec, pos, ty, name)
+            && get_at!(rec, pos, ntfs_attr, instance) == instance
+        {
             return Ok(Some(pos));
         }
         pos += len;
@@ -244,8 +248,8 @@ fn find_instance(rec: &[u8], ty: u64, name: &[u16], instance: u64) -> Result<Opt
 
 /// Copy the resident value at `pos` of a checked record into `out`.
 fn resident(rec: &[u8], pos: usize, out: &mut [u8]) -> Result<usize> {
-    let size = us(g32(rec, pos + 0x10));
-    let voff = pos + us(g16(rec, pos + 0x14));
+    let size = us(get_at!(rec, pos, ntfs_attr_resident, value_length));
+    let voff = pos + us(get_at!(rec, pos, ntfs_attr_resident, value_offset));
     let src = rec.get(voff..voff + size).ok_or(E::AttrBounds)?;
     out.get_mut(..size)
         .ok_or(DirError::BufferTooSmall)?
@@ -275,23 +279,23 @@ pub fn attribute<D: Disk>(
 ) -> Result<(Option<Value>, RecordInfo)> {
     let vol = &mft.vol;
     let rec = read_record(disk, vol, mft.runs, mft.bytes, recno, recbuf)?;
-    let flags = g16(rec, 0x16);
-    if flags & 1 == 0 {
+    let flags = get!(rec, ntfs_file_record, flags);
+    if flags & NTFS_RECORD_IN_USE == 0 {
         return Err(E::NotInUse.into());
     }
-    let own_seq = g16(rec, 0x10);
+    let own_seq = get!(rec, ntfs_file_record, sequence_number);
     if seq != 0 && own_seq != u64::from(seq) {
         return Err(E::Sequence.into());
     }
-    if g64(rec, 0x20) != 0 {
+    if get!(rec, ntfs_file_record, base_mft_record) != 0 {
         return Err(E::NotBase.into());
     }
     let info = RecordInfo {
-        is_dir: flags & 2 != 0,
+        is_dir: flags & NTFS_RECORD_IS_DIRECTORY != 0,
         seq: own_seq as u16,
     };
     let (mut list, mut found, mut n) = (None, 0usize, 0u32);
-    let mut pos = us(g16(rec, 0x14));
+    let mut pos = us(get!(rec, ntfs_file_record, attrs_offset));
     while let Some((t, len)) = attr_at(rec, pos)? {
         if t == ATTR_LIST {
             if list.is_some() {
@@ -316,7 +320,7 @@ pub fn attribute<D: Disk>(
     match list {
         None => match n {
             0 => return Ok((None, info)),
-            1 if g8(rec, found + 8) == 0 => {
+            1 if get_at!(rec, found, ntfs_attr, non_resident) == 0 => {
                 return Ok((Some(Value::Resident(resident(rec, found, bytes)?)), info));
             }
             1 => segment(vol, rec, found, &mut st, runs)?,
@@ -326,43 +330,49 @@ pub fn attribute<D: Disk>(
             // The list's own runs need scratch of their own: `runs` may be empty.
             let mut lruns = [Run { lcn: 0, count: 0 }; 64];
             let size = load_list(disk, vol, rec, lp, alist, &mut lruns)?;
-            let base_ref = recno | own_seq << 48;
+            let base_ref = recno | own_seq << NTFS_MFT_REF_SEQ_SHIFT;
+            let entry = size_of::<ntfs_attr_list_entry>();
             let mut p = 0usize;
             let mut segments = 0u32;
             while p < size {
-                if p + 0x1a > size {
+                if p + entry > size {
                     return Err(E::AttrList.into());
                 }
-                let elen = us(g16(&*alist, p + 4));
-                if elen < 0x1a || elen > size - p {
+                let elen = us(get_at!(&*alist, p, ntfs_attr_list_entry, length));
+                if elen < entry || elen > size - p {
                     return Err(E::AttrList.into());
                 }
-                let nlen = us(g8(&*alist, p + 6));
-                let noff = us(g8(&*alist, p + 7));
+                let nlen = us(get_at!(&*alist, p, ntfs_attr_list_entry, name_length));
+                let noff = us(get_at!(&*alist, p, ntfs_attr_list_entry, name_offset));
                 if nlen > 0 && noff + 2 * nlen > elen {
                     return Err(E::AttrList.into());
                 }
-                if g32(&*alist, p) == ty && name_at(&*alist, p + noff, nlen, name) {
+                if get_at!(&*alist, p, ntfs_attr_list_entry, r#type) == ty
+                    && name_at(&*alist, p + noff, nlen, name)
+                {
                     segments += 1;
                     if segments > super::MAX_EXTENSIONS + 1 {
                         return Err(E::TooManyExtensions.into());
                     }
-                    let r = g64(&*alist, p + 0x10) & 0xffff_ffff_ffff;
-                    let rseq = g64(&*alist, p + 0x10) >> 48;
-                    let lowest = g64(&*alist, p + 8);
-                    let instance = g16(&*alist, p + 0x18);
+                    let mref = get_at!(&*alist, p, ntfs_attr_list_entry, mft_reference);
+                    let r = mref & NTFS_MFT_REF_RECORD_MASK;
+                    let rseq = mref >> NTFS_MFT_REF_SEQ_SHIFT;
+                    let lowest = get_at!(&*alist, p, ntfs_attr_list_entry, lowest_vcn);
+                    let instance = get_at!(&*alist, p, ntfs_attr_list_entry, instance);
                     let rec = read_record(disk, vol, mft.runs, mft.bytes, r, recbuf)?;
-                    if g16(rec, 0x16) & 1 == 0 {
+                    if get!(rec, ntfs_file_record, flags) & NTFS_RECORD_IN_USE == 0 {
                         return Err(E::NotInUse.into());
                     }
-                    if g16(rec, 0x10) != rseq {
+                    if get!(rec, ntfs_file_record, sequence_number) != rseq {
                         return Err(E::Sequence.into());
                     }
-                    if g64(rec, 0x20) != if r == recno { 0 } else { base_ref } {
+                    if get!(rec, ntfs_file_record, base_mft_record)
+                        != if r == recno { 0 } else { base_ref }
+                    {
                         return Err(E::ExtensionBase.into());
                     }
                     let at = find_instance(rec, ty, name, instance)?.ok_or(E::MissingSegment)?;
-                    if g8(rec, at + 8) == 0 {
+                    if get_at!(rec, at, ntfs_attr, non_resident) == 0 {
                         // A resident value is a single segment at VCN 0.
                         if segments != 1 || lowest != 0 {
                             return Err(E::AttrList.into());
@@ -370,13 +380,16 @@ pub fn attribute<D: Disk>(
                         let len = resident(rec, at, bytes)?;
                         // Nothing else may follow for this attribute.
                         let mut q = p + elen;
-                        while q + 0x1a <= size {
-                            let el = us(g16(&*alist, q + 4));
-                            if el < 0x1a || el > size - q {
+                        while q + entry <= size {
+                            let el = us(get_at!(&*alist, q, ntfs_attr_list_entry, length));
+                            if el < entry || el > size - q {
                                 return Err(E::AttrList.into());
                             }
-                            let (nl, no) = (us(g8(&*alist, q + 6)), us(g8(&*alist, q + 7)));
-                            if g32(&*alist, q) == ty && name_at(&*alist, q + no, nl, name) {
+                            let nl = us(get_at!(&*alist, q, ntfs_attr_list_entry, name_length));
+                            let no = us(get_at!(&*alist, q, ntfs_attr_list_entry, name_offset));
+                            if get_at!(&*alist, q, ntfs_attr_list_entry, r#type) == ty
+                                && name_at(&*alist, q + no, nl, name)
+                            {
                                 return Err(E::AttrList.into());
                             }
                             q += el;
@@ -532,21 +545,25 @@ pub struct IndexEntry<'a> {
 pub fn node_entries(node: &[u8], mut f: impl FnMut(&IndexEntry<'_>) -> Result<bool>) -> Result<()> {
     let mut name = [0u16; MAX_NAME];
     let mut pos = 0usize;
+    let head = size_of::<ntfs_index_entry>();
+    let (key_head, vcn) = (size_of::<ntfs_file_name>(), size_of::<u64>());
     loop {
-        if node.len() < 0x10 || pos > node.len() - 0x10 {
+        if node.len() < head || pos > node.len() - head {
             return Err(DirError::IndexEntry);
         }
-        let len = us(g16(node, pos + 8));
-        let key_len = us(g16(node, pos + 10));
-        let flags = g16(node, pos + 12);
-        if len < 0x10 || len % 8 != 0 || len > node.len() - pos {
+        let len = us(get_at!(node, pos, ntfs_index_entry, length));
+        let key_len = us(get_at!(node, pos, ntfs_index_entry, key_length));
+        let flags = get_at!(node, pos, ntfs_index_entry, flags);
+        // Entries are 8-byte aligned.
+        if len < head || len % 8 != 0 || len > node.len() - pos {
             return Err(DirError::IndexEntry);
         }
+        // A subnode's VCN is the entry's last 8 bytes.
         let child = if flags & IE_SUBNODE != 0 {
-            if len < 0x18 {
+            if len < head + vcn {
                 return Err(DirError::IndexEntry);
             }
-            Some(g64(node, pos + len - 8))
+            Some(super::get(node, pos + len - vcn, vcn))
         } else {
             None
         };
@@ -555,17 +572,18 @@ pub fn node_entries(node: &[u8], mut f: impl FnMut(&IndexEntry<'_>) -> Result<bo
         let key = if last {
             None
         } else {
-            let room = len - 0x10 - if child.is_some() { 8 } else { 0 };
-            if key_len < 0x42 || key_len > room {
+            let room = len - head - if child.is_some() { vcn } else { 0 };
+            if key_len < key_head || key_len > room {
                 return Err(DirError::IndexEntry);
             }
-            let k = pos + 0x10;
-            n = us(g8(node, k + 0x40));
-            if n == 0 || 0x42 + 2 * n > key_len {
+            // The key: a $FILE_NAME, its UTF-16 name after the header.
+            let k = pos + head;
+            n = us(get_at!(node, k, ntfs_file_name, file_name_length));
+            if n == 0 || key_head + 2 * n > key_len {
                 return Err(DirError::IndexEntry);
             }
             let raw = node
-                .get(k + 0x42..k + 0x42 + 2 * n)
+                .get(k + key_head..k + key_head + 2 * n)
                 .ok_or(DirError::IndexEntry)?;
             for (d, s) in name.iter_mut().zip(raw.chunks_exact(2)) {
                 *d = u16::from_le_bytes([
@@ -573,12 +591,12 @@ pub fn node_entries(node: &[u8], mut f: impl FnMut(&IndexEntry<'_>) -> Result<bo
                     s.get(1).copied().unwrap_or(0),
                 ]);
             }
-            let fl = g32(node, k + 0x38);
+            let fl = get_at!(node, k, ntfs_file_name, file_attributes);
             Some((
-                FileRef::from_raw(g64(node, pos)),
-                g8(node, k + 0x41) as u8,
+                FileRef::from_raw(get_at!(node, pos, ntfs_index_entry, indexed_file)),
+                get_at!(node, k, ntfs_file_name, file_name_type) as u8,
                 fl,
-                g64(node, k + 0x30),
+                get_at!(node, k, ntfs_file_name, data_size),
             ))
         };
         let e = IndexEntry {
@@ -602,14 +620,15 @@ pub fn node_entries(node: &[u8], mut f: impl FnMut(&IndexEntry<'_>) -> Result<bo
 /// A node header at `at` of `buf` (the node may use bytes up to `limit`):
 /// the entry region's bounds, and whether entries have children.
 fn node_region(buf: &[u8], at: usize, limit: usize) -> Result<(usize, usize, bool)> {
-    if limit > buf.len() || at > limit || limit - at < 0x10 {
+    let head = size_of::<ntfs_index_header>();
+    if limit > buf.len() || at > limit || limit - at < head {
         return Err(DirError::IndexEntry);
     }
-    let first = us(g32(buf, at));
-    let len = us(g32(buf, at + 4));
-    let alloc = us(g32(buf, at + 8));
-    let large = g8(buf, at + 12) & 1 != 0;
-    if first < 0x10 || first % 8 != 0 || len < first || len > alloc || alloc > limit - at {
+    let first = us(get_at!(buf, at, ntfs_index_header, entries_offset));
+    let len = us(get_at!(buf, at, ntfs_index_header, index_length));
+    let alloc = us(get_at!(buf, at, ntfs_index_header, allocated_size));
+    let large = get_at!(buf, at, ntfs_index_header, flags) & NTFS_INDEX_LARGE != 0;
+    if first < head || first % 8 != 0 || len < first || len > alloc || alloc > limit - at {
         return Err(DirError::IndexEntry);
     }
     Ok((at + first, at + len, large))
@@ -663,10 +682,13 @@ pub fn open_index<D: Disk>(
         return Err(DirError::IndexRoot);
     };
     let r = s.root.get(..root_len).ok_or(DirError::IndexRoot)?;
-    if r.len() < 0x20 || g32(r, 0) != ATTR_FILE_NAME || g32(r, 4) != COLLATION_FILE_NAME {
+    if r.len() < size_of::<ntfs_index_root>()
+        || get!(r, ntfs_index_root, r#type) != ATTR_FILE_NAME
+        || get!(r, ntfs_index_root, collation_rule) != COLLATION_FILE_NAME
+    {
         return Err(DirError::IndexRoot);
     }
-    let block_size = us(g32(r, 8));
+    let block_size = us(get!(r, ntfs_index_root, index_block_size));
     if !block_size.is_power_of_two() || !(512..=MAX_INDEX_BLOCK).contains(&block_size) {
         return Err(DirError::BlockSize);
     }
@@ -675,7 +697,7 @@ pub fn open_index<D: Disk>(
     } else {
         SECTOR
     };
-    let (_, _, large) = node_region(r, 0x10, r.len())?;
+    let (_, _, large) = node_region(r, off!(ntfs_index_root, index), r.len())?;
     let mut idx = Index {
         dir,
         root_len,
@@ -736,17 +758,22 @@ fn read_block<D: Disk>(
     let runs = s.runs.get(..idx.runs).unwrap_or(&[]);
     let blk = s.block.get_mut(..bs).ok_or(DirError::BlockSize)?;
     read_runs(disk, vol, runs, idx.alloc, off, blk)?;
-    if blk.get(..4) != Some(&b"INDX"[..]) {
+    if blk.get(..width!(ntfs_index_block, magic)) != Some(NTFS_INDEX_MAGIC) {
         return Err(DirError::IndexBlock);
     }
-    let usa = us(g16(blk, 4));
-    let count = us(g16(blk, 6));
-    if count != bs / 512 + 1 || usa < 0x28 || usa % 2 != 0 || usa + 2 * count > bs {
+    let usa = us(get!(blk, ntfs_index_block, usa_offset));
+    let count = us(get!(blk, ntfs_index_block, usa_count));
+    // One update-sequence entry (u16) per 512 bytes, plus the USN itself.
+    if count != bs / us(SECTOR) + 1
+        || usa < size_of::<ntfs_index_block>()
+        || usa % 2 != 0
+        || usa + 2 * count > bs
+    {
         return Err(DirError::IndexFixup);
     }
     let usn = g16(blk, usa);
     for i in 1..count {
-        let at = i * 512 - 2;
+        let at = i * us(SECTOR) - 2;
         if g16(blk, at) != usn {
             return Err(DirError::IndexFixup);
         }
@@ -755,10 +782,10 @@ fn read_block<D: Disk>(
             d.copy_from_slice(f);
         }
     }
-    if g64(blk, 0x10) != vcn {
+    if get!(blk, ntfs_index_block, index_block_vcn) != vcn {
         return Err(DirError::IndexVcn);
     }
-    let (a, b, _) = node_region(blk, 0x18, bs)?;
+    let (a, b, _) = node_region(blk, off!(ntfs_index_block, index), bs)?;
     // The entries must not overlap the update sequence array.
     if a < usa + 2 * count {
         return Err(DirError::IndexEntry);
@@ -777,7 +804,7 @@ pub fn lookup<D: Disk>(
     name: &[u16],
     s: &mut Scratch,
 ) -> Result<Option<Hit>> {
-    let (a, b, _) = node_region(&s.root, 0x10, idx.root_len)?;
+    let (a, b, _) = node_region(&s.root, off!(ntfs_index_root, index), idx.root_len)?;
     let mut next = None;
     let mut found = None;
     walk_node(
@@ -858,7 +885,7 @@ pub fn list<D: Disk>(
     mut f: impl FnMut(&Entry<'_>) -> bool,
 ) -> Result<()> {
     let mut go = true;
-    let (a, b, _) = node_region(&s.root, 0x10, idx.root_len)?;
+    let (a, b, _) = node_region(&s.root, off!(ntfs_index_root, index), idx.root_len)?;
     node_entries(s.root.get(a..b).ok_or(DirError::IndexEntry)?, |e| {
         Ok(feed(e, &mut f, &mut go))
     })?;
@@ -992,19 +1019,19 @@ pub fn resolve<D: Disk>(
         }
         // The record decides what it is, not the index's cached flags.
         let rec = read_record(disk, &mft.vol, mft.runs, mft.bytes, file.record, &mut s.rec)?;
-        let flags = g16(rec, 0x16);
-        if flags & 1 == 0 {
+        let flags = get!(rec, ntfs_file_record, flags);
+        if flags & NTFS_RECORD_IN_USE == 0 {
             return Err(E::NotInUse.into());
         }
-        if g16(rec, 0x10) != u64::from(file.seq) {
+        if get!(rec, ntfs_file_record, sequence_number) != u64::from(file.seq) {
             return Err(E::Sequence.into());
         }
-        if g64(rec, 0x20) != 0 {
+        if get!(rec, ntfs_file_record, base_mft_record) != 0 {
             return Err(E::NotBase.into());
         }
         cur = Found {
             file,
-            is_dir: flags & 2 != 0,
+            is_dir: flags & NTFS_RECORD_IS_DIRECTORY != 0,
         };
     }
     Ok(cur)

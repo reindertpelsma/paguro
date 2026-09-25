@@ -14,6 +14,9 @@
  *
  * pg_crc32 is a free function here (PG_CBMC_FREE_CRC) that must only be
  * handed readable memory; crc.c proves the real one equal to the table CRC.
+ * In the GPT run, payload_ext4 is replaced by its contract
+ * (PG_CBMC_STUB_EXT4); the EXT4 run proves the real one. Unwind bounds per
+ * path keep each run within minutes and ~1 GB.
  */
 #include <string.h>
 
@@ -37,6 +40,25 @@ pg_u32 pg_crc32(pg_u32 c, const pg_u8 *p, pg_size n)
 	(void)c;
 	__CPROVER_assert(__CPROVER_r_ok(p, n), "CRC input readable");
 	return nondet_u32();
+}
+
+/*
+ * The GPT path's ext4 partitions: payload_ext4 is proved on its own
+ * (PATH_EXT4, any base and length); here only its contract is checked --
+ * called for a partition inside the image, with room for a superblock.
+ */
+int pg_cbmc_payload_ext4(pg_read_fn read, void *ctx, pg_u64 base, pg_u64 len,
+			 pg_u8 *b)
+{
+	int r = nondet_int();
+
+	(void)read;
+	(void)ctx;
+	__CPROVER_assert(__CPROVER_w_ok(b, 512), "ext4: buffer");
+	__CPROVER_assert(len > 2 && base + len >= base && base + len <= hi,
+			 "ext4: a partition inside the image");
+	__CPROVER_assume(r == 0 || r == PG_E_IO || r == PG_E_PAYLOAD_EXT4);
+	return r;
 }
 
 static int rd(void *ctx, pg_u64 s, pg_u8 *buf)
@@ -70,7 +92,11 @@ int main(void)
 	pg_u8 buf[512];
 	int e;
 
+#ifdef LBS
+	lbs = LBS;	/* one run per size: keeps the arithmetic concrete */
+#else
 	lbs = nondet_int() ? 4096 : 512;
+#endif
 	lo = 0;
 	hi = nondet_u64();
 #ifdef PATH_EXT4

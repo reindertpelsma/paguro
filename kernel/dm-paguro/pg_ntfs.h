@@ -19,6 +19,7 @@
 #define PG_NTFS_MAX_EXTENSIONS 64	/* $DATA segments outside the base */
 #define PG_NTFS_MAX_CLUSTER (2u << 20)	/* bytes */
 #define PG_NTFS_FIRST_USER_RECORD 24	/* 0-15 metadata, 16-23 reserved */
+#define PG_NTFS_MAX_RECORD_NUMBER 0xffffffffu	/* 32-bit record numbers */
 #define PG_NTFS_VOLUME_DIRTY 0x0001
 #define PG_MAX_EXTENTS 65536
 

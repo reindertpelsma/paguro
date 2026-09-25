@@ -14,8 +14,14 @@ claim:
 runlist:
 	cbmc $(CHECKS) $(INC) --unwind 14 --function main runlist.c ../../pg_ntfs.c
 payload:
-	$(PAYLOAD) -DPATH_GPT --unwind 17
+	# One path per run, per-loop bounds: each is seconds and < 1 GB (a blanket
+	# --unwind 17 made the GPT path exhaust 30 GB). The GPT runs take
+	# payload_ext4 as its contract (PG_CBMC_STUB_EXT4); the EXT4 run proves it.
+	$(PAYLOAD) -DPATH_GPT -DPG_CBMC_STUB_EXT4 -DLBS=512 --unwind 9 \
+	    --unwindset payload_gpt.0:17,payload_gpt.1:17,payload_gpt.2:6,eq.0:17
+	$(PAYLOAD) -DPATH_GPT -DPG_CBMC_STUB_EXT4 -DLBS=4096 --unwind 9 \
+	    --unwindset payload_gpt.0:17,payload_gpt.1:17,payload_gpt.2:6,eq.0:17
 	$(PAYLOAD) -DPATH_EXT4 --unwind 17
-	$(PAYLOAD) -DPATH_ISO --unwind 17
+	$(PAYLOAD) -DPATH_ISO --unwind 9
 crc:
 	cbmc --bounds-check --pointer-check --unwinding-assertions $(INC) --unwind 9 --function main crc.c

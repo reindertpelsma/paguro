@@ -20,6 +20,9 @@
 use crate::range::Extent;
 use crate::runlist::{self, Run, RunlistError};
 
+/// The on-disk structures read, as layout descriptions (pg_layout.h's twin).
+#[macro_use]
+pub mod layout;
 /// Path lookup, directory listing and file reading for the loader.
 pub mod dir;
 
@@ -35,21 +38,20 @@ pub const MAX_EXTENSIONS: u32 = 64;
 pub const MAX_CLUSTER: u64 = 2 << 20;
 /// Output capacity (INTERFACES `PG_MAX_EXTENTS`).
 pub const MAX_EXTENTS: usize = 65536;
+/// Record numbers above this (32 bits) are refused.
+pub const MAX_RECORD_NUMBER: u64 = 0xffff_ffff;
 /// Records below this are NTFS metadata (0–15) and `$MFT`'s reserved
 /// extensions (16–23); never a user file.
 pub const FIRST_USER_RECORD: u64 = 24;
 /// `$VOLUME_INFORMATION` flag: the volume needs `chkdsk`.
 pub const VOLUME_DIRTY: u16 = 0x0001;
 
-const ATTR_LIST: u64 = 0x20;
-const ATTR_VOLUME_INFO: u64 = 0x70;
-const ATTR_DATA: u64 = 0x80;
-const ATTR_END: u64 = 0xffff_ffff;
-/// `USA offset` of an NTFS 3.1 FILE record; older layouts are refused.
-const USA_OFFSET: usize = 0x30;
-const ESP_TYPE: [u8; 16] = [
-    0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
-];
+use layout::*;
+
+const ATTR_LIST: u64 = NTFS_AT_ATTRIBUTE_LIST;
+const ATTR_DATA: u64 = NTFS_AT_DATA;
+/// The update-sequence array's offset in an NTFS 3.1 FILE record.
+const USA_OFFSET: usize = NTFS_USA_OFFSET_31 as usize;
 
 /// The read callback failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,17 +251,10 @@ fn get(b: &[u8], at: usize, n: usize) -> u64 {
     debug_assert!(v.is_some(), "unchecked read at {at}+{n}");
     v.unwrap_or(0)
 }
-fn g8(b: &[u8], at: usize) -> u64 {
-    get(b, at, 1)
-}
+/// A little-endian u16 at `at`, for what is not a layout field (the
+/// update-sequence array and the sector ends it patches).
 fn g16(b: &[u8], at: usize) -> u64 {
     get(b, at, 2)
-}
-fn g32(b: &[u8], at: usize) -> u64 {
-    get(b, at, 4)
-}
-fn g64(b: &[u8], at: usize) -> u64 {
-    get(b, at, 8)
 }
 /// `u64` → `usize` for values already bounded by a record or buffer length.
 fn us(v: u64) -> usize {
@@ -268,21 +263,23 @@ fn us(v: u64) -> usize {
 
 /// Step 1. Validate the boot sector and derive the geometry.
 pub fn parse_boot(b: &[u8; 512]) -> Result<Volume> {
-    if g16(b, 510) != 0xaa55 {
+    if get!(b, ntfs_boot_sector, signature) != BOOT_SIGNATURE {
         return Err(E::BootSignature);
     }
-    if b.get(3..11) != Some(&b"NTFS    "[..]) {
+    let oem = off!(ntfs_boot_sector, oem_id);
+    if b.get(oem..oem + width!(ntfs_boot_sector, oem_id)) != Some(NTFS_OEM_ID) {
         return Err(E::OemId);
     }
-    let bps = g16(b, 0x0b);
+    let bps = get!(b, ntfs_boot_sector, bytes_per_sector);
     if bps != 512 && bps != 4096 {
         return Err(E::SectorSize);
     }
-    // Sectors per cluster: 1..=128, or 2^(256 - raw) for clusters beyond 64 KiB.
-    let raw = g8(b, 0x0d);
-    let spc = if raw <= 0x80 {
+    // Sectors per cluster: 1..=128, or 2^(256 - raw) for clusters beyond
+    // 64 KiB (the byte, read as negative, is minus the exponent: 256 - raw).
+    let raw = get!(b, ntfs_boot_sector, sectors_per_cluster);
+    let spc = if raw <= NTFS_BS_NEGATIVE {
         raw
-    } else if 256 - raw <= 20 {
+    } else if 256 - raw <= NTFS_BS_MAX_CLUSTER_SHIFT {
         1 << (256 - raw)
     } else {
         0
@@ -291,16 +288,18 @@ pub fn parse_boot(b: &[u8; 512]) -> Result<Volume> {
         return Err(E::ClusterSize);
     }
     let cluster_bytes = bps * spc;
-    let bytes = g64(b, 0x28).checked_mul(bps).ok_or(E::VolumeSize)?;
+    let bytes = get!(b, ntfs_boot_sector, total_sectors)
+        .checked_mul(bps)
+        .ok_or(E::VolumeSize)?;
     let clusters = bytes / cluster_bytes;
     if clusters == 0 {
         return Err(E::VolumeSize);
     }
     // Record size: clusters per record if positive, else 2^-raw bytes.
-    let raw = g8(b, 0x40);
-    let record_bytes = if raw < 0x80 {
+    let raw = get!(b, ntfs_boot_sector, clusters_per_mft_record);
+    let record_bytes = if raw < NTFS_BS_NEGATIVE {
         raw * cluster_bytes
-    } else if (256 - raw) <= 12 {
+    } else if (256 - raw) <= NTFS_BS_MAX_RECORD_SHIFT {
         1 << (256 - raw)
     } else {
         0
@@ -308,7 +307,7 @@ pub fn parse_boot(b: &[u8; 512]) -> Result<Volume> {
     if !(1024..=MAX_RECORD as u64).contains(&record_bytes) || !record_bytes.is_power_of_two() {
         return Err(E::RecordSize);
     }
-    let mft_lcn = g64(b, 0x30);
+    let mft_lcn = get!(b, ntfs_boot_sector, mft_lcn);
     if mft_lcn >= clusters || clusters - mft_lcn < record_bytes.div_ceil(cluster_bytes) {
         return Err(E::MftLcn);
     }
@@ -360,17 +359,21 @@ fn read_record<'b, D: Disk>(
         disk.read(s, chunk).map_err(|_| E::Io)?;
         off += SECTOR;
     }
-    if rec.get(0..4) != Some(&b"FILE"[..]) {
+    if rec.get(..width!(ntfs_file_record, magic)) != Some(NTFS_RECORD_MAGIC) {
         return Err(E::RecordMagic);
     }
     // One update-sequence entry per 512 bytes, plus the USN itself.
-    let count = us(g16(rec, 6));
-    if us(g16(rec, 4)) != USA_OFFSET || count != rec.len() / 512 + 1 {
+    let count = us(get!(rec, ntfs_file_record, usa_count));
+    if us(get!(rec, ntfs_file_record, usa_offset)) != USA_OFFSET
+        || count != rec.len() / us(SECTOR) + 1
+    {
         return Err(E::RecordLayout);
     }
+    // Each sector's last two bytes hold the USN; the array (u16s) holds what
+    // belongs there.
     let usn = g16(rec, USA_OFFSET);
     for i in 1..count {
-        let at = i * 512 - 2;
+        let at = i * us(SECTOR) - 2;
         if g16(rec, at) != usn {
             return Err(E::FixupMismatch);
         }
@@ -379,9 +382,10 @@ fn read_record<'b, D: Disk>(
             dst.copy_from_slice(src);
         }
     }
-    let attrs = g16(rec, 0x14);
-    let used = g32(rec, 0x18);
-    if g32(rec, 0x1c) != rb
+    let attrs = get!(rec, ntfs_file_record, attrs_offset);
+    let used = get!(rec, ntfs_file_record, bytes_in_use);
+    // Attributes are 8-byte aligned.
+    if get!(rec, ntfs_file_record, bytes_allocated) != rb
         || used > rb
         || used % 8 != 0
         || attrs % 8 != 0
@@ -390,41 +394,49 @@ fn read_record<'b, D: Disk>(
     {
         return Err(E::RecordLayout);
     }
-    if g32(rec, 0x2c) != recno {
+    if get!(rec, ntfs_file_record, mft_record_number) != recno {
         return Err(E::RecordNumber);
     }
     Ok(rec)
 }
 
 /// Validate the attribute header at `pos` of a checked record: `None` at the
-/// end marker, else its type and length. Postcondition: the header (0x18
-/// bytes, 0x40 if non-resident), its name and any resident value lie inside
-/// the attribute, which lies inside `bytes_in_use`.
+/// end marker, else its type and length. Postcondition: the header
+/// (resident, or the longer non-resident one), its name (UTF-16) and any
+/// resident value lie inside the attribute, which lies inside
+/// `bytes_in_use`.
 fn attr_at(rec: &[u8], pos: usize) -> Result<Option<(u64, usize)>> {
-    let used = us(g32(rec, 0x18));
-    if pos + 4 > used {
+    let used = us(get!(rec, ntfs_file_record, bytes_in_use));
+    if pos + width!(ntfs_attr, r#type) > used {
         return Err(E::AttrBounds);
     }
-    let ty = g32(rec, pos);
-    if ty == ATTR_END {
+    let ty = get_at!(rec, pos, ntfs_attr, r#type);
+    if ty == NTFS_AT_END {
         return Ok(None);
     }
-    if pos + 0x18 > used {
+    // The header every attribute has room for.
+    if pos + size_of::<ntfs_attr_resident>() > used {
         return Err(E::AttrBounds);
     }
-    let len = us(g32(rec, pos + 4));
-    if len < 0x18 || len % 8 != 0 || len > used - pos {
+    let len = us(get_at!(rec, pos, ntfs_attr, length));
+    if len < size_of::<ntfs_attr_resident>() || len % 8 != 0 || len > used - pos {
         return Err(E::AttrBounds);
     }
-    let nonres = g8(rec, pos + 8);
-    let name_len = us(g8(rec, pos + 9));
-    if nonres > 1 || (name_len > 0 && us(g16(rec, pos + 0x0a)) + 2 * name_len > len) {
+    let nonres = get_at!(rec, pos, ntfs_attr, non_resident);
+    let name_len = us(get_at!(rec, pos, ntfs_attr, name_length));
+    if nonres > 1
+        || (name_len > 0 && us(get_at!(rec, pos, ntfs_attr, name_offset)) + 2 * name_len > len)
+    {
         return Err(E::AttrBounds);
     }
-    if nonres == 1 && len < 0x40 {
+    if nonres == 1 && len < size_of::<ntfs_attr_nonresident>() {
         return Err(E::AttrBounds);
     }
-    if nonres == 0 && us(g16(rec, pos + 0x14)) + us(g32(rec, pos + 0x10)) > len {
+    if nonres == 0
+        && us(get_at!(rec, pos, ntfs_attr_resident, value_offset))
+            + us(get_at!(rec, pos, ntfs_attr_resident, value_length))
+            > len
+    {
         return Err(E::AttrBounds);
     }
     Ok(Some((ty, len)))
@@ -442,9 +454,15 @@ struct Seg {
 /// Decode one non-resident runlist (the attribute at `pos`) into `out`,
 /// checking each run lies inside the volume. Returns the run count.
 fn decode_runs(vol: &Volume, rec: &[u8], pos: usize, out: &mut [Run]) -> Result<usize> {
-    let len = us(g32(rec, pos + 4));
-    let mp = us(g16(rec, pos + 0x20));
-    if mp < 0x40 || mp >= len {
+    let len = us(get_at!(rec, pos, ntfs_attr, length));
+    let mp = us(get_at!(
+        rec,
+        pos,
+        ntfs_attr_nonresident,
+        mapping_pairs_offset
+    ));
+    // Inside the attribute, after its header.
+    if mp < size_of::<ntfs_attr_nonresident>() || mp >= len {
         return Err(E::AttrBounds);
     }
     let src = rec.get(pos + mp..pos + len).ok_or(E::AttrBounds)?;
@@ -460,28 +478,30 @@ fn decode_runs(vol: &Volume, rec: &[u8], pos: usize, out: &mut [Run]) -> Result<
 /// Append the `$DATA` segment at `pos` to `out`. Invariant kept: `out[..n]`
 /// maps VCNs `0..vcn` with no gap, every run inside the volume.
 fn segment(vol: &Volume, rec: &[u8], pos: usize, st: &mut Seg, out: &mut [Run]) -> Result<()> {
-    if g8(rec, pos + 8) == 0 {
+    if get_at!(rec, pos, ntfs_attr, non_resident) == 0 {
         return Err(E::Resident);
     }
     // Sparse first: ntfs-3g gives sparse files a compression unit too.
-    let flags = g16(rec, pos + 0x0c);
-    if flags & 0x8000 != 0 {
+    let flags = get_at!(rec, pos, ntfs_attr, flags);
+    if flags & NTFS_ATTR_IS_SPARSE != 0 {
         return Err(E::Sparse);
     }
-    if flags & 0x4000 != 0 {
+    if flags & NTFS_ATTR_IS_ENCRYPTED != 0 {
         return Err(E::Encrypted);
     }
-    if flags & 0x00ff != 0 || g8(rec, pos + 0x22) != 0 {
+    if flags & NTFS_ATTR_COMPRESSION_MASK != 0
+        || get_at!(rec, pos, ntfs_attr_nonresident, compression_unit) != 0
+    {
         return Err(E::Compressed);
     }
-    let lowest = g64(rec, pos + 0x10);
+    let lowest = get_at!(rec, pos, ntfs_attr_nonresident, lowest_vcn);
     if lowest != st.vcn {
         return Err(E::Gap);
     }
     if lowest == 0 {
-        st.alloc = g64(rec, pos + 0x28);
-        st.size = g64(rec, pos + 0x30);
-        st.init = g64(rec, pos + 0x38);
+        st.alloc = get_at!(rec, pos, ntfs_attr_nonresident, allocated_size);
+        st.size = get_at!(rec, pos, ntfs_attr_nonresident, data_size);
+        st.init = get_at!(rec, pos, ntfs_attr_nonresident, initialized_size);
     }
     let dst = out.get_mut(st.n..).unwrap_or(&mut []);
     let k = decode_runs(vol, rec, pos, dst)?;
@@ -492,7 +512,7 @@ fn segment(vol: &Volume, rec: &[u8], pos: usize, st: &mut Seg, out: &mut [Run]) 
         sum = sum.checked_add(r.count).ok_or(E::SegmentVcn)?;
     }
     let next = lowest.checked_add(sum).ok_or(E::SegmentVcn)?;
-    if k == 0 || g64(rec, pos + 0x18) != next - 1 {
+    if k == 0 || get_at!(rec, pos, ntfs_attr_nonresident, highest_vcn) != next - 1 {
         return Err(E::SegmentVcn);
     }
     st.n += k;
@@ -510,9 +530,9 @@ fn load_list<D: Disk>(
     alist: &mut [u8; MAX_ALIST],
     scratch: &mut [Run],
 ) -> Result<usize> {
-    if g8(rec, pos + 8) == 0 {
-        let size = us(g32(rec, pos + 0x10));
-        let voff = pos + us(g16(rec, pos + 0x14));
+    if get_at!(rec, pos, ntfs_attr, non_resident) == 0 {
+        let size = us(get_at!(rec, pos, ntfs_attr_resident, value_length));
+        let voff = pos + us(get_at!(rec, pos, ntfs_attr_resident, value_offset));
         let src = rec.get(voff..voff + size).ok_or(E::AttrBounds)?;
         alist
             .get_mut(..size)
@@ -520,14 +540,16 @@ fn load_list<D: Disk>(
             .copy_from_slice(src);
         return Ok(size);
     }
-    if g16(rec, pos + 0x0c) != 0 || g64(rec, pos + 0x10) != 0 {
+    if get_at!(rec, pos, ntfs_attr, flags) != 0
+        || get_at!(rec, pos, ntfs_attr_nonresident, lowest_vcn) != 0
+    {
         return Err(E::AttrList);
     }
-    let size = g64(rec, pos + 0x30);
+    let size = get_at!(rec, pos, ntfs_attr_nonresident, data_size);
     if size > MAX_ALIST as u64 {
         return Err(E::AttrListSize);
     }
-    if g64(rec, pos + 0x38) != size {
+    if get_at!(rec, pos, ntfs_attr_nonresident, initialized_size) != size {
         return Err(E::AttrList);
     }
     let k = decode_runs(vol, rec, pos, scratch)?;
@@ -550,9 +572,12 @@ fn load_list<D: Disk>(
 
 /// Offset of the unnamed `$DATA` attribute with this instance, if present.
 fn find_segment(rec: &[u8], instance: u64) -> Result<Option<usize>> {
-    let mut pos = us(g16(rec, 0x14));
+    let mut pos = us(get!(rec, ntfs_file_record, attrs_offset));
     while let Some((ty, len)) = attr_at(rec, pos)? {
-        if ty == ATTR_DATA && g8(rec, pos + 9) == 0 && g16(rec, pos + 0x0e) == instance {
+        if ty == ATTR_DATA
+            && get_at!(rec, pos, ntfs_attr, name_length) == 0
+            && get_at!(rec, pos, ntfs_attr, instance) == instance
+        {
             return Ok(Some(pos));
         }
         pos += len;
@@ -576,23 +601,23 @@ fn walk<D: Disk>(
 ) -> Result<FileMap> {
     let mut buf = [0u8; MAX_RECORD];
     let rec = read_record(disk, vol, map, limit, recno, &mut buf)?;
-    let flags = g16(rec, 0x16);
-    if flags & 1 == 0 {
+    let flags = get!(rec, ntfs_file_record, flags);
+    if flags & NTFS_RECORD_IN_USE == 0 {
         return Err(E::NotInUse);
     }
-    if flags & 2 != 0 {
+    if flags & NTFS_RECORD_IS_DIRECTORY != 0 {
         return Err(E::Directory);
     }
-    let own_seq = g16(rec, 0x10);
+    let own_seq = get!(rec, ntfs_file_record, sequence_number);
     if seq != 0 && own_seq != seq {
         return Err(E::Sequence);
     }
-    if g64(rec, 0x20) != 0 {
+    if get!(rec, ntfs_file_record, base_mft_record) != 0 {
         return Err(E::NotBase);
     }
     // One pass over the base record: the attribute list, and unnamed $DATA.
     let (mut list, mut data, mut ndata) = (None, 0usize, 0u32);
-    let mut pos = us(g16(rec, 0x14));
+    let mut pos = us(get!(rec, ntfs_file_record, attrs_offset));
     while let Some((ty, len)) = attr_at(rec, pos)? {
         if ty == ATTR_LIST {
             if list.is_some() {
@@ -600,7 +625,7 @@ fn walk<D: Disk>(
             }
             list = Some(pos);
         }
-        if ty == ATTR_DATA && g8(rec, pos + 9) == 0 {
+        if ty == ATTR_DATA && get_at!(rec, pos, ntfs_attr, name_length) == 0 {
             if ndata == 0 {
                 data = pos;
             }
@@ -630,24 +655,28 @@ fn walk<D: Disk>(
                 return Err(E::MftAttrList);
             }
             let size = load_list(disk, vol, rec, lp, alist, out)?;
-            let base_ref = recno | own_seq << 48;
+            let base_ref = recno | own_seq << NTFS_MFT_REF_SEQ_SHIFT;
             // Entries are sorted by (type, name, lowest VCN); the Gap check
             // enforces that order for unnamed $DATA, one segment at a time.
+            let entry = size_of::<ntfs_attr_list_entry>();
             let (mut p, mut ext) = (0usize, 0u32);
             while p < size {
-                if p + 0x1a > size {
+                if p + entry > size {
                     return Err(E::AttrList);
                 }
-                let elen = us(g16(alist, p + 4));
-                if elen < 0x1a || elen > size - p {
+                let elen = us(get_at!(alist, p, ntfs_attr_list_entry, length));
+                if elen < entry || elen > size - p {
                     return Err(E::AttrList);
                 }
-                if g32(alist, p) == ATTR_DATA && g8(alist, p + 6) == 0 {
-                    if g64(alist, p + 8) != st.vcn {
+                if get_at!(alist, p, ntfs_attr_list_entry, r#type) == ATTR_DATA
+                    && get_at!(alist, p, ntfs_attr_list_entry, name_length) == 0
+                {
+                    if get_at!(alist, p, ntfs_attr_list_entry, lowest_vcn) != st.vcn {
                         return Err(E::Gap);
                     }
-                    let r = g64(alist, p + 0x10) & 0xffff_ffff_ffff;
-                    let rseq = g64(alist, p + 0x10) >> 48;
+                    let mref = get_at!(alist, p, ntfs_attr_list_entry, mft_reference);
+                    let r = mref & NTFS_MFT_REF_RECORD_MASK;
+                    let rseq = mref >> NTFS_MFT_REF_SEQ_SHIFT;
                     if r != recno {
                         ext += 1;
                         if ext > MAX_EXTENSIONS {
@@ -655,16 +684,18 @@ fn walk<D: Disk>(
                         }
                     }
                     let rec = read_record(disk, vol, map, limit, r, &mut buf)?;
-                    if g16(rec, 0x16) & 1 == 0 {
+                    if get!(rec, ntfs_file_record, flags) & NTFS_RECORD_IN_USE == 0 {
                         return Err(E::NotInUse);
                     }
-                    if g16(rec, 0x10) != rseq {
+                    if get!(rec, ntfs_file_record, sequence_number) != rseq {
                         return Err(E::Sequence);
                     }
-                    if g64(rec, 0x20) != if r == recno { 0 } else { base_ref } {
+                    if get!(rec, ntfs_file_record, base_mft_record)
+                        != if r == recno { 0 } else { base_ref }
+                    {
                         return Err(E::ExtensionBase);
                     }
-                    let at = find_segment(rec, g16(alist, p + 0x18))?;
+                    let at = find_segment(rec, get_at!(alist, p, ntfs_attr_list_entry, instance))?;
                     segment(vol, rec, at.ok_or(E::MissingSegment)?, &mut st, out)?;
                 }
                 p += elen;
@@ -731,7 +762,7 @@ pub fn file<D: Disk>(
     alist: &mut [u8; MAX_ALIST],
     runs: &mut [Run],
 ) -> Result<FileMap> {
-    if recno < FIRST_USER_RECORD || recno > u64::from(u32::MAX) || seq == 0 {
+    if !(FIRST_USER_RECORD..=MAX_RECORD_NUMBER).contains(&recno) || seq == 0 {
         return Err(E::BadIdentity);
     }
     let seq = u64::from(seq);
@@ -770,20 +801,30 @@ pub fn extents(vol: &Volume, runs: &[Run], out: &mut [Extent]) -> Result<usize> 
 /// Step 7: `$Volume`'s `$VOLUME_INFORMATION` flags ([`VOLUME_DIRTY`], …).
 pub fn volume_flags<D: Disk>(disk: &mut D, mft: &Mft<'_>) -> Result<u16> {
     let mut buf = [0u8; MAX_RECORD];
-    let rec = read_record(disk, &mft.vol, mft.runs, mft.bytes, 3, &mut buf)?;
-    if g16(rec, 0x16) & 1 == 0 {
+    let rec = read_record(
+        disk,
+        &mft.vol,
+        mft.runs,
+        mft.bytes,
+        NTFS_MFT_RECORD_VOLUME,
+        &mut buf,
+    )?;
+    if get!(rec, ntfs_file_record, flags) & NTFS_RECORD_IN_USE == 0 {
         return Err(E::NotInUse);
     }
-    if g64(rec, 0x20) != 0 {
+    if get!(rec, ntfs_file_record, base_mft_record) != 0 {
         return Err(E::NotBase);
     }
-    let mut pos = us(g16(rec, 0x14));
+    let mut pos = us(get!(rec, ntfs_file_record, attrs_offset));
     while let Some((ty, len)) = attr_at(rec, pos)? {
-        if ty == ATTR_VOLUME_INFO && g8(rec, pos + 8) == 0 {
-            if g32(rec, pos + 0x10) < 12 {
+        if ty == NTFS_AT_VOLUME_INFORMATION && get_at!(rec, pos, ntfs_attr, non_resident) == 0 {
+            if get_at!(rec, pos, ntfs_attr_resident, value_length)
+                < size_of::<ntfs_volume_information>() as u64
+            {
                 return Err(E::NoVolumeInfo);
             }
-            let flags = g16(rec, pos + us(g16(rec, pos + 0x14)) + 0x0a);
+            let value = pos + us(get_at!(rec, pos, ntfs_attr_resident, value_offset));
+            let flags = get_at!(rec, value, ntfs_volume_information, flags);
             return Ok(u16::try_from(flags).unwrap_or(u16::MAX));
         }
         pos += len;
@@ -934,44 +975,50 @@ pub fn check_payload<D: Disk>(img: &mut D, sectors: u64, lbs: u64) -> Result<()>
     let k = lbs / 512;
     if sectors > k {
         img.read(k, &mut b).map_err(|_| E::Io)?;
-        if b.get(..8) == Some(&b"EFI PART"[..]) {
+        if b.get(..width!(gpt_header, signature)) == Some(GPT_SIGNATURE) {
             return payload_gpt(img, sectors, k, &mut b);
         }
     }
-    if sectors > 2 {
-        img.read(2, &mut b).map_err(|_| E::Io)?;
-        if g16(&b, 56) == EXT4_MAGIC {
+    if sectors > EXT4_SB_SECTOR {
+        img.read(EXT4_SB_SECTOR, &mut b).map_err(|_| E::Io)?;
+        if get!(&b, ext4_super_block, s_magic) == EXT4_SUPER_MAGIC {
             return payload_ext4(img, 0, sectors, &mut b);
         }
     }
     if sectors > ISO_PVD {
         img.read(ISO_PVD, &mut b).map_err(|_| E::Io)?;
-        if b.get(..6) == Some(&b"\x01CD001"[..]) {
+        let id = off!(iso_primary_volume_descriptor, id);
+        if get!(&b, iso_primary_volume_descriptor, r#type) == ISO_VD_PRIMARY
+            && b.get(id..id + width!(iso_primary_volume_descriptor, id)) == Some(ISO_STANDARD_ID)
+        {
             return payload_iso(img, sectors, &mut b);
         }
     }
     Err(E::PayloadUnknown)
 }
 
-const EXT4_MAGIC: u64 = 0xef53;
-/// Sector of the ISO 9660 primary volume descriptor (byte 32768).
-const ISO_PVD: u64 = 64;
+/// Sector of the ISO 9660 primary volume descriptor.
+const ISO_PVD: u64 = ISO_PVD_OFFSET / SECTOR;
+/// The ext4 superblock's first sector.
+const EXT4_SB_SECTOR: u64 = EXT4_SUPERBLOCK_OFFSET / SECTOR;
 
 /// CRC-32 (IEEE) of the first `n` bytes of the header in `b`, with its own
-/// CRC field (bytes 16..20) taken as zero. `n` ≤ 512.
+/// CRC field taken as zero. `n` ≤ 512.
 fn header_crc(b: &[u8; 512], n: usize) -> u64 {
-    let mut c = crate::gpt::crc32_update(0, b.get(..16).unwrap_or(&[]));
+    let at = off!(gpt_header, header_crc32);
+    let after = at + width!(gpt_header, header_crc32);
+    let mut c = crate::gpt::crc32_update(0, b.get(..at).unwrap_or(&[]));
     c = crate::gpt::crc32_update(c, &[0; 4]);
-    u64::from(crate::gpt::crc32_update(c, b.get(20..n).unwrap_or(&[])))
+    u64::from(crate::gpt::crc32_update(c, b.get(after..n).unwrap_or(&[])))
 }
 
-/// CRC-32 of a GPT entry array of `count` 128-byte entries at sector `at`.
+/// CRC-32 of a GPT entry array of `count` entries at sector `at`.
 fn array_crc<D: Disk>(img: &mut D, at: u64, count: u64, b: &mut [u8; 512]) -> Result<u64> {
-    let (mut c, mut left) = (0u32, count * 128);
+    let (mut c, mut left) = (0u32, count * size_of::<gpt_entry>() as u64);
     let mut s = at;
     while left > 0 {
         img.read(s, b).map_err(|_| E::Io)?;
-        let n = left.min(512);
+        let n = left.min(SECTOR);
         c = crate::gpt::crc32_update(c, b.get(..us(n)).unwrap_or(&[]));
         left -= n;
         s += 1;
@@ -983,22 +1030,35 @@ fn array_crc<D: Disk>(img: &mut D, at: u64, count: u64, b: &mut [u8; 512]) -> Re
 /// LBA is checked against `lbas` (the image in LBAs) before it is scaled.
 fn payload_gpt<D: Disk>(img: &mut D, sectors: u64, k: u64, b: &mut [u8; 512]) -> Result<()> {
     let lbas = sectors / k;
-    let hsize = g32(b, 12);
-    if !(92..=512).contains(&hsize) || g64(b, 24) != 1 {
+    let ent = size_of::<gpt_entry>() as u64;
+    let per_sector = SECTOR / ent; // entries
+    let hsize = get!(b, gpt_header, header_size);
+    if !(size_of::<gpt_header>() as u64..=GPT_MAX_HEADER_SIZE).contains(&hsize)
+        || get!(b, gpt_header, my_lba) != 1
+    {
         return Err(E::PayloadGpt);
     }
-    if header_crc(b, us(hsize)) != g32(b, 16) {
+    if header_crc(b, us(hsize)) != get!(b, gpt_header, header_crc32) {
         return Err(E::PayloadGptCrc);
     }
-    let (alt, first_usable, last_usable) = (g64(b, 32), g64(b, 40), g64(b, 48));
+    let alt = get!(b, gpt_header, alternate_lba);
+    let first_usable = get!(b, gpt_header, first_usable_lba);
+    let last_usable = get!(b, gpt_header, last_usable_lba);
+    let g = off!(gpt_header, disk_guid);
     let mut guid = [0u8; 16];
-    guid.copy_from_slice(b.get(56..72).unwrap_or(&[0; 16]));
-    let (lba, count, esize, acrc) = (g64(b, 72), g32(b, 80), g32(b, 84), g32(b, 88));
-    if esize != 128 || count == 0 || count > 1024 {
+    guid.copy_from_slice(
+        b.get(g..g + width!(gpt_header, disk_guid))
+            .unwrap_or(&[0; 16]),
+    );
+    let lba = get!(b, gpt_header, partition_entry_lba);
+    let count = get!(b, gpt_header, number_of_partition_entries);
+    let esize = get!(b, gpt_header, size_of_partition_entry);
+    let acrc = get!(b, gpt_header, partition_entry_array_crc32);
+    if esize != ent || count == 0 || count > GPT_MAX_ENTRIES {
         return Err(E::PayloadGpt);
     }
     // The array's size in LBAs.
-    let asec = (count * 128).div_ceil(k * 512);
+    let asec = (count * ent).div_ceil(k * SECTOR);
     // The array lies in [lba, first_usable), partitions in
     // [first_usable, last_usable], the backup array and header above that.
     if alt >= lbas
@@ -1014,21 +1074,21 @@ fn payload_gpt<D: Disk>(img: &mut D, sectors: u64, k: u64, b: &mut [u8; 512]) ->
         return Err(E::PayloadGptCrc);
     }
     img.read(alt * k, b).map_err(|_| E::Io)?;
-    if b.get(..8) != Some(&b"EFI PART"[..])
-        || g32(b, 12) != hsize
-        || header_crc(b, us(hsize)) != g32(b, 16)
-        || g64(b, 24) != alt
-        || g64(b, 32) != 1
-        || g64(b, 40) != first_usable
-        || g64(b, 48) != last_usable
-        || b.get(56..72) != Some(&guid[..])
-        || g32(b, 80) != count
-        || g32(b, 84) != esize
-        || g32(b, 88) != acrc
+    if b.get(..width!(gpt_header, signature)) != Some(GPT_SIGNATURE)
+        || get!(b, gpt_header, header_size) != hsize
+        || header_crc(b, us(hsize)) != get!(b, gpt_header, header_crc32)
+        || get!(b, gpt_header, my_lba) != alt
+        || get!(b, gpt_header, alternate_lba) != 1
+        || get!(b, gpt_header, first_usable_lba) != first_usable
+        || get!(b, gpt_header, last_usable_lba) != last_usable
+        || b.get(g..g + guid.len()) != Some(&guid[..])
+        || get!(b, gpt_header, number_of_partition_entries) != count
+        || get!(b, gpt_header, size_of_partition_entry) != esize
+        || get!(b, gpt_header, partition_entry_array_crc32) != acrc
     {
         return Err(E::PayloadGptBackup);
     }
-    let blba = g64(b, 72);
+    let blba = get!(b, gpt_header, partition_entry_lba);
     if blba <= last_usable || blba >= alt || alt - blba < asec {
         return Err(E::PayloadGptBackup);
     }
@@ -1037,17 +1097,19 @@ fn payload_gpt<D: Disk>(img: &mut D, sectors: u64, k: u64, b: &mut [u8; 512]) ->
     }
     let (mut verified, mut stale) = (0u32, true);
     for i in 0..count {
-        if i % 4 == 0 || stale {
-            img.read(lba * k + i / 4, b).map_err(|_| E::Io)?;
+        if i % per_sector == 0 || stale {
+            img.read(lba * k + i / per_sector, b).map_err(|_| E::Io)?;
             stale = false;
         }
-        let e = us(i % 4) * 128;
-        let ty = b.get(e..e + 16).unwrap_or(&[]);
+        let e = us((i % per_sector) * ent);
+        let t = e + off!(gpt_entry, partition_type_guid);
+        let ty = b.get(t..t + GPT_ESP_TYPE.len()).unwrap_or(&[]);
         if ty.iter().all(|&x| x == 0) {
             continue;
         }
-        let esp = ty == ESP_TYPE;
-        let (first, last) = (g64(b, e + 32), g64(b, e + 40));
+        let esp = ty == GPT_ESP_TYPE;
+        let first = get_at!(b, e, gpt_entry, starting_lba);
+        let last = get_at!(b, e, gpt_entry, ending_lba);
         if first < first_usable || last > last_usable || first > last {
             return Err(E::PayloadGpt);
         }
@@ -1060,9 +1122,9 @@ fn payload_gpt<D: Disk>(img: &mut D, sectors: u64, k: u64, b: &mut [u8; 512]) ->
                 return Err(E::PayloadNotFat);
             }
             verified += 1;
-        } else if len > 2 {
-            img.read(first + 2, b).map_err(|_| E::Io)?;
-            if g16(b, 56) == EXT4_MAGIC {
+        } else if len > EXT4_SB_SECTOR {
+            img.read(first + EXT4_SB_SECTOR, b).map_err(|_| E::Io)?;
+            if get!(b, ext4_super_block, s_magic) == EXT4_SUPER_MAGIC {
                 payload_ext4(img, first, len, b)?;
                 verified += 1;
             }
@@ -1076,65 +1138,86 @@ fn payload_gpt<D: Disk>(img: &mut D, sectors: u64, k: u64, b: &mut [u8; 512]) ->
 
 /// A FAT boot sector for a partition of `len` sectors: signature, a FAT
 /// type string, sane sector and cluster sizes, and no more sectors than the
-/// partition holds.
+/// partition holds. (The BPB, shared by FAT12/16/32, is read through
+/// `fat16_boot_sector`.)
 fn is_fat(b: &[u8; 512], len: u64) -> bool {
-    let name = b.get(0x36..0x39) == Some(&b"FAT"[..]) || b.get(0x52..0x57) == Some(&b"FAT32"[..]);
-    let bps = g16(b, 11);
-    let spc = g8(b, 13);
-    let mut total = g16(b, 0x13);
+    let (t16, t32) = (
+        off!(fat16_boot_sector, fs_type),
+        off!(fat32_boot_sector, fs_type),
+    );
+    let name = b.get(t16..t16 + FAT_FS_TYPE.len()) == Some(FAT_FS_TYPE)
+        || b.get(t32..t32 + FAT32_FS_TYPE.len()) == Some(FAT32_FS_TYPE);
+    let bps = get!(b, fat16_boot_sector, bytes_per_sector);
+    let spc = get!(b, fat16_boot_sector, sectors_per_cluster);
+    let mut total = get!(b, fat16_boot_sector, total_sectors_16);
     if total == 0 {
-        total = g32(b, 0x20);
+        total = get!(b, fat16_boot_sector, total_sectors_32);
     }
-    g16(b, 510) == 0xaa55
+    get!(b, fat16_boot_sector, signature) == BOOT_SIGNATURE
         && name
         && matches!(bps, 512 | 1024 | 2048 | 4096)
         && spc.is_power_of_two()
         && total != 0
-        && total * (bps / 512) <= len
+        && total * (bps / SECTOR) <= len
 }
 
 /// ext4 at sector `base` of the image, `len` sectors long; `b` holds sector
 /// `base + 2` (the first half of the superblock), whose magic matched.
 fn payload_ext4<D: Disk>(img: &mut D, base: u64, len: u64, b: &mut [u8; 512]) -> Result<()> {
-    let log = g32(b, 0x18);
-    let first = g32(b, 0x14);
-    let per_group = g32(b, 0x20);
-    let (compat, incompat) = if g32(b, 0x4c) >= 1 {
-        (g32(b, 0x5c), g32(b, 0x60))
+    let log = get!(b, ext4_super_block, s_log_block_size);
+    let first = get!(b, ext4_super_block, s_first_data_block);
+    let per_group = get!(b, ext4_super_block, s_blocks_per_group);
+    let dynamic = get!(b, ext4_super_block, s_rev_level) >= EXT4_DYNAMIC_REV;
+    let (compat, incompat) = if dynamic {
+        (
+            get!(b, ext4_super_block, s_feature_compat),
+            get!(b, ext4_super_block, s_feature_incompat),
+        )
     } else {
         (0, 0)
     };
-    let wide = incompat & 0x80 != 0; // INCOMPAT_64BIT
-    let blocks = |b: &[u8; 512]| g32(b, 4) | if wide { g32(b, 0x150) << 32 } else { 0 };
+    let wide = incompat & EXT4_FEATURE_INCOMPAT_64BIT != 0;
+    let blocks = |b: &[u8; 512]| {
+        get!(b, ext4_super_block, s_blocks_count_lo)
+            | if wide {
+                get!(b, ext4_super_block, s_blocks_count_hi) << 32
+            } else {
+                0
+            }
+    };
     let count = blocks(b);
     // The primary names group 0: a backup copy where the primary belongs
-    // (extents misordered) is refused.
-    // The superblock alone fills sectors 2-3: `len` > 3 bounds the read of
-    // sector 3 below.
-    if len < 4
-        || log > 6
+    // (extents misordered) is refused. The superblock alone fills sectors
+    // 2-3: `len` > 3 bounds the read of sector 3 below.
+    if len < EXT4_SB_SECTOR + (size_of::<ext4_super_block>() as u64) / SECTOR
+        || log > EXT4_MAX_LOG_BLOCK_SIZE
         || per_group == 0
         || first > 1
         || (log > 0 && first != 0)
-        || g16(b, 0x5a) != 0
+        || get!(b, ext4_super_block, s_block_group_nr) != 0
     {
         return Err(E::PayloadExt4);
     }
-    let per_block = 2u64 << log; // sectors
+    let per_block = 2u64 << log; // a block is 1 KiB << log: sectors
     if count == 0 || count > len / per_block {
         return Err(E::PayloadExt4);
     }
     // A single block group (blocks first..count all in group 0) has no
     // backup superblock: the root directory is checked instead.
     if count - first <= per_group {
-        return payload_ext4_root(img, base, first, count, log, wide, g32(b, 0x4c) >= 1, b);
+        return payload_ext4_root(img, base, first, count, log, wide, dynamic, b);
     }
+    let u = off!(ext4_super_block, s_uuid);
     let mut uuid = [0u8; 16];
-    uuid.copy_from_slice(b.get(0x68..0x78).unwrap_or(&[0; 16]));
-    // COMPAT_SPARSE_SUPER2: backups only where s_backup_bgs says.
-    let group = if compat & 0x200 != 0 {
-        img.read(base + 3, b).map_err(|_| E::Io)?;
-        g32(b, 0x24c - 512)
+    uuid.copy_from_slice(
+        b.get(u..u + width!(ext4_super_block, s_uuid))
+            .unwrap_or(&[0; 16]),
+    );
+    // COMPAT_SPARSE_SUPER2: backups only where s_backup_bgs[0] says; it is
+    // in the superblock's second sector.
+    let group = if compat & EXT4_FEATURE_COMPAT_SPARSE_SUPER2 != 0 {
+        img.read(base + EXT4_SB_SECTOR + 1, b).map_err(|_| E::Io)?;
+        get(b, off!(ext4_super_block, s_backup_bgs) - us(SECTOR), 4)
     } else {
         1
     };
@@ -1142,11 +1225,13 @@ fn payload_ext4<D: Disk>(img: &mut D, base: u64, len: u64, b: &mut [u8; 512]) ->
     if group == 0 || block >= count {
         return Err(E::PayloadExt4);
     }
+    // A backup sits at the start of its group's first block.
     img.read(base + block * per_block, b).map_err(|_| E::Io)?;
-    if g16(b, 56) != EXT4_MAGIC
-        || b.get(0x68..0x78) != Some(&uuid[..])
+    if get!(b, ext4_super_block, s_magic) != EXT4_SUPER_MAGIC
+        || b.get(u..u + uuid.len()) != Some(&uuid[..])
         || blocks(b) != count
-        || g16(b, 0x5a) != group & 0xffff
+        || get!(b, ext4_super_block, s_block_group_nr) != group & 0xffff
+    // a u16 field
     {
         return Err(E::PayloadExt4);
     }
@@ -1155,9 +1240,9 @@ fn payload_ext4<D: Disk>(img: &mut D, base: u64, len: u64, b: &mut [u8; 512]) ->
 
 /// A single-group ext4 at `base`: the root directory (inode 2), found
 /// through group 0's descriptor and the inode table, must be a directory
-/// whose `i_block` starts with an extent header (magic `0xF30A`). `b` holds
-/// the superblock's first sector; every read is below `count` blocks, which
-/// the caller bounded by the partition.
+/// whose `i_block` starts with an extent header. `b` holds the superblock's
+/// first sector; every read is below `count` blocks, which the caller
+/// bounded by the partition.
 #[allow(clippy::too_many_arguments)]
 fn payload_ext4_root<D: Disk>(
     img: &mut D,
@@ -1170,15 +1255,23 @@ fn payload_ext4_root<D: Disk>(
     b: &mut [u8; 512],
 ) -> Result<()> {
     let (bs, per_block) = (1024u64 << log, 2u64 << log);
-    let isz = if dynamic { g16(b, 0x58) } else { 128 };
-    let dsz = if wide { g16(b, 0xfe) } else { 32 };
+    let isz = if dynamic {
+        get!(b, ext4_super_block, s_inode_size)
+    } else {
+        EXT4_GOOD_OLD_INODE_SIZE
+    };
+    let dsz = if wide {
+        get!(b, ext4_super_block, s_desc_size)
+    } else {
+        EXT4_MIN_DESC_SIZE
+    };
     if !isz.is_power_of_two()
-        || isz < 128
+        || isz < EXT4_GOOD_OLD_INODE_SIZE
         || isz > bs
         || !dsz.is_power_of_two()
-        || !(32..=1024).contains(&dsz)
-        || (wide && dsz < 64)
-        || g32(b, 0x28) < 2
+        || !(EXT4_MIN_DESC_SIZE..=EXT4_MAX_DESC_SIZE).contains(&dsz)
+        || (wide && dsz < EXT4_MIN_DESC_SIZE_64BIT)
+        || get!(b, ext4_super_block, s_inodes_per_group) < EXT4_ROOT_INO
     {
         return Err(E::PayloadExt4);
     }
@@ -1188,18 +1281,30 @@ fn payload_ext4_root<D: Disk>(
         return Err(E::PayloadExt4);
     }
     img.read(base + gdt * per_block, b).map_err(|_| E::Io)?;
-    let table = g32(b, 8) | if wide { g32(b, 0x28) << 32 } else { 0 };
-    // Inode 2 is the second of group 0's table: isz bytes in.
+    let table = get!(b, ext4_group_desc, bg_inode_table_lo)
+        | if wide {
+            get!(b, ext4_group_desc, bg_inode_table_hi) << 32
+        } else {
+            0
+        };
     if table == 0 || table >= count {
         return Err(E::PayloadExt4);
     }
-    let sector = table * per_block + isz / 512;
+    // Inode 2 is the second of group 0's table: isz bytes in.
+    let sector = table * per_block + isz * (EXT4_ROOT_INO - 1) / SECTOR;
     if sector >= count * per_block {
         return Err(E::PayloadExt4);
     }
     img.read(base + sector, b).map_err(|_| E::Io)?;
-    let o = us(isz % 512); // 0, 128 or 256: the fields read lie in `b`
-    if g16(b, o) & 0xf000 != 0x4000 || g16(b, o + 0x28) != 0xf30a {
+    let o = us(isz * (EXT4_ROOT_INO - 1) % SECTOR); // 0, 128 or 256: in `b`
+    if get_at!(b, o, ext4_inode, i_mode) & EXT4_S_IFMT != EXT4_S_IFDIR
+        || get_at!(
+            b,
+            o + off!(ext4_inode, i_block),
+            ext4_extent_header,
+            eh_magic
+        ) != EXT4_EXT_MAGIC
+    {
         return Err(E::PayloadExt4);
     }
     Ok(())
@@ -1207,25 +1312,52 @@ fn payload_ext4_root<D: Disk>(
 
 /// `b` holds the primary volume descriptor (type 1, `CD001`).
 fn payload_iso<D: Disk>(img: &mut D, sectors: u64, b: &mut [u8; 512]) -> Result<()> {
+    // A big-endian integer of n bytes at `at` (the `_be` halves).
     let be = |b: &[u8; 512], at: usize, n: usize| {
         b.get(at..at + n)
             .map_or(0, |s| s.iter().fold(0u64, |a, &x| a << 8 | u64::from(x)))
     };
-    let (size, bs) = (g32(b, 80), g16(b, 128));
-    if g8(b, 6) != 1 || be(b, 84, 4) != size || be(b, 130, 2) != bs {
-        return Err(E::PayloadIso);
-    }
-    if !matches!(bs, 512 | 1024 | 2048) || size * (bs / 512) != sectors {
-        return Err(E::PayloadIso);
-    }
-    // The root directory record (34 bytes at 156).
-    let root = g32(b, 158);
-    if g8(b, 156) != 34 || be(b, 162, 4) != root || g8(b, 181) & 2 == 0 || root == 0 || root >= size
+    let rd = off!(iso_primary_volume_descriptor, root_directory_record);
+    let size = get!(b, iso_primary_volume_descriptor, volume_space_size_le);
+    let bs = get!(b, iso_primary_volume_descriptor, logical_block_size_le);
+    let dir = size_of::<iso_directory_record>() as u64;
+    if get!(b, iso_primary_volume_descriptor, version) != ISO_VD_VERSION
+        || be(
+            b,
+            off!(iso_primary_volume_descriptor, volume_space_size_be),
+            width!(iso_primary_volume_descriptor, volume_space_size_be),
+        ) != size
+        || be(
+            b,
+            off!(iso_primary_volume_descriptor, logical_block_size_be),
+            width!(iso_primary_volume_descriptor, logical_block_size_be),
+        ) != bs
     {
         return Err(E::PayloadIso);
     }
-    img.read(root * (bs / 512), b).map_err(|_| E::Io)?;
-    if g8(b, 0) < 34 || g32(b, 2) != root || g8(b, 25) & 2 == 0 || g8(b, 32) != 1 || g8(b, 33) != 0
+    if !matches!(bs, 512 | 1024 | 2048) || size * (bs / SECTOR) != sectors {
+        return Err(E::PayloadIso);
+    }
+    let root = get_at!(b, rd, iso_directory_record, extent_le);
+    if get_at!(b, rd, iso_directory_record, length) != dir
+        || be(
+            b,
+            rd + off!(iso_directory_record, extent_be),
+            width!(iso_directory_record, extent_be),
+        ) != root
+        || get_at!(b, rd, iso_directory_record, file_flags) & ISO_FLAG_DIRECTORY == 0
+        || root == 0
+        || root >= size
+    {
+        return Err(E::PayloadIso);
+    }
+    img.read(root * (bs / SECTOR), b).map_err(|_| E::Io)?;
+    // Its first record is ".": itself, a directory, named by one 0 byte.
+    if get!(b, iso_directory_record, length) < dir
+        || get!(b, iso_directory_record, extent_le) != root
+        || get!(b, iso_directory_record, file_flags) & ISO_FLAG_DIRECTORY == 0
+        || get!(b, iso_directory_record, name_length) != 1
+        || get!(b, iso_directory_record, name) != 0
     {
         return Err(E::PayloadIso);
     }

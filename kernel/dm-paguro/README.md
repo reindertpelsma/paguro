@@ -114,6 +114,17 @@ Invariants, function by function:
   here; the harness proves it for every swap that moves a sector the check
   reads. Every read is bounded by the image length first (CBMC).
 
+On-disk structures (NTFS boot sector, FILE record, attribute headers,
+`$ATTRIBUTE_LIST` entries, `$VOLUME_INFORMATION`, GPT header and entry, FAT
+boot sectors, ext4 superblock/group descriptor/inode/extent header, ISO 9660
+PVD and directory record) are described once in `pg_layout.h` as packed
+layout-only structs: fields are read as `GET(b, struct T, field)`, which
+takes `offsetof` and the field's width to the bounds-checked readers; no
+buffer is ever cast to a struct, and every offset and size is pinned by a
+`_Static_assert`. The Rust twin is `crates/paguro-core/src/ntfs/layout.rs`
+(`#[repr(C, packed)]`, `offset_of!`, `get!`/`get_at!`), with the same
+names.
+
 **Glue** (boring, exercised in the VM): `dm-paguro-main.c` (the two targets),
 `pg_ctl.c` / `pg_ctl.h` (control device, state, locking, reading a block
 device with synchronous bios), `paguro_uapi.h`, `tools/pgctl.c` (test client).
