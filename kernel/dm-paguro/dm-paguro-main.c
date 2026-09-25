@@ -87,7 +87,11 @@ static int pg_image_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		kfree(buf);
 		return -ENOMEM;
 	}
-	mutex_lock(&pg_mutex);
+	if (mutex_lock_killable(&pg_mutex)) {
+		kfree(x);
+		kfree(buf);
+		return -EINTR;
+	}
 	r = -EINVAL;
 	c = pg_claim_get(id);
 	if (!c) {
@@ -131,7 +135,7 @@ static int pg_image_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 				     per << SECTOR_SHIFT, buf);
 		pg_reader_exit(&ir.r);
 		if (e) {
-			DMERR("claim %u: payload check failed: error %d", id, e);
+			DMERR_LIMIT("claim %u: payload check failed: error %d", id, e);
 			ti->error = "payload structure check failed (GPT, ext4 or ISO 9660)";
 			r = e == PG_E_IO ? -EIO : -EINVAL;
 		}
@@ -201,7 +205,7 @@ static void pg_image_status(struct dm_target *ti, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		DMEMIT("state %u refused %lld", x->claim->state,
+		DMEMIT("state %u refused %lld", READ_ONCE(x->claim->state),
 		       (long long)atomic64_read(&x->claim->refused));
 		break;
 	case STATUSTYPE_TABLE:
@@ -263,7 +267,10 @@ static int pg_volume_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	if (!x)
 		return -ENOMEM;
 	x->mode = argv[1][0];
-	mutex_lock(&pg_mutex);
+	if (mutex_lock_killable(&pg_mutex)) {
+		kfree(x);
+		return -EINTR;
+	}
 	vol = pg_volume_get(id);
 	if (!vol) {
 		ti->error = "no such volume";

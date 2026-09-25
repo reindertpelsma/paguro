@@ -9,6 +9,7 @@
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
+#include <linux/refcount.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
@@ -67,27 +68,79 @@ void pg_reader_exit(struct pg_reader *r)
 }
 
 /*
- * pg_read_fn: read the logical block holding `sector` with one synchronous
- * bio (bypassing the page cache, which a view's writes do not update) and
- * copy out 512 bytes. The last block read is cached.
+ * One read in flight. The waiter and the completion each hold a reference;
+ * the page stays pinned until the bio completes, even if the waiter gave up.
+ */
+struct pg_rio {
+	struct completion done;
+	refcount_t refs;
+	blk_status_t status;
+	struct page *page;
+};
+
+static void pg_rio_put(struct pg_rio *io)
+{
+	if (refcount_dec_and_test(&io->refs)) {
+		put_page(io->page);
+		kfree(io);
+	}
+}
+
+static void pg_rio_end(struct bio *bio)
+{
+	struct pg_rio *io = bio->bi_private;
+
+	io->status = bio->bi_status;
+	bio_put(bio);
+	complete(&io->done);
+	pg_rio_put(io);
+}
+
+/*
+ * pg_read_fn: read the logical block holding `sector` with one bio
+ * (bypassing the page cache, which a view's writes do not update) and copy
+ * out 512 bytes. The last block read is cached. The wait is killable: a
+ * device that never answers (a suspended dm table below) cannot pin the
+ * caller -- nor, through pg_mutex, every other caller -- beyond a signal.
+ * An abandoned read keeps its page; the reader then refuses further reads.
  */
 int pg_reader_read(void *ctx, pg_u64 sector, pg_u8 *buf)
 {
 	struct pg_reader *r = ctx;
 	sector_t per = r->lbs >> SECTOR_SHIFT;
 	sector_t first = sector - (sector & (per - 1));
-	struct bio_vec bv;
-	struct bio bio;
+	struct pg_rio *io;
+	struct bio *bio;
 	int e;
 
+	if (!r->page)
+		return -EINTR;
 	if (sector >= bdev_nr_sectors(r->bdev))
 		return -EIO;
 	if (first != r->cached) {
-		bio_init(&bio, r->bdev, &bv, 1, REQ_OP_READ);
-		bio.bi_iter.bi_sector = first;
-		__bio_add_page(&bio, r->page, r->lbs, 0);
-		e = submit_bio_wait(&bio);
-		bio_uninit(&bio);
+		io = kmalloc(sizeof(*io), GFP_KERNEL);
+		if (!io)
+			return -ENOMEM;
+		bio = bio_alloc(r->bdev, 1, REQ_OP_READ, GFP_KERNEL);
+		init_completion(&io->done);
+		refcount_set(&io->refs, 2);
+		get_page(r->page);
+		io->page = r->page;
+		bio->bi_iter.bi_sector = first;
+		__bio_add_page(bio, r->page, r->lbs, 0);
+		bio->bi_private = io;
+		bio->bi_end_io = pg_rio_end;
+		submit_bio(bio);
+		if (wait_for_completion_killable(&io->done)) {
+			/* The bio still owns the page: let it go with it. */
+			put_page(r->page);
+			r->page = NULL;
+			r->cached = ~(sector_t)0;
+			pg_rio_put(io);
+			return -EINTR;
+		}
+		e = blk_status_to_errno(io->status);
+		pg_rio_put(io);
 		r->cached = e ? ~(sector_t)0 : first;
 		if (e)
 			return e;
@@ -143,6 +196,8 @@ static int pg_errno(s32 err)
 		return -EIO;
 	if (err == PG_ERR_RESERVED || err == PG_ERR_CLAIMED)
 		return -EBUSY;
+	if (err == PG_ERR_DEVICE)
+		return -ENODEV;
 	return -EINVAL;
 }
 
@@ -321,7 +376,7 @@ static long pg_volume_add(struct pg_volume_add *a)
 	a->volume_id = vol->id;
 	a->volume_flags = flags;
 	a->sectors = v.sectors;
-	pr_info("paguro: volume %u: %llu sectors, %llu-byte clusters, flags %#x, %zu reserved ranges%s\n",
+	pr_info_ratelimited("paguro: volume %u: %llu sectors, %llu-byte clusters, flags %#x, %zu reserved ranges%s\n",
 		vol->id, v.sectors, v.cluster_bytes, flags, vol->nreserved,
 		vol->add_flags & PG_VOLUME_READ_ONLY ? ", read-only" : "");
 	return 0;
@@ -362,7 +417,7 @@ static long pg_claim_ioctl(struct pg_claim *a)
 	if (!a->error)
 		a->error = pg_conflict(vol, NULL, w->norm, nnorm);
 	if (a->error) {
-		pr_info("paguro: claim of record %llu refused: error %d\n",
+		pr_info_ratelimited("paguro: claim of record %llu refused: error %d\n",
 			a->mft_record, a->error);
 		kvfree(w);
 		return pg_errno(a->error);
@@ -394,7 +449,7 @@ static long pg_claim_ioctl(struct pg_claim *a)
 	a->extents = nfile;
 	a->sectors = c->limit;
 	a->state = c->state;
-	pr_info("paguro: claim %u: volume %u record %llu: %zu extents, %llu sectors\n",
+	pr_info_ratelimited("paguro: claim %u: volume %u record %llu: %zu extents, %llu sectors\n",
 		c->id, vol->id, c->rec, nfile, c->limit);
 	return 0;
 }
@@ -470,7 +525,7 @@ static long pg_grow_ioctl(struct pg_grow *a)
 	write_unlock(&pg_lock);
 	kvfree(oldf);
 	kvfree(oldn);
-	pr_info("paguro: grow claim %u: error %d, state %#x, %llu sectors\n",
+	pr_info_ratelimited("paguro: grow claim %u: error %d, state %#x, %llu sectors\n",
 		c->id, err, c->state, c->limit);
 	return 0;
 }
@@ -539,7 +594,7 @@ static long pg_crosscheck_ioctl(struct pg_crosscheck *a)
 	kvfree(u);
 	kvfree(e);
 	kvfree(f);
-	pr_info("paguro: cross-check claim %u: %s\n", c->id,
+	pr_info_ratelimited("paguro: cross-check claim %u: %s\n", c->id,
 		match ? "agrees" : "DISAGREES, claim refused");
 	return 0;
 }
@@ -643,6 +698,7 @@ static long pg_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	default:
 		return -ENOTTY;
 	}
+	/* One copy of the argument; everything after reads the copy. */
 	u = kzalloc(sizeof(*u), GFP_KERNEL);
 	if (!u)
 		return -ENOMEM;
@@ -650,7 +706,11 @@ static long pg_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		kfree(u);
 		return -EFAULT;
 	}
-	mutex_lock(&pg_mutex);
+	/* Killable: a caller stuck behind a hung device can still be killed. */
+	if (mutex_lock_killable(&pg_mutex)) {
+		kfree(u);
+		return -EINTR;
+	}
 	switch (cmd) {
 	case PG_VOLUME_ADD:
 		r = pg_volume_add(&u->add);
