@@ -671,6 +671,43 @@ static int is_fat(const pg_u8 *b, pg_u64 len)
 }
 
 /*
+ * A single-group ext4 at `base` (ntfs.rs payload_ext4_root): the root
+ * directory (inode 2), found through group 0's descriptor and the inode
+ * table, must be a directory whose i_block starts with an extent header
+ * (0xF30A). b holds the superblock's first sector. Bounds: every sector
+ * read is below count * per_block, which the caller bounded by len.
+ */
+static int payload_ext4_root(pg_read_fn read, void *ctx, pg_u64 base,
+			     pg_u64 first, pg_u64 count, pg_u64 log, int wide,
+			     int dynamic, pg_u8 *b)
+{
+	pg_u64 bs = 1024ull << log, per_block = 2ull << log;
+	pg_u64 isz = dynamic ? G16(b, 0x58) : 128, dsz = wide ? G16(b, 0xfe) : 32;
+	pg_u64 gdt = first + 1, table, sector;
+	pg_size o;
+
+	if (!is_pow2(isz) || isz < 128 || isz > bs || !is_pow2(dsz) ||
+	    dsz < 32 || dsz > 1024 || (wide && dsz < 64) || G32(b, 0x28) < 2)
+		return PG_E_PAYLOAD_EXT4;
+	if (gdt >= count)
+		return PG_E_PAYLOAD_EXT4;
+	if (read(ctx, base + gdt * per_block, b))
+		return PG_E_IO;
+	table = G32(b, 8) | (wide ? G32(b, 0x28) << 32 : 0);
+	if (!table || table >= count)
+		return PG_E_PAYLOAD_EXT4;
+	sector = table * per_block + isz / 512;
+	if (sector >= count * per_block)
+		return PG_E_PAYLOAD_EXT4;
+	if (read(ctx, base + sector, b))
+		return PG_E_IO;
+	o = (pg_size)(isz % 512);	/* 0, 128 or 256: the fields lie in b */
+	if ((G16(b, o) & 0xf000) != 0x4000 || G16(b, o + 0x28) != 0xf30a)
+		return PG_E_PAYLOAD_EXT4;
+	return 0;
+}
+
+/*
  * ext4 at sector `base`, `len` sectors long; b holds sector base + 2, whose
  * magic matched. Bounds: count <= len / per_block, block < count, so every
  * read is inside [base, base + len).
@@ -701,6 +738,10 @@ static int payload_ext4(pg_read_fn read, void *ctx, pg_u64 base, pg_u64 len,
 	per_block = 2ull << log;
 	if (!count || count > len / per_block)
 		return PG_E_PAYLOAD_EXT4;
+	/* A single block group has no backup: check the root directory. */
+	if (count - first <= per_group)
+		return payload_ext4_root(read, ctx, base, first, count, log,
+					 incompat & 0x80, G32(b, 0x4c) >= 1, b);
 	for (i = 0; i < 16; i++)
 		uuid[i] = b[0x68 + i];
 	group = 1;

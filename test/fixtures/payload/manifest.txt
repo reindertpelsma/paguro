@@ -49,7 +49,7 @@ payload ext4_1k_primary_group_nr ext4_1k.img - PayloadExt4 1114=01
 payload ext4_1k_log_block_size ext4_1k.img - PayloadExt4 1048=07
 payload ext4_1k_per_group_zero ext4_1k.img - PayloadExt4 1057=00
 payload ext4_1k_first_block ext4_1k.img - PayloadExt4 1044=02
-payload ext4_1k_one_group ext4_1k.img - PayloadExt4 1057=00 1058=10
+payload ext4_1k_one_group ext4_1k.img - ok 1057=00 1058=10
 payload ext4_1k_payload_short ext4_1k.img 16383 PayloadExt4
 payload ext4_1k_payload_long ext4_1k.img 16392 ok
 payload ext4_4k ext4_4k.img - ok
@@ -62,7 +62,7 @@ payload ext4_4k_primary_group_nr ext4_4k.img - PayloadExt4 1114=01
 payload ext4_4k_log_block_size ext4_4k.img - PayloadExt4 1048=07
 payload ext4_4k_per_group_zero ext4_4k.img - PayloadExt4 1057=00
 payload ext4_4k_first_block ext4_4k.img - PayloadExt4 1044=02
-payload ext4_4k_one_group ext4_4k.img - PayloadExt4 1057=00 1058=10
+payload ext4_4k_one_group ext4_4k.img - ok 1057=00 1058=10
 payload ext4_4k_payload_short ext4_4k.img 32767 PayloadExt4
 payload ext4_4k_payload_long ext4_4k.img 32776 ok
 payload ext4_64bit ext4_64bit.img - ok
@@ -75,7 +75,7 @@ payload ext4_64bit_primary_group_nr ext4_64bit.img - PayloadExt4 1114=01
 payload ext4_64bit_log_block_size ext4_64bit.img - PayloadExt4 1048=07
 payload ext4_64bit_per_group_zero ext4_64bit.img - PayloadExt4 1057=00
 payload ext4_64bit_first_block ext4_64bit.img - PayloadExt4 1044=02
-payload ext4_64bit_one_group ext4_64bit.img - PayloadExt4 1057=00 1058=10
+payload ext4_64bit_one_group ext4_64bit.img - ok 1057=00 1058=10
 payload ext4_64bit_payload_short ext4_64bit.img 32767 PayloadExt4
 payload ext4_64bit_payload_long ext4_64bit.img 32776 ok
 payload ext4_64bit_backup_count_hi ext4_64bit.img - PayloadExt4 4194640=01
@@ -89,12 +89,43 @@ payload ext4_sparse2_primary_group_nr ext4_sparse2.img - PayloadExt4 1114=01
 payload ext4_sparse2_log_block_size ext4_sparse2.img - PayloadExt4 1048=07
 payload ext4_sparse2_per_group_zero ext4_sparse2.img - PayloadExt4 1057=00
 payload ext4_sparse2_first_block ext4_sparse2.img - PayloadExt4 1044=02
-payload ext4_sparse2_one_group ext4_sparse2.img - PayloadExt4 1057=00 1058=10
+payload ext4_sparse2_one_group ext4_sparse2.img - ok 1057=00 1058=10
 payload ext4_sparse2_payload_short ext4_sparse2.img 32767 PayloadExt4
 payload ext4_sparse2_payload_long ext4_sparse2.img 32776 ok
 payload ext4_sparse2_no_backup ext4_sparse2.img - PayloadExt4 1612=00
 payload ext4_sparse2_last_backup ext4_sparse2.img - ok 1612=03
 payload ext4_sparse2_group_beyond ext4_sparse2.img - PayloadExt4 1612=04
+payload ext4_small_1k ext4_small_1k.img - ok
+payload ext4_small_1k_root_not_dir ext4_small_1k.img - PayloadExt4 67840=a4 67841=81
+payload ext4_small_1k_root_no_extents ext4_small_1k.img - PayloadExt4 67880=00 67881=00
+payload ext4_small_1k_table_zero ext4_small_1k.img - PayloadExt4 2056=00
+payload ext4_small_1k_table_past_end ext4_small_1k.img - PayloadExt4 2056=00 2057=10
+payload ext4_small_1k_inode_size ext4_small_1k.img - PayloadExt4 1112=64 1113=00
+payload ext4_small_1k_inodes_per_group ext4_small_1k.img - PayloadExt4 1064=01 1065=00
+payload ext4_small_1k_payload_short ext4_small_1k.img 8191 PayloadExt4
+payload ext4_small_1k_payload_long ext4_small_1k.img 8200 ok
+payload ext4_small_1k_desc_size ext4_small_1k.img - PayloadExt4 1278=20
+payload ext4_small_1k_table_hi ext4_small_1k.img - PayloadExt4 2088=01
+payload ext4_small_4k ext4_small_4k.img - ok
+payload ext4_small_4k_root_not_dir ext4_small_4k.img - PayloadExt4 139520=a4 139521=81
+payload ext4_small_4k_root_no_extents ext4_small_4k.img - PayloadExt4 139560=00 139561=00
+payload ext4_small_4k_table_zero ext4_small_4k.img - PayloadExt4 4104=00
+payload ext4_small_4k_table_past_end ext4_small_4k.img - PayloadExt4 4104=00 4105=10
+payload ext4_small_4k_inode_size ext4_small_4k.img - PayloadExt4 1112=64 1113=00
+payload ext4_small_4k_inodes_per_group ext4_small_4k.img - PayloadExt4 1064=01 1065=00
+payload ext4_small_4k_payload_short ext4_small_4k.img 32767 PayloadExt4
+payload ext4_small_4k_payload_long ext4_small_4k.img 32776 ok
+payload ext4_small_64bit ext4_small_64bit.img - ok
+payload ext4_small_64bit_root_not_dir ext4_small_64bit.img - PayloadExt4 143872=a4 143873=81
+payload ext4_small_64bit_root_no_extents ext4_small_64bit.img - PayloadExt4 143912=00 143913=00
+payload ext4_small_64bit_table_zero ext4_small_64bit.img - PayloadExt4 4104=00
+payload ext4_small_64bit_table_past_end ext4_small_64bit.img - PayloadExt4 4104=00 4105=10
+payload ext4_small_64bit_inode_size ext4_small_64bit.img - PayloadExt4 1112=64 1113=00
+payload ext4_small_64bit_inodes_per_group ext4_small_64bit.img - PayloadExt4 1064=01 1065=00
+payload ext4_small_64bit_payload_short ext4_small_64bit.img 32767 PayloadExt4
+payload ext4_small_64bit_payload_long ext4_small_64bit.img 32776 ok
+payload ext4_small_64bit_desc_size ext4_small_64bit.img - PayloadExt4 1278=20
+payload ext4_small_64bit_table_hi ext4_small_64bit.img - PayloadExt4 4136=01
 payload iso iso.img - ok
 payload iso_short iso.img 1420 PayloadIso
 payload iso_long iso.img 1428 PayloadIso

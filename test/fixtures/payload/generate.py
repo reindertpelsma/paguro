@@ -228,6 +228,15 @@ def main():
         p = os.path.join(work, name)
         ext4(p, mib, *opts, work=work)
         image(name, p)
+    # single block group: no backup superblock, the root directory instead
+    for name, mib, opts in [
+        ("ext4_small_1k.img", 4, ["-b", "1024"]),
+        ("ext4_small_4k.img", 16, ["-b", "4096", "-O", "^64bit"]),
+        ("ext4_small_64bit.img", 16, ["-b", "4096", "-O", "64bit", "-I", "512"]),
+    ]:
+        p = os.path.join(work, name)
+        ext4(p, mib, *opts, work=work)
+        image(name, p)
     # -- ISO 9660 ----------------------------------------------------------
     p = os.path.join(work, "iso.img")
     sh("genisoimage", "-quiet", "-R", "-V", "PAGURO", "-o", p, os.path.join(work, "tree"))
@@ -320,7 +329,8 @@ def main():
         case(img[:-4] + "_log_block_size", img, "PayloadExt4", put(sb + 0x18, "<I", 7))
         case(img[:-4] + "_per_group_zero", img, "PayloadExt4", put(sb + 0x20, "<I", 0))
         case(img[:-4] + "_first_block", img, "PayloadExt4", put(sb + 0x14, "<I", 2))
-        case(img[:-4] + "_one_group", img, "PayloadExt4", put(sb + 0x20, "<I", 1 << 20))
+        # Told it has one group, it is checked by its root directory: fine.
+        case(img[:-4] + "_one_group", img, "ok", put(sb + 0x20, "<I", 1 << 20))
         case(img[:-4] + "_payload_short", img, "PayloadExt4", sectors=size // S - 1)
         case(img[:-4] + "_payload_long", img, "ok", sectors=size // S + 8)
 
@@ -337,6 +347,32 @@ def main():
     case("ext4_sparse2_last_backup", "ext4_sparse2.img", "ok", put(1024 + 0x24C, "<I", bg[1]))
     case("ext4_sparse2_group_beyond", "ext4_sparse2.img", "PayloadExt4", put(1024 + 0x24C, "<I", 4))
 
+    def single(img, bs, first):
+        d = images[img]
+        assert struct.unpack_from("<I", d, 1024 + 0x20)[0] >= struct.unpack_from("<I", d, 1024 + 4)[0] - first
+        wide = struct.unpack_from("<I", d, 1024 + 0x60)[0] & 0x80
+        gdt = (first + 1) * bs
+        table = struct.unpack_from("<I", d, gdt + 8)[0]
+        isz = struct.unpack_from("<H", d, 1024 + 0x58)[0]
+        ino = table * bs + isz
+        n = img[:-4]
+        case(n, img, "ok")
+        case(n + "_root_not_dir", img, "PayloadExt4", put(ino, "<H", 0x81a4))
+        case(n + "_root_no_extents", img, "PayloadExt4", put(ino + 0x28, "<H", 0))
+        case(n + "_table_zero", img, "PayloadExt4", put(gdt + 8, "<I", 0))
+        case(n + "_table_past_end", img, "PayloadExt4",
+             put(gdt + 8, "<I", struct.unpack_from("<I", d, 1024 + 4)[0]))
+        case(n + "_inode_size", img, "PayloadExt4", put(1024 + 0x58, "<H", 100))
+        case(n + "_inodes_per_group", img, "PayloadExt4", put(1024 + 0x28, "<I", 1))
+        case(n + "_payload_short", img, "PayloadExt4", sectors=len(d) // S - 1)
+        case(n + "_payload_long", img, "ok", sectors=len(d) // S + 8)
+        if wide:
+            case(n + "_desc_size", img, "PayloadExt4", put(1024 + 0xFE, "<H", 32))
+            case(n + "_table_hi", img, "PayloadExt4", put(gdt + 0x28, "<I", 1))
+
+    single("ext4_small_1k.img", 1024, 1)
+    single("ext4_small_4k.img", 4096, 0)
+    single("ext4_small_64bit.img", 4096, 0)
     iso = images["iso.img"]
     pvd = 32768
     case("iso", "iso.img", "ok")

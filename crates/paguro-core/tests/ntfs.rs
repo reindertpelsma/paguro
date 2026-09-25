@@ -1104,6 +1104,63 @@ fn payload_ext4() {
     assert_eq!(check(&d), Err(E::PayloadExt4)); // past the last block
 }
 
+/// A single-group ext4 (32 blocks of 1 KiB, 64 per group): no backup; the
+/// root directory at inode 2 of the table at block 5 (128-byte inodes).
+fn ext4_single() -> Vec<u8> {
+    let mut d = vec![0u8; 32 * 1024];
+    ext4_sb(&mut d, 1024, 32, 0);
+    put(&mut d, 1024 + 0x20, 64, 4);
+    put(&mut d, 1024 + 0x28, 16, 4);
+    put(&mut d, 1024 + 0x58, 128, 2);
+    put(&mut d, 2 * 1024 + 8, 5, 4);
+    let i = 5 * 1024 + 128;
+    put(&mut d, i, 0x41ed, 2);
+    put(&mut d, i + 0x28, 0xf30a, 2);
+    d
+}
+
+#[test]
+fn payload_ext4_single_group() {
+    let m = |at: usize, v: u64, n: usize| {
+        let mut d = ext4_single();
+        put(&mut d, at, v, n);
+        check(&d)
+    };
+    let (p, i) = (1024, 5 * 1024 + 128);
+    assert_eq!(check(&ext4_single()), Ok(()));
+    assert_eq!(m(i, 0x81a4, 2), Err(E::PayloadExt4)); // a regular file
+    assert_eq!(m(i + 0x28, 0xf30b, 2), Err(E::PayloadExt4)); // no extent header
+    assert_eq!(m(2 * 1024 + 8, 0, 4), Err(E::PayloadExt4)); // no inode table
+    assert_eq!(m(2 * 1024 + 8, 32, 4), Err(E::PayloadExt4)); // past the end
+    assert_eq!(m(2 * 1024 + 8, 31, 4), Err(E::PayloadExt4)); // reads zeros there
+    assert_eq!(m(p + 0x58, 96, 2), Err(E::PayloadExt4)); // inode size
+    assert_eq!(m(p + 0x58, 2048, 2), Err(E::PayloadExt4)); // bigger than a block
+    assert_eq!(m(p + 0x28, 1, 4), Err(E::PayloadExt4)); // no inode 2
+    assert_eq!(m(p + 4, 2, 4), Err(E::PayloadExt4)); // no room for descriptors
+    // Revision 0: 128-byte inodes whatever the field says.
+    let mut d = ext4_single();
+    put(&mut d, p + 0x4c, 0, 4);
+    put(&mut d, p + 0x58, 96, 2);
+    assert_eq!(check(&d), Ok(()));
+    // 64-bit: descriptors of s_desc_size, the table's high half counts.
+    let mut d = ext4_single();
+    put(&mut d, p + 0x60, 0x80, 4);
+    assert_eq!(check(&d), Err(E::PayloadExt4)); // desc size 0
+    put(&mut d, p + 0xfe, 64, 2);
+    assert_eq!(check(&d), Ok(()));
+    put(&mut d, 2 * 1024 + 0x28, 1, 4);
+    assert_eq!(check(&d), Err(E::PayloadExt4));
+    // 256-byte inodes: inode 2 at 256.
+    let mut d = ext4_single();
+    put(&mut d, p + 0x58, 256, 2);
+    assert_eq!(check(&d), Err(E::PayloadExt4));
+    d.copy_within(5 * 1024 + 128..5 * 1024 + 256, 5 * 1024 + 256);
+    assert_eq!(check(&d), Ok(()));
+    // Failures at each of the two reads.
+    assert_eq!(payload(&ext4_single()[..2 * 1024], 64), Err(E::Io));
+    assert_eq!(payload(&ext4_single()[..5 * 1024], 64), Err(E::Io));
+}
+
 #[test]
 fn payload_iso() {
     let m = |at: usize, v: &[u8]| {

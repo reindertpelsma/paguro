@@ -53,11 +53,8 @@ fn ext4(env: &Env, out: &Path, mib: u64) -> R<()> {
             "-F",
             "-L",
             "paguro-root",
-            // Several block groups: the payload check needs group 1's
-            // backup superblock, and one 4 KiB-block group would hold all
-            // 64 MiB.
-            "-g",
-            "4096",
+            // One block group is fine: the payload check then looks at the
+            // root directory instead of group 1's backup superblock.
             "-E",
             "root_owner=0:0",
             "-d",

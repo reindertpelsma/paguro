@@ -1124,6 +1124,11 @@ fn payload_ext4<D: Disk>(img: &mut D, base: u64, len: u64, b: &mut [u8; 512]) ->
     if count == 0 || count > len / per_block {
         return Err(E::PayloadExt4);
     }
+    // A single block group (blocks first..count all in group 0) has no
+    // backup superblock: the root directory is checked instead.
+    if count - first <= per_group {
+        return payload_ext4_root(img, base, first, count, log, wide, g32(b, 0x4c) >= 1, b);
+    }
     let mut uuid = [0u8; 16];
     uuid.copy_from_slice(b.get(0x68..0x78).unwrap_or(&[0; 16]));
     // COMPAT_SPARSE_SUPER2: backups only where s_backup_bgs says.
@@ -1143,6 +1148,58 @@ fn payload_ext4<D: Disk>(img: &mut D, base: u64, len: u64, b: &mut [u8; 512]) ->
         || blocks(b) != count
         || g16(b, 0x5a) != group & 0xffff
     {
+        return Err(E::PayloadExt4);
+    }
+    Ok(())
+}
+
+/// A single-group ext4 at `base`: the root directory (inode 2), found
+/// through group 0's descriptor and the inode table, must be a directory
+/// whose `i_block` starts with an extent header (magic `0xF30A`). `b` holds
+/// the superblock's first sector; every read is below `count` blocks, which
+/// the caller bounded by the partition.
+#[allow(clippy::too_many_arguments)]
+fn payload_ext4_root<D: Disk>(
+    img: &mut D,
+    base: u64,
+    first: u64,
+    count: u64,
+    log: u64,
+    wide: bool,
+    dynamic: bool,
+    b: &mut [u8; 512],
+) -> Result<()> {
+    let (bs, per_block) = (1024u64 << log, 2u64 << log);
+    let isz = if dynamic { g16(b, 0x58) } else { 128 };
+    let dsz = if wide { g16(b, 0xfe) } else { 32 };
+    if !isz.is_power_of_two()
+        || isz < 128
+        || isz > bs
+        || !dsz.is_power_of_two()
+        || !(32..=1024).contains(&dsz)
+        || (wide && dsz < 64)
+        || g32(b, 0x28) < 2
+    {
+        return Err(E::PayloadExt4);
+    }
+    // The group descriptors follow the superblock's block.
+    let gdt = first + 1;
+    if gdt >= count {
+        return Err(E::PayloadExt4);
+    }
+    img.read(base + gdt * per_block, b).map_err(|_| E::Io)?;
+    let table = g32(b, 8) | if wide { g32(b, 0x28) << 32 } else { 0 };
+    // Inode 2 is the second of group 0's table: isz bytes in.
+    if table == 0 || table >= count {
+        return Err(E::PayloadExt4);
+    }
+    let sector = table * per_block + isz / 512;
+    if sector >= count * per_block {
+        return Err(E::PayloadExt4);
+    }
+    img.read(base + sector, b).map_err(|_| E::Io)?;
+    let o = us(isz % 512); // 0, 128 or 256: the fields read lie in `b`
+    if g16(b, o) & 0xf000 != 0x4000 || g16(b, o + 0x28) != 0xf30a {
         return Err(E::PayloadExt4);
     }
     Ok(())
