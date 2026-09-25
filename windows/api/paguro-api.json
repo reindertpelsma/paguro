@@ -1076,6 +1076,11 @@
       "params": {
         "$ref": "#/$defs/Progress"
       }
+    },
+    "log": {
+      "params": {
+        "$ref": "#/$defs/Log"
+      }
     }
   },
   "$defs": {
@@ -2442,6 +2447,14 @@
           "items": {
             "type": "string"
           }
+        },
+        "shell_exit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "install --shell: set by the front end after the shell exits."
         }
       },
       "required": [
@@ -2583,6 +2596,14 @@
         },
         "stub": {
           "type": "string"
+        },
+        "shell_exit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Set by the front end after the shell exits."
         }
       },
       "required": [
@@ -3421,6 +3442,26 @@
         "keyboard"
       ],
       "additionalProperties": false
+    },
+    "Log": {
+      "type": "object",
+      "description": "`log` notification params: a message from the service about the call (e.g. that it waits for another operation).",
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warn"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "level",
+        "message"
+      ]
     }
   }
 }

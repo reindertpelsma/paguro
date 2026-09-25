@@ -15,9 +15,13 @@ here: `paguro.ini`, seals, load options, signature lists, SMBIOS, the TCG log,
 BitLocker metadata and the TPM client all come from
 [`paguro-core`](../paguro-core), [`paguro-crypto`](../paguro-crypto) and
 [`paguro-boot`](../paguro-boot) — the loader and Windows share one
-implementation of the TPM client and BitLocker unlock. The PowerShell module
-(`windows/PaguroTools`) and the future GUI build on this crate's `--json`
-output. See [`docs/INTERFACES.md`](../../docs/INTERFACES.md) §11 and
+implementation of the TPM client and BitLocker unlock. Every command is one
+method of the Windows API (`rpc`, INTERFACES §11.7; the contract is
+[`windows/api/paguro-api.json`](../../windows/api/paguro-api.json)):
+[`paguro-service`](../paguro-service) serves it over `\\.\pipe\paguro`, and
+`paguro.exe` is a thin client of that service when it is installed, running
+the same method in-process otherwise (`--direct`). The PowerShell module and
+the GUI call the pipe too; nobody parses `--json` text. See [`docs/INTERFACES.md`](../../docs/INTERFACES.md) §11 and
 [`docs/DESIGN.md`](../../docs/DESIGN.md) §4.6, §6b, §7.
 
 ## Modules
@@ -25,7 +29,8 @@ output. See [`docs/INTERFACES.md`](../../docs/INTERFACES.md) §11 and
 | group | modules | purpose |
 |---|---|---|
 | OS boundary | `api`, `real`, `mock` | `WinApi` trait; Win32 implementation (Windows only); in-memory mock for any host |
-| CLI | `cli`, `cmd`, `ctx`, `out` | argument parsing/dispatch, command logic, shared context, the `--json` envelope/exit codes |
+| API | `rpc`, `client` | the methods, their access and parameters, JSON-RPC shapes; the front end's stream transport |
+| CLI | `cli`, `cmd`, `ctx`, `out` | command line → request (direct or through the service), command logic, shared context, the `--json` envelope/exit codes |
 | on-disk state | `bootent`, `cfgfile`, `esp`, `journal` | `Boot####`/`BootNext`; `paguro.ini` read/edit/write with its hash; ESP files; resumable install/uninstall steps |
 | keys & TPM | `keys`, `tpmwin` | key material from a logged-in session; the TPM via TBS, through the loader's own client |
 | WSL2/pre-flight | `hw`, `preflight` | `host-hardware.json` for the WSL2 installer; the check before "Restart into Linux" |
@@ -44,6 +49,7 @@ output. See [`docs/INTERFACES.md`](../../docs/INTERFACES.md) §11 and
 
 ```sh
 cargo test -p paguro-win              # command logic against the mock, any host
+PAGURO_BLESS=1 cargo test -p paguro-win --test api_contract   # rewrite windows/api/fixtures
 cargo build -p paguro-win --target x86_64-pc-windows-gnu   # cross-compile from Linux
 ```
 

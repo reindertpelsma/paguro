@@ -57,6 +57,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "disk create exited $LASTEXITCODE" }
           & $exe --json disk inspect "$env:RUNNER_TEMP\real.vhd"
           if ($LASTEXITCODE -ne 0) { throw "disk inspect exited $LASTEXITCODE" }
+      - name: the real service - install it, call it through paguro.exe, remove it
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path target\release\paguro.exe).Path
+          $svc = (Resolve-Path target\release\paguro-service.exe).Path
+          & $exe --direct service install --exe $svc
+          if ($LASTEXITCODE -ne 0) { throw "service install exited $LASTEXITCODE" }
+          sc.exe query paguro
+          try {
+            $info = & $exe --json service info | ConvertFrom-Json
+            if (-not $info.data.service) { throw 'service info was not answered by the service' }
+            "caller: $($info.data.caller | ConvertTo-Json -Compress)"
+            if (-not $info.data.caller.elevated) { throw 'the elevated runner was not seen as elevated' }
+            $a = & $exe --json status | ConvertFrom-Json
+            $b = & $exe --json --direct status | ConvertFrom-Json
+            if (($a.data.uefi -ne $b.data.uefi) -or ($a.data.arch -ne $b.data.arch) -or ($a.data.firmware.secure_boot -ne $b.data.firmware.secure_boot)) {
+              throw 'status through the service differs from direct'
+            }
+            & $exe --json checks list | Tee-Object checks.json | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "checks list exited $LASTEXITCODE" }
+            & $exe --json --dry-run disk create --size 1G --path relative.vhd | Tee-Object dry.json | Out-Null
+            $d = Get-Content dry.json -Raw | ConvertFrom-Json
+            if (-not ([System.IO.Path]::IsPathRooted($d.data.path))) { throw "a relative path reached the service unresolved: $($d.data.path)" }
+          } finally {
+            Get-Content "$env:ProgramData\paguro\service.log" -ErrorAction SilentlyContinue
+            & $exe --direct service uninstall
+          }
+          if ((sc.exe query paguro | Out-String) -notmatch '1060') { throw 'the service is still registered' }
       - uses: actions/upload-artifact@v4
         with:
           name: paguro-exe
@@ -64,6 +92,7 @@ jobs:
             target/release/paguro.exe
             target/release/paguro-service.exe
             status.json
+            checks.json
 
   pester:
     name: PaguroTools (Pester, pwsh and Windows PowerShell)

@@ -17,7 +17,7 @@
 //! gets a parse error; access is decided per call from the caller's
 //! token ([`paguro_win::rpc::Caller`]), never from anything it sends.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 
@@ -113,34 +113,7 @@ impl Worker {
     }
 }
 
-/// One line, at most `max` bytes (without the newline). `Ok(None)` at the
-/// end of the stream; `InvalidData` when longer.
-pub fn read_line<R: BufRead>(r: &mut R, max: usize) -> io::Result<Option<Vec<u8>>> {
-    let mut buf = Vec::new();
-    loop {
-        let avail = r.fill_buf()?;
-        if avail.is_empty() {
-            return Ok(if buf.is_empty() { None } else { Some(buf) });
-        }
-        if let Some(i) = avail.iter().position(|&b| b == b'\n') {
-            buf.extend_from_slice(avail.get(..i).unwrap_or(&[]));
-            r.consume(i + 1);
-            if buf.len() > max {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "line too long"));
-            }
-            if buf.last() == Some(&b'\r') {
-                buf.pop();
-            }
-            return Ok(Some(buf));
-        }
-        let n = avail.len();
-        buf.extend_from_slice(avail);
-        r.consume(n);
-        if buf.len() > max {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "line too long"));
-        }
-    }
-}
+pub use paguro_win::rpc::read_line;
 
 fn write_value<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
     let mut s = v.to_string();

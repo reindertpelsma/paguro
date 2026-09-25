@@ -799,7 +799,12 @@ fn post(
                 let back = t
                     .call("distro.leave", &Value::Object(params.clone()), note)
                     .map_err(|e| rpc::to_cmd_error(&e))?;
-                r.human.extend(rpc::to_report(&back).human);
+                let back = rpc::to_report(&back);
+                if let Some(o) = r.data.as_object_mut() {
+                    o.insert("shell_exit".into(), json!(code));
+                    o.insert("detached".into(), back.data.at("detached").clone());
+                }
+                r.human.extend(back.human);
             }
             Ok(r)
         }
@@ -818,6 +823,9 @@ fn post(
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 let code = api.run_interactive(prog, &args)?;
                 r.human.push(format!("shell exited ({code})"));
+                if let Some(o) = r.data.as_object_mut() {
+                    o.insert("shell_exit".into(), json!(code));
+                }
                 r.human.push(format!(
                     "when the system is installed: paguro install {} --path {} --finish",
                     i.distro, i.path

@@ -795,6 +795,36 @@ fn service_info(o: &Options<'_>) -> Report {
     ))
 }
 
+/// One line, at most `max` bytes (without the newline or a CR before it).
+/// `Ok(None)` at the end of the stream; `InvalidData` when longer.
+pub fn read_line<R: std::io::BufRead>(r: &mut R, max: usize) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::{Error, ErrorKind};
+    let mut buf = Vec::new();
+    loop {
+        let avail = r.fill_buf()?;
+        if avail.is_empty() {
+            return Ok(if buf.is_empty() { None } else { Some(buf) });
+        }
+        if let Some(i) = avail.iter().position(|&b| b == b'\n') {
+            buf.extend_from_slice(avail.get(..i).unwrap_or(&[]));
+            r.consume(i + 1);
+            if buf.len() > max {
+                return Err(Error::new(ErrorKind::InvalidData, "line too long"));
+            }
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            return Ok(Some(buf));
+        }
+        let n = avail.len();
+        buf.extend_from_slice(avail);
+        r.consume(n);
+        if buf.len() > max {
+            return Err(Error::new(ErrorKind::InvalidData, "line too long"));
+        }
+    }
+}
+
 /// One JSON-RPC notification.
 pub fn notification(method: &str, params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "method": method, "params": params })

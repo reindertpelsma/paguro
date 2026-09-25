@@ -9,6 +9,7 @@
 
 mod console;
 mod devices;
+pub mod pipe;
 mod wmi;
 
 use std::ffi::c_void;
