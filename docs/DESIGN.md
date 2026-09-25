@@ -4671,6 +4671,10 @@ later question sits with the ones it belongs to rather than in numeric order.
     With the host's SMBIOS, MSDM table, disk serial and MAC passed through
     (§1b, WinBoat), on OEM-key laptops and on digitally licensed desktops;
     and whether a VM session ever changes the native boot's activation state.
+    Start with the least: `-cpu host` (the real CPU model and features), SMBIOS
+    and MSDM. Only if that fails, add identity piece by piece; hiding the
+    hypervisor CPUID bit is the last resort, because it costs Windows' Hyper-V
+    enlightenments and VBS inside the VM.
 
 ---
 
