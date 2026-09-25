@@ -25,6 +25,17 @@ use paguro_core::ntfs::{Disk, IoError};
 use crate::cntfs::{self, SparseDisk, Trace};
 use crate::ntfsdiff::{Fault, Faulty, Slice, Tally, image, repo_root};
 
+/// The sector the `Disk` trait reads and manifests count in.
+const SECTOR: usize = 512;
+/// Logical block sizes a case or fuzz input can ask for.
+const LBS_512: u32 = 512;
+const LBS_4K: u32 = 4096;
+/// Bit 0 of a fuzz input's flags field selects 4 KiB logical blocks.
+const FUZZ_LBS_4K: u16 = 1;
+/// ext4 `s_magic` (0xEF53, LE) at 0x38 in the superblock's first sector.
+const EXT4_MAGIC_AT: usize = 0x38;
+const EXT4_MAGIC: [u8; 2] = [0x53, 0xef];
+
 pub type Res = Result<(), i32>;
 
 pub fn fixture_dir() -> PathBuf {
@@ -56,7 +67,7 @@ pub fn manifest() -> Vec<Case> {
                 lbs: t
                     .iter()
                     .find_map(|tok| tok.strip_prefix("lbs=")?.parse().ok())
-                    .unwrap_or(512),
+                    .unwrap_or(LBS_512),
                 patches: t
                     .iter()
                     .skip(5)
@@ -81,7 +92,7 @@ pub fn patched(c: &Case) -> (Vec<u8>, u64) {
             *b = v;
         }
     }
-    let n = c.sectors.unwrap_or(img.len() as u64 / 512);
+    let n = c.sectors.unwrap_or((img.len() / SECTOR) as u64);
     (img, n)
 }
 
@@ -197,7 +208,7 @@ pub fn misorder(k: u64) -> Result<(usize, usize, usize), String> {
             // Read sectors whose bytes the misordering changed.
             let mut changed = Vec::new();
             for &s in &reads {
-                let (mut a, mut b) = ([0u8; 512], [0u8; 512]);
+                let (mut a, mut b) = ([0u8; SECTOR], [0u8; SECTOR]);
                 let ra = Slice(&img).read(s, &mut a);
                 let rb = mk().read(s, &mut b);
                 if ra != rb || a != b {
@@ -211,7 +222,9 @@ pub fn misorder(k: u64) -> Result<(usize, usize, usize), String> {
             }
             must += 1;
             if r.is_ok() {
-                let ext4 = |x: &[u8; 512]| x[56] == 0x53 && x[57] == 0xef;
+                let ext4 = |x: &[u8; SECTOR]| {
+                    x[EXT4_MAGIC_AT] == EXT4_MAGIC[0] && x[EXT4_MAGIC_AT + 1] == EXT4_MAGIC[1]
+                };
                 if !changed.iter().all(|(a, b)| ext4(a) && !ext4(b)) {
                     return Err(format!(
                         "{}: extents gathered as {p:?} (of {k}) accepted",
@@ -254,8 +267,8 @@ pub fn mutate_bytes(img: &[u8], n: u64, lbs: u32, stride: usize) -> Result<Tally
     let mut t = Tally::default();
     let mut rng = 0x9e37_79b9_7f4a_7c15u64 ^ n;
     for s in sectors {
-        for off in (0..512).step_by(stride) {
-            let at = s as usize * 512 + off;
+        for off in (0..SECTOR).step_by(stride) {
+            let at = s as usize * SECTOR + off;
             let Some(&orig) = work.get(at) else { continue };
             for v in variants(orig, &mut rng) {
                 work[at] = v;
@@ -278,7 +291,7 @@ pub fn faults(img: &[u8], n: u64, lbs: u32) -> Result<[Tally; 2], String> {
     sectors.sort_unstable();
     sectors.dedup();
     for &s in &sectors {
-        let cut = img.get(..s as usize * 512).unwrap_or(img);
+        let cut = img.get(..s as usize * SECTOR).unwrap_or(img);
         let (got, _) = both(|| Slice(cut), n, lbs)?;
         if got != Err(1) {
             return Err(format!("cut at sector {s}: {}", show(got)));
@@ -320,7 +333,7 @@ pub fn random(rounds: u64, seed: u64) -> Result<(), String> {
         let mut work = img.clone();
         for _ in 0..1 + next(4) {
             let s = reads[next(reads.len() as u64) as usize];
-            let at = s as usize * 512 + next(512) as usize;
+            let at = s as usize * SECTOR + next(SECTOR as u64) as usize;
             if let Some(b) = work.get_mut(at) {
                 *b = next(256) as u8;
             }
@@ -332,7 +345,11 @@ pub fn random(rounds: u64, seed: u64) -> Result<(), String> {
 
 /// The logical block size a fuzz input asks for: bit 0 of its u16 field.
 pub fn fuzz_lbs(flags: u16) -> u32 {
-    if flags & 1 != 0 { 4096 } else { 512 }
+    if flags & FUZZ_LBS_4K != 0 {
+        LBS_4K
+    } else {
+        LBS_512
+    }
 }
 
 /// Fuzz inputs: `SparseDisk` whose first u32 is the image length in sectors
@@ -370,7 +387,7 @@ pub fn write_seeds(dir: &Path) -> Result<usize, String> {
     for c in manifest() {
         let (img, sectors) = patched(&c);
         let (_, reads) = both(|| Slice(&img), sectors, c.lbs)?;
-        let data = cntfs::sparse_input(&img, sectors, u16::from(c.lbs == 4096), &reads);
+        let data = cntfs::sparse_input(&img, sectors, u16::from(c.lbs == LBS_4K), &reads);
         std::fs::write(dir.join(format!("payload_{}.bin", c.name)), data)
             .map_err(|e| e.to_string())?;
         n += 1;

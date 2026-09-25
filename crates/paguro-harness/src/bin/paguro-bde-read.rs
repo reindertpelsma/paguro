@@ -27,6 +27,20 @@ use paguro_boot::volume::parse_recovery_password;
 use paguro_core::bde::{self, Cipher, Layout, Metadata, ProtectorKind};
 use paguro_core::guid::Guid;
 
+/// The volume header is read at the largest sector size BitLocker uses.
+const MAX_SECTOR: usize = 4096;
+/// The relocated boot sectors (8 KiB) the sparse fixture keeps.
+const RELOC_LEN: u64 = 8192;
+// FVE metadata block header (libbde §5.1): its size, in 16-byte units, at
+// offset 8; the volume header (relocated boot sectors) offset at 56.
+const BLOCK_SIZE_AT: usize = 8;
+const BLOCK_UNIT: u64 = 16;
+const VOLUME_HEADER_OFFSET_AT: usize = 56;
+/// The validation after a block: its 8-byte header and one AES-CCM entry
+/// wrapping the SHA-256 (libbde §5.4).
+const VALIDATION_HEADER_LEN: u64 = 8;
+const VALIDATION_CCM_ENTRY_LEN: u64 = 0x60;
+
 fn die(msg: &str) -> ! {
     eprintln!("paguro-bde-read: {msg}");
     exit(1)
@@ -96,7 +110,7 @@ fn main() {
     let input = input.unwrap_or_else(|| die("--input is required"));
     let f = File::open(&input).unwrap_or_else(|e| die(&format!("{input}: {e}")));
     let size = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let mut first = vec![0u8; 4096];
+    let mut first = vec![0u8; MAX_SECTOR];
     f.read_exact_at(&mut first, 0)
         .unwrap_or_else(|e| die(&format!("read: {e}")));
     let hdr =
@@ -130,12 +144,19 @@ fn main() {
         put(0, bps);
         for (r, o) in regions.iter().zip(hdr.metadata_offsets) {
             // block (size field × 16) + validation header + one CCM entry
-            let used = u64::from(u16::from_le_bytes([r[8], r[9]])) * 16 + 8 + 0x60;
+            let used = u64::from(u16::from_le_bytes([r[BLOCK_SIZE_AT], r[BLOCK_SIZE_AT + 1]]))
+                * BLOCK_UNIT
+                + VALIDATION_HEADER_LEN
+                + VALIDATION_CCM_ENTRY_LEN;
             put(o, used.div_ceil(bps).min(bde::REGION_SIZE / bps) * bps);
         }
-        let reloc = u64::from_le_bytes(regions[0][56..64].try_into().unwrap_or([0; 8]));
-        if reloc != 0 && reloc % bps == 0 && reloc + 8192 <= size {
-            put(reloc, 8192);
+        let reloc = u64::from_le_bytes(
+            regions[0][VOLUME_HEADER_OFFSET_AT..VOLUME_HEADER_OFFSET_AT + 8]
+                .try_into()
+                .unwrap_or([0; 8]),
+        );
+        if reloc != 0 && reloc % bps == 0 && reloc + RELOC_LEN <= size {
+            put(reloc, RELOC_LEN);
         }
         std::fs::write(path, out).unwrap_or_else(|e| die(&format!("{path}: {e}")));
     }

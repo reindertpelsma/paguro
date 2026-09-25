@@ -18,6 +18,15 @@ use paguro_core::range::Extent;
 
 use crate::ntfsdiff::both;
 
+/// The sector every `Disk` read and extent line is counted in.
+const SECTOR: u64 = 512;
+/// O_DIRECT reads: buffer alignment and length (4Kn devices), inside a
+/// buffer large enough to hold one aligned block wherever it lands.
+const DIRECT_ALIGN: usize = 4096;
+const DIRECT_BUF: usize = 2 * DIRECT_ALIGN;
+/// O_DIRECT's value on x86-64 (asm-generic differs; see `DevDisk::open`).
+const O_DIRECT_X86_64: i32 = 0o40000;
+
 /// 512-byte reads from a file or block device; a block device is read with
 /// `O_DIRECT` so nothing stale comes from the page cache.
 pub struct DevDisk {
@@ -31,30 +40,30 @@ impl DevDisk {
         let block = std::fs::metadata(path)?.file_type().is_block_device();
         let file = std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(if block { 0o40000 } else { 0 }) // O_DIRECT (x86-64)
+            .custom_flags(if block { O_DIRECT_X86_64 } else { 0 })
             .open(path)?;
         Ok(DevDisk {
             file,
             direct: block,
-            buf: vec![0; 8192],
+            buf: vec![0; DIRECT_BUF],
         })
     }
 }
 
 impl Disk for DevDisk {
     fn read(&mut self, sector: u64, out: &mut [u8; 512]) -> Result<(), IoError> {
-        let at = sector.checked_mul(512).ok_or(IoError)?;
+        let at = sector.checked_mul(SECTOR).ok_or(IoError)?;
         if !self.direct {
             return self.file.read_exact_at(out, at).map_err(|_| IoError);
         }
         // O_DIRECT: an aligned 4 KiB read around the sector (4Kn devices).
         let base = self.buf.as_ptr() as usize;
-        let off = (4096 - base % 4096) % 4096;
-        let aligned = self.buf.get_mut(off..off + 4096).ok_or(IoError)?;
-        let blk = at & !4095;
+        let off = (DIRECT_ALIGN - base % DIRECT_ALIGN) % DIRECT_ALIGN;
+        let aligned = self.buf.get_mut(off..off + DIRECT_ALIGN).ok_or(IoError)?;
+        let blk = at & !(DIRECT_ALIGN as u64 - 1);
         self.file.read_exact_at(aligned, blk).map_err(|_| IoError)?;
         let s = usize::try_from(at - blk).map_err(|_| IoError)?;
-        out.copy_from_slice(aligned.get(s..s + 512).ok_or(IoError)?);
+        out.copy_from_slice(aligned.get(s..s + SECTOR as usize).ok_or(IoError)?);
         Ok(())
     }
 }
@@ -112,7 +121,8 @@ pub fn payload(path: &str, lbs: u32, vhd: bool) -> i32 {
         eprintln!("{path}: cannot stat");
         return 2;
     };
-    let sectors = len / 512 - u64::from(vhd);
+    // A fixed VHD's footer is one sector.
+    let sectors = len / SECTOR - u64::from(vhd);
     let r = crate::payloaddiff::both(
         || DevDisk::open(path).unwrap_or_else(|e| panic!("{path}: {e}")),
         sectors,
