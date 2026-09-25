@@ -105,8 +105,8 @@ static void probes(HANDLE h, const wchar_t *path, int expect_denied)
         r = DeviceIoControl(v, FSCTL_MOVE_FILE, &mv, sizeof(mv), NULL, 0, &n, NULL);
         if (expect_denied)
             denied(r, "FSCTL_MOVE_FILE on the volume, naming the file (defrag)");
-        else
-            check(r || GetLastError() != ERROR_ACCESS_DENIED, "FSCTL_MOVE_FILE reaches NTFS", r ? 0 : GetLastError());
+        else /* NTFS itself may refuse the move (privilege, target LCN): informational */
+            printf("info FSCTL_MOVE_FILE unprotected: %lu\n", (unsigned long)(r ? 0 : GetLastError()));
         if (GetFileInformationByHandleEx(h, FileIdInfo, &id, sizeof(id))) {
             memset(&d, 0, sizeof(d));
             d.dwSize = sizeof(d);
@@ -266,6 +266,8 @@ static void post_reads(HANDLE port)
 
 /* Count completed EVENTs naming `id` from another process with
  * STATUS_ACCESS_DENIED; cancel the rest. */
+static int fsctl_events;
+
 static int collect_events(HANDLE port, const unsigned char id[16])
 {
     int i, seen = 0;
@@ -275,8 +277,11 @@ static int collect_events(HANDLE port, const unsigned char id[16])
         if (GetOverlappedResult(port, &ev_ov[i], &n, FALSE)) {
             PG_MESSAGE *m = &ev_buf[i].m;
             if (m->Magic == PG_MSG_MAGIC && m->Type == PG_MSG_EVENT && memcmp(m->FileId, id, 16) == 0 &&
-                m->ProcessId != GetCurrentProcessId() && m->Status == (int)0xC0000022L)
+                m->ProcessId != GetCurrentProcessId() && m->Status == (int)0xC0000022L) {
                 seen++;
+                if (m->Operation == PG_OP_FSCTL)
+                    fsctl_events++;
+            }
         } else {
             CancelIoEx(port, &ev_ov[i]);
             WaitForSingleObject(ev_ov[i].hEvent, 1000);
@@ -344,6 +349,9 @@ static int active(const wchar_t *dir, const wchar_t *self)
     SetEvent(go);
     WaitForSingleObject(ready, 60000); /* the child finished its denied probes */
     check(collect_events(port, m.FileId) >= 5, "EVENT messages for the refusals", 0);
+    /* SET_SPARSE, SET_ZERO_DATA, MARK_HANDLE and MOVE_FILE: the refusals
+     * were the filter's, not NTFS's. */
+    check(fsctl_events >= 4, "EVENTs for the four FSCTL refusals", (DWORD)fsctl_events);
     m.Type = PG_MSG_UNPROTECT;
     m.DenyFlags = 0;
     check(SUCCEEDED(send(port, &m, sizeof(m))), "UNPROTECT", 0);
@@ -355,14 +363,23 @@ static int active(const wchar_t *dir, const wchar_t *self)
     CloseHandle(pi.hThread);
     DeleteFileW(path);
 
-    /* No unload until the explicit admin request. */
-    hr = FilterUnload(L"PaguroFlt");
-    check(FAILED(hr), "unload refused before ALLOW_UNLOAD", (DWORD)hr);
-    m = msg(PG_MSG_ALLOW_UNLOAD);
-    check(SUCCEEDED(send(port, &m, sizeof(m))), "ALLOW_UNLOAD", 0);
+    /* DO_NOT_SUPPORT_SERVICE_STOP: no unload while running, ever (removal
+     * is disable + reboot, DESIGN.md sec. 6b). ALLOW_UNLOAD is the explicit
+     * admin request that lets an instance be detached. */
+    {
+        wchar_t root[MAX_PATH];
+        GetVolumePathNameW(dir, root, MAX_PATH);
+        root[wcslen(root) - 1] = 0; /* "C:" */
+        hr = FilterUnload(L"PaguroFlt");
+        check(FAILED(hr), "unload refused (DO_NOT_SUPPORT_SERVICE_STOP)", (DWORD)hr);
+        hr = FilterDetach(L"PaguroFlt", root, NULL);
+        check(FAILED(hr), "detach refused before ALLOW_UNLOAD", (DWORD)hr);
+        m = msg(PG_MSG_ALLOW_UNLOAD);
+        check(SUCCEEDED(send(port, &m, sizeof(m))), "ALLOW_UNLOAD", 0);
+        hr = FilterDetach(L"PaguroFlt", root, NULL);
+        check(SUCCEEDED(hr), "detach allowed after ALLOW_UNLOAD", (DWORD)hr);
+    }
     CloseHandle(port);
-    hr = FilterUnload(L"PaguroFlt");
-    check(SUCCEEDED(hr), "unload after ALLOW_UNLOAD", (DWORD)hr);
     return failures;
 }
 

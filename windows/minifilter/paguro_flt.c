@@ -15,9 +15,10 @@
  *    once at DriverEntry, the SMBIOS table (pg_smbios.c, unit-tested).
  *  - On a native boot (no `paguro-vm/1` OEM string) it registers NOTHING and
  *    is an ordinary unloadable legacy driver.
- *  - In the VM it refuses to unload (FLTFL_REGISTRATION_DO_NOT_SUPPORT_
- *    SERVICE_STOP; STATUS_FLT_DO_NOT_DETACH) until the service sends
- *    ALLOW_UNLOAD -- the one explicit admin request.
+ *  - In the VM it cannot be unloaded while running (FLTFL_REGISTRATION_DO_
+ *    NOT_SUPPORT_SERVICE_STOP: removal is disable + reboot, DESIGN.md sec.
+ *    6b) and refuses detach (STATUS_FLT_DO_NOT_DETACH) until the service
+ *    sends ALLOW_UNLOAD -- the one explicit admin request.
  *
  * Locking: g_Lock (push lock) guards g_Table, g_Generation and g_Service.
  * No lock is held across a call into the filesystem or FltSendMessage.

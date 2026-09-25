@@ -54,9 +54,13 @@ four callbacks.
   unloads it like any legacy driver. `DBG` builds also accept
   `HKLM\SYSTEM\CurrentControlSet\Services\PaguroFlt\Parameters\ForceVmMode = 1`
   (for the hosted test runner); release builds compile that out.
-- **In the VM it does not unload** (`FLTFL_REGISTRATION_DO_NOT_SUPPORT_SERVICE_STOP`;
-  unload and manual detach answer `STATUS_FLT_DO_NOT_DETACH`) until the
-  service sends `ALLOW_UNLOAD`, the one explicit admin request.
+- **In the VM it does not unload.** With `FLTFL_REGISTRATION_DO_NOT_SUPPORT_SERVICE_STOP`
+  Filter Manager installs no unload path: `fltmc unload` and `sc stop` fail
+  while it runs (verified on windows-2022), even after `ALLOW_UNLOAD`.
+  Removal is `sc config … start= disabled` + reboot (DESIGN.md §6b; `paguro
+  uninstall` does exactly that). `ALLOW_UNLOAD`, the one explicit admin
+  request, lets instances be detached (`fltmc detach`), otherwise refused
+  with `STATUS_FLT_DO_NOT_DETACH`.
 - **No state across reboots.** The service re-sends `PROTECT` for every image
   at start; a service disconnect keeps the table (clean refusals continue)
   and ends only the exemption.
@@ -74,7 +78,8 @@ Each refusal is reported to the service as an `EVENT` (file id, operation,
 process id, status), best effort: zero timeout, never blocking. The test also
 checks the control case — after `UNPROTECT` the same operations reach NTFS —
 the exemption of the service, message validation (13 malformed messages), the
-single-client rule, and the unload refusal before and after `ALLOW_UNLOAD`.
+single-client rule, that the FSCTL refusals were the filter's (their EVENTs),
+the unload refusal, and detach refused before and allowed after `ALLOW_UNLOAD`.
 
 ### What it deliberately does not do
 
