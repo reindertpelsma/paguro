@@ -121,15 +121,32 @@ Windows file I/O → NTFS`, so Windows owns the filesystem throughout and there 
 no ownership question. It refutes the general claim; it does not refute "sector
 mapping needs enforcement", which is what §4.3 exists for.
 
-**Where Wubi's non-technical causes still apply.** Canonical dropped it because
-carrying it was not worth the trouble, and UEFI broke it. paguro is UEFI-native
-and NTFS's on-disk format has been effectively frozen since NTFS 3.1 — but it
-does more privileged things than Wubi ever did, spans two operating systems and a
-hypervisor, and asks for far more trust. **Unmaintained, it rots into "Linux
-stopped booting after a Windows update"**, which strands people rather than
-merely annoying them.
+**Wubi's other two causes, and how paguro answers them.** Canonical dropped Wubi
+because carrying it was not worth the trouble, and UEFI broke it. paguro is
+UEFI-native, and NTFS's on-disk format has been effectively frozen since NTFS
+3.1. What remains is upkeep: paguro spans two operating systems and a
+hypervisor, so it has more surfaces that can drift than Wubi had. The design is
+built so that drift is **caught early, fails soft and is repaired from
+Windows**:
 
-That is the risk that survives, and it is not a technical one.
+| Drift | What happens | Built in |
+|---|---|---|
+| a Windows feature update wipes the ESP | Windows boots as always; the next start of the paguro service restores the loader and seals | the repair hook (§7) |
+| firmware, `dbx` or Secure Boot database updates | the pre-flight notices before "Restart into Linux" and re-stages the seal; if it lands later, the loader says so and Windows fixes it in one click | pre-flight, `setupTPM`, `PaguroTpmBroken` (§4.6, §6) |
+| a kernel update the module does not build against | the update fails loudly and the previous kernel stays the default; no unbootable entry is ever written | the DKMS initramfs guard (INTERFACES §11.6) |
+| anything else in the Linux path | Linux declines to start, the data intact, the recovery key and Windows both still work | the core invariant (§3) |
+
+**Windows is never the thing that breaks**: its boot path, BitLocker
+configuration and partition table are untouched, and uninstall is a handful of
+deletions (§6b). The pieces most likely to move are stock components maintained
+by others (shim, systemd-boot or GRUB, the distribution's kernel and
+initramfs, device-mapper, ntfs3), and the parts that are ours — the formats, the
+loader, the kernel module's core — are small, versioned and exercised on every
+change against OVMF, AAVMF, several kernels and both architectures.
+
+Upkeep is still a commitment someone has to make, as for any software that
+touches boot. But the failure it guards against is "Linux waits for a repair
+that Windows can do", not a stranded machine.
 
 ---
 
