@@ -108,6 +108,10 @@ jobs:
             scenarios: s4-vhd-gpt s4-superfloppy-raw-other s4-efi-file s4-root-frag s4-secure-boot s4-gates s4-aarch64
           - group: stage 4 refusals, recovery
             scenarios: s4-refusals s4-invalid-pe s4-volume-missing s4-recovery-browser
+          # BitLocker: the stage-4 volume encrypted by make.sh; password,
+          # recovery password, clear key, disagreeing metadata copies.
+          - group: BitLocker
+            scenarios: s4-bde-*
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -157,8 +157,33 @@ fn make_esp(env: &Env, name: &str, efi: &Path, files: &[(&str, &[u8])]) -> R<Pat
 /// A 64 MiB GPT disk (written by sgdisk, so the loader's GPT parser meets a
 /// third-party writer) with one basic-data partition whose first sector
 /// carries the BitLocker signature.
+/// The data disk: a GPT partition (`VOLUME`) holding a real BitLocker
+/// volume — an empty NTFS encrypted by `test/fixtures/bde/make.sh` with
+/// `RECOVERY_PW` as its recovery password. Built once per run.
 fn make_data_disk(env: &Env) -> R<PathBuf> {
     let img = env.work.join("data.img");
+    let bde = env.work.join("data-bde.img");
+    if !bde.exists() {
+        let ntfs = env.work.join("data-ntfs.img");
+        let f = std::fs::File::create(&ntfs).map_err(|e| e.to_string())?;
+        f.set_len(32 << 20).map_err(|e| e.to_string())?;
+        drop(f);
+        sh(Command::new("mkntfs")
+            .args(["-F", "-f", "-q", "-L", "data"])
+            .arg(&ntfs)
+            .stdout(Stdio::null()))?;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let mut c = Command::new(root.join("test/fixtures/bde/make.sh"));
+        c.arg(&ntfs)
+            .arg(&bde)
+            .args(["--recovery", RECOVERY_PW, "--seed", "40", "--no-verify"]);
+        let w = root.join("target/release/paguro-bde-write");
+        if w.exists() {
+            c.env("PAGURO_BDE_WRITE", w);
+        }
+        sh(c.stdout(Stdio::null()))?;
+        let _ = std::fs::remove_file(&ntfs);
+    }
     let _ = std::fs::remove_file(&img);
     let f = std::fs::File::create(&img).map_err(|e| e.to_string())?;
     f.set_len(64 << 20).map_err(|e| e.to_string())?;
@@ -169,8 +194,9 @@ fn make_data_disk(env: &Env) -> R<PathBuf> {
         .arg(&img)
         .stdout(Stdio::null()))?;
     let mut data = std::fs::read(&img).map_err(|e| e.to_string())?;
+    let vol = std::fs::read(&bde).map_err(|e| e.to_string())?;
     let at = 2048 * 512;
-    data[at..at + 11].copy_from_slice(b"\xeb\x58\x90-FVE-FS-");
+    data[at..at + vol.len()].copy_from_slice(&vol);
     std::fs::write(&img, data).map_err(|e| e.to_string())?;
     Ok(img)
 }
@@ -662,8 +688,13 @@ fn recovery_no_config(env: &Env) -> R<()> {
         vm.expect("Recovery key (48 digits", 10)?;
         vm.send(RECOVERY_PW)?;
         vm.send("\r")?;
-        vm.expect("halted: NotImplemented(\"stage 3: recovery password\")", 30)?;
-        vm.send("x")?;
+        // The data disk is a real BitLocker volume (make.sh): the recovery
+        // password opens it, stage 4 mounts the (empty) NTFS, and recovery
+        // offers its browser. Leaving it ends this run of the loader.
+        vm.expect("stage3 rung=RecoveryKey", STRETCH_WAIT)?;
+        vm.expect("stage4 ntfs mounted", 60)?;
+        vm.expect("Choose what to start", 30)?;
+        vm.send("\x1b")?;
         // The firmware tries the next boot option: the loader runs again in
         // the same boot. B now exists in NVRAM; PCR 12 is capped twice.
         vm.expect("stage machine start", BOOT_WAIT)?;
@@ -750,8 +781,14 @@ fn load_taint_and_unseal(env: &Env) -> R<()> {
         vm.send(PIN)?;
         vm.send("\r")?;
         vm.expect("rung tpm: unsealed", STRETCH_WAIT)?;
-        vm.expect("halted: NotImplemented(\"stage 3: FVE metadata\")", 30)?;
-        vm.send("x")?;
+        // The sealed secret is not this volume's: the FVEK's MAC refuses
+        // the derived VMK (the only check there is), and the menu returns.
+        vm.expect("That did not unlock the volume", STRETCH_WAIT)?;
+        vm.expect("Unlock Linux", 10)?;
+        vm.send("\x1b")?;
+        vm.expect("Cannot unlock Linux", 10)?;
+        vm.send("\r")?; // Enter: Start Windows
+        vm.expect("no Windows Boot Manager entry", 20)?;
         // Second run in the same boot: PCR 12 is not zero any more.
         vm.expect("stage machine start", BOOT_WAIT)?;
         vm.expect("refusing: PCR 12 not zero before first extend", 20)?;
@@ -1014,6 +1051,10 @@ const SCENARIOS: &[Scenario] = &[
     ("s4-gates", stage4::gates),
     ("s4-volume-missing", stage4::volume_missing),
     ("s4-recovery-browser", stage4::recovery_browser),
+    ("s4-bde-password", stage4::bde_password),
+    ("s4-bde-recovery", stage4::bde_recovery),
+    ("s4-bde-clear-key", stage4::bde_clear_key),
+    ("s4-bde-disagree", stage4::bde_disagree),
     ("s4-aarch64", stage4::aarch64),
 ];
 

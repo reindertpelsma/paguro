@@ -25,6 +25,8 @@ AAVMF=${AAVMF_DIR:-/usr/share/AAVMF}
 
 cargo build --release -p paguro-efi -p paguro-probe --target x86_64-unknown-uefi
 cargo build --release -p paguro-qemu
+# The BitLocker scenarios encrypt the stage-4 volume with make.sh.
+cargo build --release -p paguro-harness --bin paguro-bde-write
 EFI=target/x86_64-unknown-uefi/release/paguro.efi
 PROBE=target/x86_64-unknown-uefi/release/probe.efi
 mkdir -p "$WORK"

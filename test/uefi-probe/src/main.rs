@@ -114,6 +114,22 @@ fn handoff() {
                 h.state,
                 h.config.map_or(0, <[u8]>::len)
             );
+            // BitLocker: what the initrd builds the decrypted volume from.
+            if let Some(f) = h.fvek {
+                say!("handoff fvek cipher=0x{:04x} len={}", f.cipher, f.key.len());
+            }
+            if let Some(l) = h.fve_layout {
+                say!(
+                    "handoff fve_layout md={:#x},{:#x},{:#x} region={:#x} reloc={:#x}+{} enc={:#x}",
+                    l.metadata_offsets[0],
+                    l.metadata_offsets[1],
+                    l.metadata_offsets[2],
+                    l.region_size,
+                    l.boot_sector_reloc_offset,
+                    l.boot_sector_reloc_sectors,
+                    l.encrypted_size
+                );
+            }
             for (role, img) in [
                 ("root", h.root),
                 ("efi_disk", h.efi_disk),

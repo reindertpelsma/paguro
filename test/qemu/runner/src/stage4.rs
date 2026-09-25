@@ -1166,3 +1166,195 @@ pub fn aarch64(env: &Env) -> R<()> {
     }
     r
 }
+
+// ---------------------------------------------------------------------------
+// BitLocker (DESIGN.md §6, INTERFACES.md §8, §12.2)
+
+/// The shared NTFS volume, encrypted by `test/fixtures/bde/make.sh` with
+/// `opts` (the writer libbde and dislocker vouch for, CI `bde` job); built
+/// once per option set. Returns the image and its `.keys`.
+fn bde_volume(env: &Env, tag: &str, opts: &[&str]) -> R<(PathBuf, String)> {
+    let v = volume(env)?;
+    let dir = env.work.join("stage4");
+    let out = dir.join(format!("bde-{tag}.img"));
+    let keys = dir.join(format!("bde-{tag}.img.keys"));
+    if !out.exists() || !keys.exists() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let mut c = Command::new(root.join("test/fixtures/bde/make.sh"));
+        c.arg(&v.ntfs).arg(&out).args(opts).arg("--no-verify");
+        let w = root.join("target/release/paguro-bde-write");
+        if w.exists() {
+            c.env("PAGURO_BDE_WRITE", w);
+        }
+        let o = io(c.output())?;
+        if !o.status.success() {
+            return Err(format!(
+                "make.sh: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ));
+        }
+        let _ = std::fs::remove_file(dir.join(format!("bde-{tag}.img.expect")));
+    }
+    Ok((out, io(std::fs::read_to_string(keys))?))
+}
+
+fn key<'k>(keys: &'k str, k: &str) -> R<&'k str> {
+    keys.lines()
+        .find_map(|l| l.strip_prefix(k)?.strip_prefix(' '))
+        .ok_or_else(|| format!("no {k} in the keys"))
+}
+
+/// The probe's view of the handoff's FVE_LAYOUT, from make.sh's keys.
+fn layout_line(keys: &str) -> R<String> {
+    let md = key(keys, "metadata")?;
+    Ok(format!(
+        "PAGURO-PROBE: handoff fve_layout md={md} region=0x10000 reloc={}+16 enc={:#x}",
+        key(keys, "reloc")?,
+        key(keys, "encrypted-size")?
+            .parse::<u64>()
+            .map_err(|e| e.to_string())?
+    ))
+}
+
+/// Stage 4 through the BitLocker layer: the probe starts from the VHD inside
+/// the encrypted NTFS, reads its own FAT through paguro's decrypting block
+/// device, and the handoff carries the FVEK and FVE_LAYOUT.
+fn bde_started(vm: &mut Vm, keys: &str, rung: &str) -> R<()> {
+    vm.expect("stage4 ntfs mounted", crate::STRETCH_WAIT)?;
+    vm.expect("paguro: blockio: BitLocker, 512-byte units", 60)?;
+    vm.expect("tier 1: firmware FAT bound", 60)?;
+    vm.expect("handoff published", 20)?;
+    probe_ok(vm, GPT_MARK)?;
+    vm.expect(&format!("PAGURO-PROBE: handoff rung={rung} "), 10)?;
+    vm.expect("PAGURO-PROBE: handoff fvek cipher=0x8004 len=32", 10)?;
+    vm.expect(&layout_line(keys)?, 10)?;
+    vm.expect("PAGURO-PROBE: done", 10)
+}
+
+fn bde_case<'a>(name: &'a str, ntfs: &Path) -> Case<'a> {
+    Case {
+        name,
+        ini: Some(ini("root = \\paguro\\gpt.vhd")),
+        secure: false,
+        ntfs: Some(ntfs.to_path_buf()),
+        guid: NTFS_VOLUME,
+    }
+}
+
+const BDE_PASSWORD: &str = "paguro-bde";
+
+/// A BitLocker password protector, typed after a wrong one.
+pub fn bde_password(env: &Env) -> R<()> {
+    let (img, keys) = bde_volume(
+        env,
+        "pw",
+        &[
+            "--password",
+            BDE_PASSWORD,
+            "--recovery",
+            "auto",
+            "--seed",
+            "31",
+        ],
+    )?;
+    boot(env, &bde_case("s4-bde-password", &img), |vm| {
+        vm.expect("Unlock Linux", 60)?;
+        vm.send("1")?;
+        vm.expect("Password or PIN:", 10)?;
+        vm.send("not-it\r")?;
+        vm.expect("That did not unlock the volume", crate::STRETCH_WAIT)?;
+        vm.expect("Unlock Linux", 10)?;
+        vm.send("1")?;
+        vm.expect("Password or PIN:", 10)?;
+        vm.send(BDE_PASSWORD)?;
+        vm.send("\r")?;
+        bde_started(vm, &keys, "Passphrase")
+    })
+}
+
+/// The volume's recovery password.
+pub fn bde_recovery(env: &Env) -> R<()> {
+    let (img, keys) = bde_volume(
+        env,
+        "pw",
+        &[
+            "--password",
+            BDE_PASSWORD,
+            "--recovery",
+            "auto",
+            "--seed",
+            "31",
+        ],
+    )?;
+    let rp = key(&keys, "recovery")?.to_string();
+    boot(env, &bde_case("s4-bde-recovery", &img), |vm| {
+        vm.expect("Unlock Linux", 60)?;
+        vm.send("3")?;
+        vm.expect("Recovery key (48 digits", 10)?;
+        vm.send(&rp)?;
+        vm.send("\r")?;
+        bde_started(vm, &keys, "RecoveryKey")
+    })
+}
+
+/// A clear key (BitLocker suspended): no prompt at all.
+pub fn bde_clear_key(env: &Env) -> R<()> {
+    let (img, keys) = bde_volume(env, "ck", &["--clear-key", "--seed", "32"])?;
+    boot(env, &bde_case("s4-bde-clear-key", &img), |vm| {
+        bde_started(vm, &keys, "ClearKey")?;
+        if vm.text().contains("Unlock Linux") {
+            return Err("a clear key must not prompt".into());
+        }
+        Ok(())
+    })
+}
+
+/// Metadata copies that disagree (copy 2's description changed, its CRC
+/// made to match): refused before any protector is tried.
+pub fn bde_disagree(env: &Env) -> R<()> {
+    let (img, keys) = bde_volume(
+        env,
+        "pw",
+        &[
+            "--password",
+            BDE_PASSWORD,
+            "--recovery",
+            "auto",
+            "--seed",
+            "31",
+        ],
+    )?;
+    let md: Vec<u64> = key(&keys, "metadata")?
+        .split(',')
+        .map(|x| u64::from_str_radix(x.trim_start_matches("0x"), 16))
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    let dir = env.work.join("stage4");
+    let bad = dir.join("bde-disagree.img");
+    io(std::fs::copy(&img, &bad))?;
+    let mut f = io(std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&bad))?;
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let o = *md.get(2).ok_or("three offsets")?;
+    let mut blk = vec![0u8; 0x10000];
+    io(f.seek(SeekFrom::Start(o)))?;
+    io(f.read_exact(&mut blk))?;
+    let size = usize::from(u16::from_le_bytes([blk[8], blk[9]])) * 16;
+    blk[64 + 48 + 8] ^= 0x20;
+    let c = paguro_core::bde::crc32(&blk[..size]);
+    blk[size + 4..size + 8].copy_from_slice(&c.to_le_bytes());
+    io(f.seek(SeekFrom::Start(o)))?;
+    io(f.write_all(&blk))?;
+    drop(f);
+    let r = boot(env, &bde_case("s4-bde-disagree", &bad), |vm| {
+        vm.expect("halted: Bde(CopiesDisagree)", 60)?;
+        if vm.text().contains("Unlock Linux") {
+            return Err("protectors were offered over disagreeing metadata".into());
+        }
+        Ok(())
+    });
+    let _ = std::fs::remove_file(&bad);
+    r
+}
