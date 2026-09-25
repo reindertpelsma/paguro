@@ -817,7 +817,7 @@ fn load_taint_and_unseal(env: &Env) -> R<()> {
         vm.expect("rung tpm: unsealed", STRETCH_WAIT)?;
         // The sealed secret is not this volume's: the FVEK's MAC refuses
         // the derived VMK (the only check there is), and the menu returns.
-        vm.expect("That did not unlock the volume", STRETCH_WAIT)?;
+        vm.expect("That did not unlock Linux", STRETCH_WAIT)?;
         vm.expect("Unlock Linux", 10)?;
         vm.send("\x1b")?;
         vm.expect("Cannot unlock Linux", 10)?;

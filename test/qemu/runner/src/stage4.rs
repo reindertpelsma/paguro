@@ -1266,12 +1266,12 @@ pub fn bde_password(env: &Env) -> R<()> {
     boot(env, &bde_case("s4-bde-password", &img), |vm| {
         vm.expect("Unlock Linux", 60)?;
         vm.send("1")?;
-        vm.expect("Password or PIN:", 10)?;
+        vm.expect("Enter your password or PIN", 10)?;
         vm.send("not-it\r")?;
-        vm.expect("That did not unlock the volume", crate::STRETCH_WAIT)?;
+        vm.expect("That did not unlock Linux", crate::STRETCH_WAIT)?;
         vm.expect("Unlock Linux", 10)?;
         vm.send("1")?;
-        vm.expect("Password or PIN:", 10)?;
+        vm.expect("Enter your password or PIN", 10)?;
         vm.send(BDE_PASSWORD)?;
         vm.send("\r")?;
         bde_started(vm, &keys, "BitLockerPassword")
@@ -1296,7 +1296,7 @@ pub fn bde_recovery(env: &Env) -> R<()> {
     boot(env, &bde_case("s4-bde-recovery", &img), |vm| {
         vm.expect("Unlock Linux", 60)?;
         vm.send("3")?;
-        vm.expect("Recovery key (48 digits", 10)?;
+        vm.expect("Enter your recovery key", 10)?;
         vm.send(&rp)?;
         vm.send("\r")?;
         bde_started(vm, &keys, "RecoveryKey")
