@@ -115,7 +115,11 @@ cargo run -p paguro-ui-preview -- --all --out-dir target/ui-gallery   # render e
 - **The loader never writes to disk** and never chainloads Windows (`BootNext` +
   reset instead). It implements no asymmetric cryptography.
 - **The kernel module's request path is a range test and nothing else** — no
-  cipher, no key, no NTFS parsing after load.
+  cipher, no key, and no NTFS parsing on I/O. NTFS is parsed only when an image
+  is claimed and again when it grows: the module re-reads the file's record
+  itself to confirm the new extents (after the writer — ntfs3 natively, or the
+  guest with its volume flushed — has made them durable), and never takes
+  them from userspace.
 - **Every parser is hardened**, whatever stage it runs in. Fixed capacity, no
   allocation from on-disk content, reject rather than tolerate.
 - **No authentication tag, no convenience check** on wrapped keys.

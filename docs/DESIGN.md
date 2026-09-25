@@ -1759,8 +1759,9 @@ runtime
   everything else            -> pass through
 ```
 
-> **That is the whole enforcement path: a range test.** No NTFS parsing at
-> runtime, no `$Bitmap` tracking, no re-decoding the runlist on writes — and
+> **That is the whole enforcement path: a range test.** No NTFS parsing on
+> I/O — only at claim and at each growth event, where the module re-derives
+> the extents itself (§5.6) — no `$Bitmap` tracking, no re-decoding the runlist on writes — and
 > therefore **no cryptography in the module at all**, since decrypt-to-inspect
 > existed only to read metadata it no longer inspects.
 
