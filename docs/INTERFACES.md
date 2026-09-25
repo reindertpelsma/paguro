@@ -847,6 +847,61 @@ distribution's own shim (§3.2).
 - The repair hook (DESIGN §7) restores the **already signed** `paguro.efi`
   from a copy kept on the ESP; it needs no key.
 
+### 11.7 One API, three front ends: CLI, PowerShell, GUI — DRAFT
+
+The Windows side has one API and several faces, so nothing is parsed from
+another program's text output:
+
+```text
+paguro-service (Rust, elevated, a Windows service)
+  owns every privileged action: EFI variables, ESP, BitLocker, VHDs,
+  WSL orchestration, the minifilter port
+  API: JSON-RPC 2.0 over a named pipe \\.\pipe\paguro, versioned schema,
+       ACL: local administrators + the interactive user (read-only methods),
+       progress and log as notifications
+     |
+     +-- paguro.exe           thin Rust client (and --json for scripts)
+     +-- PaguroTools          PowerShell *binary* module (C#): cmdlets return
+     |                        typed objects, -WhatIf/-Confirm, pipeline input
+     +-- paguro GUI           C# WinUI 3 app, unelevated, MVVM
+```
+
+- **The schema is the contract**: written once (`windows/api/paguro-api.json`,
+  JSON Schema), with Rust types and C# types both generated from it, and a
+  contract test that round-trips every message through both.
+- **PowerShell gets objects, not strings**: `Get-PaguroDistribution | Where
+  Size -gt 20GB | Start-PaguroLinux`. No argument mangling anywhere.
+- **The GUI runs unelevated** and asks the service; UAC only when the service
+  is installed.
+- **Tests**: service logic against the `WinApi` mock on Linux; the pipe and
+  schema contract on the Windows runner; Pester for every cmdlet; view models
+  unit-tested without UI; UI automation with FlaUI (UIA) on the Windows runner
+  for the main flows.
+
+### 11.8 The installer GUI — DRAFT
+
+For a non-expert, in this order:
+
+1. **Checks**, each explained in one sentence and fixable from the screen:
+   WSL2 present, disk space, BitLocker state (on / off / used-space-only /
+   suspended), TPM, Secure Boot and whether the Microsoft third-party CA is in
+   `db`, Fast Startup.
+2. **Distributions**: install from a distribution's ISO (§11.4 — its own
+   installer in a WSL2 container, shown through WSLg), from a scripted
+   bootstrap, or **make an existing WSL2 distribution bootable on the metal**;
+   list, grow, rename, remove; open any `.vhd`/`.vhdx` in a privileged WSL2
+   container for maintenance.
+3. **Hardware**: the host export (§11.5) shown before install — GPU, Wi-Fi,
+   CPU, board — and what the installer will be told.
+4. **Unlocking**: set the Linux passphrase or PIN, with the keyboard layout it
+   will be typed in (§13.5) and dead-key characters refused; explain the TPM,
+   the recovery key, and the opt-in passphrase-only rung in plain words.
+5. **Secure Boot**: explain the one MokManager screen before it happens
+   (what it looks like, the one-time password to type, why it is safe), and the
+   BitLocker one-reboot suspend when `db` must change (§2.1).
+6. **Restart into Linux**, and the uninstall, both with a clear summary of what
+   will and will not be touched.
+
 ## 12. Testing contract
 
 Each interface ships with:

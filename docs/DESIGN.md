@@ -4198,6 +4198,43 @@ against the on-ramp, which the installer should say rather than let them discove
 
 ---
 
+## 8d. Later: a dedicated Linux disk
+
+On machines with a second internal disk, Linux can have the whole disk instead
+of an image — the partitioned layout at full native speed, **without any of the
+image machinery**, and still with paguro's Windows integration. Planned next to
+the image install, not replacing it.
+
+| | Image on NTFS | Dedicated disk |
+|---|---|---|
+| Linux storage | fixed VHD in NTFS | the whole second disk, the distribution's own layout |
+| paguro kernel module, view C guard, minifilter | needed | **not needed** — Linux never lives inside Windows' filesystem |
+| installer | distribution ISO in a WSL2 container | the same, with the second disk attached whole (`wsl --mount` accepts non-system disks) |
+| encryption | BitLocker, inherited | **LUKS on the Linux disk when Windows uses BitLocker** |
+| Windows VM | view B: synthetic GPT, image extents refused | the **whole Windows disk** passed to QEMU; FVE substitution only if BitLocker is on (the VM still has no TPM) |
+| Fast Startup / hibernation | gates Linux read-write | irrelevant to booting Linux; the VM still requires a clean Windows volume, and the app says how to get one |
+
+**The LUKS key without a key file.** Rather than storing a LUKS key on the
+Windows disk, the LUKS keyslot's passphrase is derived from the VMK,
+`HMAC(VMK, "paguro/luks")`. The loader already obtains the VMK through the
+normal rungs (TPM + PIN, recovery key), so Linux unlocks both disks with one
+unlock and no key rests anywhere. Windows can derive the same value through its
+own BitLocker protector, which is how WSL2 opens the LUKS disk from Windows. On an
+unencrypted Windows volume LUKS stays optional, with its own passphrase.
+
+**Booting it** keeps the rest of the design: `paguro.efi` is the entry, unlocks
+BitLocker only as far as the FVE metadata (the NTFS volume is never read, so
+hibernation cannot matter), derives the LUKS key, and starts the next image
+from the Linux disk's own ESP. "Start Windows" and "Restart into Linux" remain
+`BootNext` + reset, so the TPM measurements stay those the seal expects.
+
+**The Windows VM with the whole disk** needs its own safety rules: WinRE must
+still not be reachable (*Reset this PC* from the VM would reinstall the shared
+Windows), so the recovery partition is hidden from the guest by the same kind
+of dm-linear view, and Linux must not mount the Windows volume while the VM
+runs (§5b Rule 1) — enforced by a userspace lock, since the module is not in
+this path.
+
 ## 8c. Platform drift — what is actually exposed
 
 Wubi died because the platform moved. Worth being specific about which surfaces
