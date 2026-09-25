@@ -7,7 +7,11 @@ namespace Paguro.Gui.Views;
 public sealed partial class DistributionsPage : Page
 {
     public DistributionsViewModel VM => App.Main.Distributions;
-    public DistributionsPage() => InitializeComponent();
+    public DistributionsPage()
+    {
+        InitializeComponent();
+        ManualBox.IsChecked = VM.Manual;
+    }
 
     static DistroItem Item(object sender) => (DistroItem)((FrameworkElement)sender).Tag;
     void Open_Click(object sender, RoutedEventArgs e) => VM.OpenInContainer.Execute(Item(sender));
@@ -15,6 +19,8 @@ public sealed partial class DistributionsPage : Page
     void Grow_Click(object sender, RoutedEventArgs e) => VM.Grow.Execute(Item(sender));
     void Remove_Click(object sender, RoutedEventArgs e) => VM.Remove.Execute(Item(sender));
     void Bootable_Click(object sender, RoutedEventArgs e) => VM.MakeBootable.Execute(Item(sender));
+
+    void Manual_Click(object sender, RoutedEventArgs e) => VM.Manual = ManualBox.IsChecked == true;
 
     async void Browse_Click(object sender, RoutedEventArgs e)
     {

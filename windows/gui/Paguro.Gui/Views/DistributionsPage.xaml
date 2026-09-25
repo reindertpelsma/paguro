@@ -15,7 +15,7 @@
                     <DataTemplate x:DataType="vm:DistroItem">
                         <Grid Margin="0,4" Padding="16,12" CornerRadius="6" ColumnSpacing="16"
                               Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                              AutomationProperties.AutomationId="{x:Bind local:Ids.Item('distro', Name)}" AutomationProperties.Name="{x:Bind Name}">
+                              AutomationProperties.AutomationId="{x:Bind local:Ids.Distro(Name)}" AutomationProperties.Name="{x:Bind Name}">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
@@ -31,12 +31,12 @@
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                                 <Button Content="{local:Str Key=open_container}" Visibility="{x:Bind IsImage}" Tag="{x:Bind}" Click="Open_Click"
-                                        AutomationProperties.AutomationId="{x:Bind local:Ids.Item('open', Name)}" />
+                                        AutomationProperties.AutomationId="{x:Bind local:Ids.Open(Name)}" />
                                 <Button Content="{local:Str Key=rename}" Visibility="{x:Bind IsImage}" Tag="{x:Bind}" Click="Rename_Click" />
                                 <Button Content="{local:Str Key=grow}" Visibility="{x:Bind IsImage}" Tag="{x:Bind}" Click="Grow_Click" />
                                 <Button Content="{local:Str Key=remove}" Visibility="{x:Bind IsImage}" Tag="{x:Bind}" Click="Remove_Click" />
                                 <Button Content="{local:Str Key=make_bootable}" Visibility="{x:Bind IsWsl}" Tag="{x:Bind}" Click="Bootable_Click"
-                                        AutomationProperties.AutomationId="{x:Bind local:Ids.Item('bootable', Name)}" />
+                                        AutomationProperties.AutomationId="{x:Bind local:Ids.Bootable(Name)}" />
                             </StackPanel>
                         </Grid>
                     </DataTemplate>
@@ -58,7 +58,7 @@
                     <TextBox Header="{local:Str Key=install_iso}" AutomationProperties.AutomationId="IsoPath" Text="{x:Bind VM.IsoPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
                     <Button Grid.Column="1" VerticalAlignment="Bottom" Content="{local:Str Key=browse}" Click="Browse_Click" />
                 </Grid>
-                <CheckBox Content="{local:Str Key=install_manual}" AutomationProperties.AutomationId="Manual" IsChecked="{x:Bind VM.Manual, Mode=TwoWay}" />
+                <CheckBox x:Name="ManualBox" Content="{local:Str Key=install_manual}" AutomationProperties.AutomationId="Manual" Click="Manual_Click" />
                 <TextBlock Style="{StaticResource Note}" Text="{local:Str Key=install_manual_why}" />
                 <Button Style="{StaticResource AccentButtonStyle}" Content="{local:Str Key=install_start}" AutomationProperties.AutomationId="Install" Command="{x:Bind VM.Install}" />
             </StackPanel>
