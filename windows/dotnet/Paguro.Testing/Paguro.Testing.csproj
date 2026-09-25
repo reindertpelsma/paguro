@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- A scriptable stand-in for paguro-service on a named pipe, for the
+       client, cmdlet (Pester) and GUI tests. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Paguro.Testing</RootNamespace>
+  </PropertyGroup>
+</Project>

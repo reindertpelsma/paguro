@@ -13,6 +13,7 @@ on:
       - 'crates/paguro-crypto/**'
       - 'crates/paguro-boot/**'
       - 'windows/**'
+      - 'themes/default/strings/**'
       - 'fuzz/fuzz_targets/win_formats.rs'
       - '.github/workflows/windows.yml'
   pull_request:
@@ -89,6 +90,18 @@ jobs:
           $c.Run.Path = 'windows/PaguroTools/Tests'
           $c.Run.Exit = $true
           Invoke-Pester -Configuration $c
+
+  api:
+    name: API contract (schema, generated C# types, pipe client) on Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: C# types generated from paguro-api.json; fixtures round-trip; client over a pipe
+        working-directory: windows/dotnet
+        run: dotnet test Paguro.Api.Tests -m:1 --logger "console;verbosity=normal"
 
   linux:
     name: cross-compile, SMBIOS parser (ASan/UBSan), Pester on Linux, fuzz
