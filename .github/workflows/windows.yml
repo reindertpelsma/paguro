@@ -157,7 +157,7 @@ jobs:
       - name: publish paguro-app.exe (WinUI 3, unpackaged, self-contained, single file; the XAML compiler needs MSBuild)
         working-directory: windows/gui/Paguro.Gui
         run: |
-          msbuild Paguro.Gui.csproj /t:Restore,Publish /m:1 /v:m /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishSingleFile=true "/p:PublishDir=$env:GITHUB_WORKSPACE\publish\app\"
+          msbuild Paguro.Gui.csproj /restore /t:Publish /m:1 /v:m /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishSingleFile=true "/p:PublishDir=$env:GITHUB_WORKSPACE\publish\app\"
           Get-ChildItem $env:GITHUB_WORKSPACE\publish\app | Format-Table Name, Length
       - name: UI automation (FlaUI, a fake service)
         shell: pwsh

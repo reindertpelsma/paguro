@@ -1000,9 +1000,33 @@ fn prepare(
     if !DIRECT_ONLY.contains(&method) || cli.dry_run {
         return Ok(None);
     }
-    if method == "uninstall" {
-        choose_images(api, cli, argv)?;
+    if let Command::Uninstall { yes: false, .. } = &cli.command {
+        let answer = api
+            .read_line("Remove paguro from this PC? [y/N] ")
+            .map_err(|_| CmdError::refused("uninstall removes paguro from this machine: pass --yes (or --dry-run to see the plan)"))?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
+            return Err(CmdError::refused("not uninstalled"));
+        }
+        argv.push("--yes".into());
+        let with_yes = Cli::try_parse_from(argv.iter())
+            .map_err(|e| CmdError::new(Exit::Usage, e.to_string()))?;
+        return prepare_uninstall(api, &with_yes, argv);
     }
+    if method == "uninstall" {
+        return prepare_uninstall(api, cli, argv);
+    }
+    if api.is_elevated() {
+        return Ok(None);
+    }
+    relaunch_elevated(api, argv).map(Some)
+}
+
+fn prepare_uninstall(
+    api: &dyn WinApi,
+    cli: &Cli,
+    argv: &mut Vec<std::ffi::OsString>,
+) -> Result<Option<Rendered>, CmdError> {
+    choose_images(api, cli, argv)?;
     if api.is_elevated() {
         return Ok(None);
     }

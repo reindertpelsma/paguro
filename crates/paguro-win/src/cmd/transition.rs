@@ -720,6 +720,23 @@ pub fn repair(ctx: &Ctx<'_>, stage_now: bool, bootstrap: bool, app_only: bool) -
         .line("paguro's files, service and entries checked (--app-only: not the boot path)"));
     }
     ctx.need_uefi()?;
+    // Nothing of the boot path was ever set up (no distribution installed
+    // yet): there is nothing to repair there, and that is not a failure.
+    let set_up = esp::read_manifest(ctx.api)?.is_some()
+        || ctx
+            .esp()
+            .ok()
+            .and_then(|e| cfgfile::read(ctx.api, &e).ok().flatten())
+            .is_some();
+    if !set_up {
+        return Ok(Report::new(
+            json!({ "checks": [], "secure_boot": false, "app": app_json, "action": null }),
+        )
+        .lines(app_lines)
+        .line(
+            "the boot path is not set up yet (no distribution installed): nothing to repair there",
+        ));
+    }
     let pf = run_preflight(ctx, true)?;
     let mut data = serde_json::to_value(&pf).map_err(|e| CmdError::internal(e.to_string()))?;
     if let Some(o) = data.as_object_mut() {

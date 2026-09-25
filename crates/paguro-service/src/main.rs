@@ -67,6 +67,9 @@ fn main() {
         [s, c, rest @ ..] if s == "service" && c == "console" => {
             paguro_service::console::console(rest)
         }
+        rest if !has_console() && !rest.iter().any(|a| a == "--json" || a == "--report") => {
+            windowed(rest)
+        }
         _ => cli(),
     }
 }
@@ -128,6 +131,91 @@ fn no_arguments() {
     }
 }
 
+/// Run without a console (Apps & Features runs `paguro.exe uninstall` and
+/// `paguro.exe repair`; a shortcut; the Run box): ask with dialogs what a
+/// terminal would have asked, and show the outcome in a message box.
+fn windowed(args: &[String]) {
+    #[cfg(windows)]
+    let api = paguro_win::real::RealApi::new();
+    #[cfg(not(windows))]
+    let api = paguro_win::mock::MockApi::standard();
+    let me = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "paguro".into());
+    let mut argv: Vec<String> = std::iter::once(me).chain(args.iter().cloned()).collect();
+    let has = |f: &str| args.iter().any(|a| a == f);
+    if args.first().map(String::as_str) == Some("uninstall") && !has("--dry-run") {
+        if !has("--yes") {
+            if !msgbox_ex(
+                "Uninstall paguro",
+                "Remove paguro from this PC?\n\nLinux will no longer start from this PC. One restart goes through paguro to clean up, then Windows starts again.",
+                true,
+                true,
+            ) {
+                return;
+            }
+            argv.push("--yes".into());
+        }
+        if !has("--keep-images") && !has("--delete-images") {
+            let delete = msgbox_ex(
+                "Uninstall paguro: your Linux installations",
+                "Delete the Linux disk images too?\n\nYes: they are deleted, with everything in them.\nNo: they are kept (you can delete them yourself later).",
+                true,
+                true,
+            );
+            argv.push(
+                if delete {
+                    "--delete-images"
+                } else {
+                    "--keep-images"
+                }
+                .into(),
+            );
+        }
+    }
+    let r = paguro_win::cli::run_with(&api, argv.iter(), &connect, &|_| {}, &|_| None);
+    // What a person reads: the lines, and for a failure its one-line reason
+    // (not the structured detail a terminal would also print).
+    let reason = r.stderr.lines().next().unwrap_or("").trim().to_string();
+    let text = if r.code == 0 || r.code == 8 {
+        r.stdout.trim().to_string()
+    } else {
+        reason
+    };
+    let text = text.as_str();
+    let title = if r.code == 0 || r.code == 8 {
+        "paguro"
+    } else {
+        "paguro: not done"
+    };
+    msgbox(title, if text.is_empty() { "Done." } else { text }, false);
+    std::process::exit(r.code);
+}
+
+#[cfg(windows)]
+fn has_console() -> bool {
+    use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList, GetConsoleWindow};
+    // SAFETY: plain calls; the buffer outlives them.
+    unsafe {
+        if GetConsoleWindow().is_invalid() {
+            return false;
+        }
+        let mut pids = [0u32; 4];
+        if GetConsoleProcessList(&mut pids) == 1 {
+            // Made for us alone (older Windows, started from Explorer or
+            // Settings): give it back and use dialogs instead.
+            let _ = FreeConsole();
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(not(windows))]
+fn has_console() -> bool {
+    true
+}
+
 fn start_gui(app: &str) {
     if let Err(e) = std::process::Command::new(app).spawn() {
         eprintln!("paguro: cannot start {app}: {e}");
@@ -156,17 +244,31 @@ fn release_own_console() -> bool {
 
 #[cfg(windows)]
 fn msgbox(title: &str, text: &str, question: bool) -> bool {
+    msgbox_ex(title, text, question, false)
+}
+
+/// `default_no`: the destructive questions start on No.
+#[cfg(windows)]
+fn msgbox_ex(title: &str, text: &str, question: bool, default_no: bool) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{
-        IDYES, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW,
+        IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW,
     };
     use windows::core::HSTRING;
-    let flags = if question {
+    let mut flags = if question {
         MB_YESNO | MB_ICONQUESTION
     } else {
         MB_OK | MB_ICONINFORMATION
     };
+    if default_no {
+        flags |= MB_DEFBUTTON2;
+    }
     // SAFETY: valid strings; no owner window.
     unsafe { MessageBoxW(None, &HSTRING::from(text), &HSTRING::from(title), flags) == IDYES }
+}
+
+#[cfg(not(windows))]
+fn msgbox_ex(title: &str, text: &str, question: bool, _default_no: bool) -> bool {
+    msgbox(title, text, question)
 }
 
 #[cfg(not(windows))]

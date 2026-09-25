@@ -509,9 +509,22 @@ impl WinApi for RealApi {
     }
 
     fn fw_delete(&self, name: &str, vendor: &Guid) -> ApiResult<()> {
-        // SAFETY: a zero-length write deletes the variable.
+        // A zero-length write deletes the variable, but only with the
+        // variable's own attributes: firmware (OVMF, found in the Windows
+        // test VM) answers EFI_INVALID_PARAMETER to attributes 0, which
+        // Windows reports as ERROR_INVALID_PARAMETER.
+        let Some(cur) = self.fw_get(name, vendor)? else {
+            return Ok(());
+        };
+        // SAFETY: a zero-length write with the variable's attributes.
         match unsafe {
-            SetFirmwareEnvironmentVariableExW(&wide(name), &guid_braced(vendor), None, 0, 0)
+            SetFirmwareEnvironmentVariableExW(
+                &wide(name),
+                &guid_braced(vendor),
+                None,
+                0,
+                cur.attributes,
+            )
         } {
             Ok(()) => Ok(()),
             Err(e) if win32_code(&e) == ERROR_ENVVAR_NOT_FOUND => Ok(()),

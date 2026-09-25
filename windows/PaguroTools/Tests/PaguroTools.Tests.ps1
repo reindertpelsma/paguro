@@ -405,7 +405,7 @@ Describe 'PaguroTools against paguro service console --mock' -Skip:(-not $env:PA
         @(Get-PaguroCheck -PipeName $pipe).Count | Should -Be 8
     }
     It 'plans with -WhatIf and refuses what the layout cannot type' {
-        (Uninstall-Paguro -PipeName $pipe -WhatIf).Steps.Count | Should -BeGreaterThan 3
+        (Uninstall-Paguro -PipeName $pipe -KeepImages -WhatIf).Steps.Count | Should -BeGreaterThan 3
         $r = Test-PaguroSecret -PipeName $pipe (ConvertTo-SecureString 'aê' -AsPlainText -Force) -Keyboard fr
         $r.Ok | Should -BeFalse
         Set-PaguroProtection -PipeName $pipe passphrase -Keyboard fr -Pin (ConvertTo-SecureString 'azerty' -AsPlainText -Force) -WhatIf |
