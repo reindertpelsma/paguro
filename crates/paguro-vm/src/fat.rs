@@ -149,6 +149,29 @@ impl Tree {
         Ok(())
     }
 
+    /// Replace an existing file's data.
+    pub fn replace(&mut self, path: &str, data: Vec<u8>) -> Result<(), FatError> {
+        let comps: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let (name, dirs) = comps
+            .split_last()
+            .ok_or_else(|| FatError::BadName(path.into()))?;
+        let mut d = &mut self.root;
+        for c in dirs {
+            let k = d.dirs.keys().find(|k| key(k) == key(c)).cloned();
+            d = k
+                .and_then(|k| d.dirs.get_mut(&k))
+                .ok_or_else(|| FatError::BadName(path.into()))?;
+        }
+        let k = d
+            .files
+            .keys()
+            .find(|k| key(k) == key(name))
+            .cloned()
+            .ok_or_else(|| FatError::BadName(path.into()))?;
+        d.files.insert(k, data);
+        Ok(())
+    }
+
     /// Total bytes of file data (for sizing the image).
     pub fn data_bytes(&self) -> u64 {
         fn walk(d: &Dir) -> u64 {
