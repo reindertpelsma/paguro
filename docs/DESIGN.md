@@ -2123,6 +2123,24 @@ Windows update that blocks or breaks it means no VM until fixed, so §7 must tre
 driver load failure as a first-class condition with a real remediation path, not
 a log line.
 
+**On a native boot the driver is present and inert.** The VM and the native boot
+share one Windows installation, and so one service configuration: whatever loads
+in the VM is also configured to load natively. The driver therefore decides at
+`DriverEntry` which boot it is in, from a marker only the paguro VM carries — an
+SMBIOS type 11 OEM string that QEMU sets (`-smbios type=11,value=paguro-vm/1`),
+read with `ExGetSystemFirmwareTable('RSMB')`:
+
+| Boot | Driver |
+|---|---|
+| paguro VM | registers the filter, refuses unload, pins and protects as above |
+| native | **registers nothing**: no filter, no instances, no port. `DriverEntry` returns success with an unload routine, so it can be stopped and unloaded like any legacy driver, and it never touches I/O |
+| native, test-signed build | does not load at all: test signing is on only in the VM's synthetic ESP (§12), so Code Integrity refuses it — one event-log entry per boot, nothing else |
+
+Natively there is nothing to protect: Linux is not running, and anything
+native Windows does to an image — defrag moving it included — is harmless,
+because the next Linux boot re-derives the map (§3). A forged marker on a native
+boot only switches clean refusals on for the image files, which costs nothing.
+
 **Signing.** Attestation signing (§11) is preferred: it loads under Secure Boot
 and HVCI, creates an ordinary DriverStore entry, and does not move the machine
 between §8's EDR tiers. Failing that, §12's synthetic ESP scopes test-signing to
