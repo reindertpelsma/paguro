@@ -2196,7 +2196,11 @@ quality-of-experience property, since §4.3 holds with or without it.
   watermark** (§1b, §11 Q32), by default:
   - the host's **whole SMBIOS table** (`/sys/firmware/dmi/tables/DMI` →
     `-smbios file=…`), with paguro's type-11 marker appended — the same
-    manufacturer, model, board, serial and system UUID the native boot sees;
+    manufacturer, model, board, serial and system UUID the native boot sees,
+    **and QEMU's own `-uuid` set to that same UUID**: community reports on OEM
+    licences find Windows checks the UUID, and a VM whose type-1 UUID differs
+    from the machine UUID (libvirt's `smbios mode='host'` alone) does not stay
+    activated;
   - the firmware's licence tables: **MSDM** (the OEM key, `-acpitable
     file=/sys/firmware/acpi/tables/MSDM`) and **SLIC** where present;
   - **`-cpu host`**, the real CPU model and features;
@@ -4685,7 +4689,11 @@ later question sits with the ones it belongs to rather than in numeric order.
     activated against the device's hardware hash) is meant for bare metal, and
     running the *same* installation virtualised is unusual for it. Whether
     Windows or Microsoft's activation service rejects it — by the hash, by
-    detecting the hypervisor, or not at all — is unknown. On an OEM laptop,
+    detecting the hypervisor, or not at all — is not documented by Microsoft; **community reports say it works** when the
+    VM carries the SLIC/MSDM tables, SMBIOS types 0 and 1 from the host and the
+    host's board UUID, including the *same* installation booted on bare metal
+    and in the VM (sources in §4.5's notes) — the configuration §4.5 now uses
+    by default. To confirm on our own hardware: on an OEM laptop,
     switching native ↔ VM many times: activated in the VM with no watermark?
     still activated natively? Order of attempts, least first: `-cpu host`,
     the host's SMBIOS and MSDM (§4.5); then disk serial and MAC; then hiding
