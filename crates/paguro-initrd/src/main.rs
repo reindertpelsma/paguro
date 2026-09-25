@@ -38,6 +38,9 @@ mod sys;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// How long `setup` waits for the handoff's partition by default.
+const DEFAULT_WAIT: Duration = Duration::from_secs(30);
+
 fn usage() -> ! {
     eprintln!(
         "usage: paguro-initrd systab | setup [--env FILE] [--handoff DEV] [--wait SECS] [--no-esp] | status | plan-vmdisk"
@@ -54,7 +57,7 @@ fn main() {
             let mut o = setup::Opts {
                 handoff: PathBuf::from(setup::HANDOFF_DEV),
                 env: PathBuf::from("/run/paguro/root.env"),
-                wait: Duration::from_secs(30),
+                wait: DEFAULT_WAIT,
                 root_hint: setup::cmdline_arg("paguro.root"),
                 esp: true,
             };

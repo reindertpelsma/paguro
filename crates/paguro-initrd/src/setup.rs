@@ -24,6 +24,47 @@ pub const HANDOFF_DEV: &str = "/dev/paguro-handoff";
 /// Always the root device of a paguro boot.
 pub const ROOT_LINK: &str = "/dev/paguro-root";
 const WORK: &str = "/run/paguro";
+/// Poll interval while waiting for the handoff's partition to appear.
+const PARTITION_POLL: Duration = Duration::from_millis(200);
+/// The VHD footer `disk::detect` reads from an image's tail.
+const FOOTER_LEN: usize = paguro_core::vhd::FOOTER_LEN as usize;
+
+// `fs_type`: bytes read from a device's start, and the magic each file
+// system keeps at a fixed offset in them.
+const FS_PROBE_LEN: u64 = 36 * 1024;
+/// ext4 superblock (at 1024) `s_magic` (+0x38): 0xEF53, little-endian.
+const EXT4_MAGIC_AT: usize = 1024 + 0x38;
+const EXT4_MAGIC: [u8; 2] = [0x53, 0xef];
+/// ISO 9660 primary volume descriptor (sector 16) standard identifier.
+const ISO9660_MAGIC_AT: usize = 0x8001;
+const ISO9660_MAGIC: &[u8] = b"CD001";
+/// btrfs superblock (at 64 KiB) `magic` (+0x40).
+const BTRFS_MAGIC_AT: usize = 0x10040;
+const BTRFS_MAGIC: &[u8] = b"_BHRfS_M";
+/// XFS superblock `sb_magicnum` at the start.
+const XFS_MAGIC_AT: usize = 0;
+const XFS_MAGIC: &[u8] = b"XFSB";
+/// FAT32: the OEM name some formatters set, and BS_FilSysType (0x52).
+const FAT32_OEM_AT: usize = 3;
+const FAT32_FSTYPE_AT: usize = 0x52;
+const FAT32_LABEL: &[u8] = b"FAT32   ";
+
+/// `struct efi_info` (arch/x86/include/uapi/asm/bootparam.h), at
+/// `EFI_INFO_AT` in `struct boot_params`: layout only, for `offset_of!`.
+#[allow(dead_code)]
+#[repr(C)]
+struct EfiInfo {
+    efi_loader_signature: u32,
+    efi_systab: u32,
+    efi_memdesc_size: u32,
+    efi_memdesc_version: u32,
+    efi_memmap: u32,
+    efi_memmap_size: u32,
+    efi_systab_hi: u32,
+    efi_memmap_hi: u32,
+}
+const EFI_INFO_AT: usize = 0x1c0;
+const _: () = assert!(core::mem::offset_of!(EfiInfo, efi_systab_hi) == 24);
 
 pub fn log(msg: &str) {
     eprintln!("paguro-initrd: {msg}");
@@ -183,7 +224,7 @@ fn find_partition(v: &handoff::Volume, wait: Duration) -> R<PathBuf> {
                 if slot + 1 == n
                     && e.unique_guid == v.partition
                     && e.first_lba == v.first_lba
-                    && e.sectors() * u64::from(lbs) == v.sectors * 512
+                    && e.sectors() * u64::from(lbs) == v.sectors * plan::SECTOR
                 {
                     return Ok(node);
                 }
@@ -195,7 +236,7 @@ fn find_partition(v: &handoff::Volume, wait: Duration) -> R<PathBuf> {
                 v.partition, v.first_lba
             ));
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(PARTITION_POLL);
     }
 }
 
@@ -423,7 +464,7 @@ fn probe_ntfs(dm: &Dm, plain: &Path, imgs: &[&Image]) -> R<Vec<Probe>> {
         "paguro-ntfs-ro",
         &[Target {
             start: 0,
-            len: bytes / 512,
+            len: bytes / plan::SECTOR,
             kind: "linear",
             params: format!("{} 0", devt(sys::devno(plain)?)),
         }],
@@ -467,9 +508,9 @@ fn probe_file(root: &File, mnt: &Path, img: &Image) -> R<Probe> {
         }
     };
     let len = f.metadata().map_err(|e| e.to_string())?.len();
-    let mut tail = [0u8; 512];
-    if len >= 512 {
-        f.read_exact_at(&mut tail, len - 512)
+    let mut tail = [0u8; FOOTER_LEN];
+    if len >= FOOTER_LEN as u64 {
+        f.read_exact_at(&mut tail, len - FOOTER_LEN as u64)
             .map_err(|e| format!("reading the disk's footer: {e}"))?;
     }
     let p = disk::detect(len, &tail);
@@ -505,17 +546,17 @@ fn find_by_ino(dir: &Path, ino: u64) -> R<File> {
 fn fs_type(dev: &Path) -> R<&'static str> {
     let f = File::open(dev).map_err(|e| format!("{}: {e}", dev.display()))?;
     let (size, _) = sys::blk_geometry(&f)?;
-    let b = read_at(&f, 0, size.min(36 * 1024) as usize)?;
-    let at = |o: usize, n: usize| b.get(o..o + n).unwrap_or(&[]);
-    Ok(if at(1080, 2) == [0x53, 0xef] {
+    let b = read_at(&f, 0, size.min(FS_PROBE_LEN) as usize)?;
+    let has = |o: usize, magic: &[u8]| b.get(o..o + magic.len()) == Some(magic);
+    Ok(if has(EXT4_MAGIC_AT, &EXT4_MAGIC) {
         "ext4"
-    } else if at(0x8001, 5) == b"CD001" {
+    } else if has(ISO9660_MAGIC_AT, ISO9660_MAGIC) {
         "iso9660"
-    } else if at(0x10040, 8) == b"_BHRfS_M" {
+    } else if has(BTRFS_MAGIC_AT, BTRFS_MAGIC) {
         "btrfs"
-    } else if at(0, 4) == b"XFSB" {
+    } else if has(XFS_MAGIC_AT, XFS_MAGIC) {
         "xfs"
-    } else if at(3, 8) == b"FAT32   " || at(0x52, 8) == b"FAT32   " {
+    } else if has(FAT32_OEM_AT, FAT32_LABEL) || has(FAT32_FSTYPE_AT, FAT32_LABEL) {
         "vfat"
     } else {
         "auto"
@@ -533,14 +574,14 @@ fn expose(
 ) -> R<Option<(PathBuf, &'static str)>> {
     let f = File::open(&view.node).map_err(|e| format!("{}: {e}", view.node.display()))?;
     let (_, lbs) = sys::blk_geometry(&f)?;
-    let sig = read_at(&f, u64::from(lbs), 8)?;
+    let sig = read_at(&f, u64::from(lbs), gpt::SIGNATURE.len())?;
     drop(f);
     if sig != gpt::SIGNATURE {
         let ty = fs_type(&view.node)?;
         return Ok(Some((PathBuf::from("/dev/mapper").join(&view.name), ty)));
     }
     let (lbs, es) = read_gpt(&view.node)?;
-    let per = u64::from(lbs) / 512;
+    let per = u64::from(lbs) / plan::SECTOR;
     let mut nodes = Vec::new();
     for (slot, e) in &es {
         let name = format!("{}-p{}", view.name, slot + 1);
@@ -616,13 +657,14 @@ pub fn status() -> R<String> {
 pub fn systab() -> R<u64> {
     let b = std::fs::read("/sys/kernel/boot_params/data")
         .map_err(|e| format!("/sys/kernel/boot_params/data: {e}"))?;
-    // struct boot_params: efi_info at 0x1c0 — efi_systab at +4, _hi at +24.
     let u32_at = |o: usize| {
-        b.get(o..o + 4)
+        b.get(o..o + size_of::<u32>())
             .and_then(|s| s.try_into().ok())
             .map_or(0, u32::from_le_bytes)
     };
-    let st = u64::from(u32_at(0x1c4)) | u64::from(u32_at(0x1d8)) << 32;
+    let lo = EFI_INFO_AT + core::mem::offset_of!(EfiInfo, efi_systab);
+    let hi = EFI_INFO_AT + core::mem::offset_of!(EfiInfo, efi_systab_hi);
+    let st = u64::from(u32_at(lo)) | u64::from(u32_at(hi)) << 32;
     if st == 0 {
         return Err("no EFI system table in boot_params (not an EFI boot?)".into());
     }

@@ -8,10 +8,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use paguro_core::guid::PAGURO_VENDOR;
-use paguro_core::handoff::Rung;
+use paguro_core::handoff::{self, Rung};
 use paguro_core::recorded::{self, Recorded};
 use paguro_core::seal::Kind;
 use paguro_core::tcglog;
+use paguro_core::tpm::SHA256_LEN;
 use sha2::{Digest, Sha256};
 
 use crate::setup::{Taken, log, read_gpt};
@@ -19,6 +20,9 @@ use crate::sys::{self, R};
 
 const MNT: &str = "/run/paguro/esp";
 const EFIVARS: &str = "/sys/firmware/efi/efivars";
+/// EFI_VARIABLE_NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS (UEFI
+/// 2.10 §8.2): the attributes efivarfs takes ahead of the data.
+const NV_BS_RT: u32 = 0x7;
 
 /// ESP partitions on real (non device-mapper) disks.
 fn esp_candidates() -> Vec<PathBuf> {
@@ -67,32 +71,32 @@ fn replace(path: &Path, data: &[u8]) -> R<bool> {
     Ok(true)
 }
 
-fn sha256_file(p: &Path) -> [u8; 32] {
-    std::fs::read(p).map_or([0; 32], |b| Sha256::digest(&b).into())
+fn sha256_file(p: &Path) -> [u8; SHA256_LEN] {
+    std::fs::read(p).map_or([0; SHA256_LEN], |b| Sha256::digest(&b).into())
 }
 
 /// SHA-256 over PCR 7's EV_EFI_VARIABLE_DRIVER_CONFIG digests, in log
 /// order (INTERFACES.md §5); zeros without a TPM event log.
-fn secure_boot_config() -> [u8; 32] {
+fn secure_boot_config() -> [u8; SHA256_LEN] {
     let sec = Path::new("/sys/kernel/security");
     if !sec.join("tpm0").exists() {
         let _ = sys::mount("securityfs", sec, "securityfs", 0, "");
     }
     let Ok(log) = std::fs::read(sec.join("tpm0/binary_bios_measurements")) else {
-        return [0; 32];
+        return [0; SHA256_LEN];
     };
     let mut h = Sha256::new();
     match tcglog::driver_config_digests(&log, |d| h.update(d)) {
         Ok(_) => h.finalize().into(),
-        Err(_) => [0; 32],
+        Err(_) => [0; SHA256_LEN],
     }
 }
 
 fn recorded(t: &Taken, dir: &Path) -> R<Recorded> {
     let mut rec = Recorded::default();
-    // PCRS carries 32 bytes per set bit, ascending.
-    let mut vals = t.pcrs.chunks_exact(32);
-    for pcr in 0..24u32 {
+    // PCRS carries one SHA-256 value per set bit, ascending.
+    let mut vals = t.pcrs.chunks_exact(SHA256_LEN);
+    for pcr in 0..handoff::PCR_COUNT {
         if t.pcr_mask & (1 << pcr) == 0 {
             continue;
         }
@@ -115,7 +119,7 @@ fn recorded(t: &Taken, dir: &Path) -> R<Recorded> {
 }
 
 /// `PaguroConfigHash` (NV | BS | RT) through efivarfs.
-fn set_config_hash(hash: &[u8; 32]) -> R<()> {
+fn set_config_hash(hash: &[u8; SHA256_LEN]) -> R<()> {
     let vars = Path::new(EFIVARS);
     if !vars.join(".").exists()
         || std::fs::read_dir(vars)
@@ -128,8 +132,8 @@ fn set_config_hash(hash: &[u8; 32]) -> R<()> {
     if let Ok(f) = File::open(&p) {
         sys::clear_immutable(&f);
     }
-    let mut data = Vec::with_capacity(36);
-    data.extend_from_slice(&7u32.to_le_bytes());
+    let mut data = Vec::with_capacity(size_of::<u32>() + hash.len());
+    data.extend_from_slice(&NV_BS_RT.to_le_bytes());
     data.extend_from_slice(hash);
     let mut f = OpenOptions::new()
         .write(true)

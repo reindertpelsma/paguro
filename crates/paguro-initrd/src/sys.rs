@@ -22,10 +22,23 @@ pub fn err<T>(what: &str) -> R<T> {
     Err(format!("{what}: {}", io::Error::last_os_error()))
 }
 
+// The ioctl request encoding (include/uapi/asm-generic/ioctl.h).
+const IOC_READ_WRITE: libc::c_ulong = 3; // _IOC_READ | _IOC_WRITE
+const IOC_NRSHIFT: u32 = 0;
+const IOC_TYPESHIFT: u32 = 8;
+const IOC_SIZESHIFT: u32 = 16;
+const IOC_DIRSHIFT: u32 = 30;
+
 /// `_IOWR(ty, nr, size)`.
 pub const fn iowr(ty: u8, nr: u8, size: usize) -> libc::c_ulong {
-    (3 << 30) | ((size as libc::c_ulong) << 16) | ((ty as libc::c_ulong) << 8) | nr as libc::c_ulong
+    (IOC_READ_WRITE << IOC_DIRSHIFT)
+        | ((size as libc::c_ulong) << IOC_SIZESHIFT)
+        | ((ty as libc::c_ulong) << IOC_TYPESHIFT)
+        | ((nr as libc::c_ulong) << IOC_NRSHIFT)
 }
+
+/// The unit FIEMAP extents are checked against and converted to.
+const SECTOR: u64 = 512;
 
 /// `ioctl(fd, req, arg)`, the raw errno on failure.
 ///
@@ -127,7 +140,8 @@ pub fn open_by_ino_gen(mnt: &File, ino: u32, generation: u32) -> io::Result<File
     }
     const FILEID_INO32_GEN: i32 = 1;
     let mut h = Handle {
-        bytes: 8,
+        // f_handle: the ino and generation that follow the header.
+        bytes: (size_of::<Handle>() - std::mem::offset_of!(Handle, ino)) as u32,
         ty: FILEID_INO32_GEN,
         ino,
         generation,
@@ -151,9 +165,13 @@ pub fn open_by_ino_gen(mnt: &File, ino: u32, generation: u32) -> io::Result<File
 /// A file's physical extents as FIEMAP reports them, in 512-byte sectors
 /// of the device the file system is mounted on, file order.
 pub fn fiemap(f: &File) -> R<Vec<(u64, u64)>> {
-    const FS_IOC_FIEMAP: libc::c_ulong = iowr(b'f', 11, 32);
+    // FS_IOC_FIEMAP is _IOWR('f', 11, struct fiemap), the fixed header
+    // without its extents (include/uapi/linux/fs.h, fiemap.h).
+    const FS_IOC_FIEMAP: libc::c_ulong = iowr(b'f', 11, std::mem::offset_of!(Map, extents));
+    const _: () = assert!(std::mem::offset_of!(Map, extents) == 32);
     const FIEMAP_FLAG_SYNC: u32 = 1;
     const FIEMAP_EXTENT_LAST: u32 = 1;
+    /// Extents fetched per call.
     const N: usize = 256;
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -206,10 +224,10 @@ pub fn fiemap(f: &File) -> R<Vec<(u64, u64)>> {
         }
         let mut last = false;
         for e in m.extents.iter().take(m.mapped as usize) {
-            if e.physical % 512 != 0 || e.length % 512 != 0 {
+            if e.physical % SECTOR != 0 || e.length % SECTOR != 0 {
                 return Err("FIEMAP: extent not sector-aligned".into());
             }
-            out.push((e.physical / 512, e.length / 512));
+            out.push((e.physical / SECTOR, e.length / SECTOR));
             start = e.logical + e.length;
             last |= e.flags & FIEMAP_EXTENT_LAST != 0;
         }

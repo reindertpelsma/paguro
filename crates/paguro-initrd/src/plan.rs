@@ -2,6 +2,7 @@
 
 use core::fmt::Write;
 
+use paguro_core::bde::Cipher;
 use paguro_core::gpt::Entry;
 use paguro_core::guid::{GPT_ESP, Guid};
 use paguro_core::handoff::FveLayout;
@@ -10,6 +11,19 @@ use paguro_core::handoff::FveLayout;
 /// backup GPT (DESIGN.md §4.3, the dm-linear sandwich).
 pub const GPT_HEAD_SECTORS: u64 = 2048;
 pub const GPT_TAIL_SECTORS: u64 = 33;
+
+/// Device-mapper's sector: every table start, length and offset is in
+/// 512-byte units, whatever the device's logical block size.
+pub const SECTOR: u64 = 512;
+/// BitLocker sector sizes the loader accepts (as `bde::Layout::new`).
+const BDE_SECTOR_SIZES: [u64; 2] = [512, 4096];
+
+/// The BitLocker XTS ciphers (FVE metadata `encryption` field) and the
+/// `aes-xts-plain64` key length each takes: two AES keys.
+const XTS_AES_128: u16 = Cipher::XtsAes128.to_u16();
+const XTS_AES_256: u16 = Cipher::XtsAes256.to_u16();
+const XTS_AES_128_KEY_LEN: usize = 32;
+const XTS_AES_256_KEY_LEN: usize = 64;
 
 pub struct VmDisk<'a> {
     pub gpt_head: &'a str,
@@ -81,7 +95,7 @@ pub enum LayoutError {
 /// The five non-data regions, in bytes: `[0, reloc)`, the relocated copy,
 /// the three metadata regions.
 fn regions(l: &FveLayout) -> Option<[(u64, u64); 5]> {
-    let reloc = u64::from(l.boot_sector_reloc_sectors).checked_mul(512)?;
+    let reloc = u64::from(l.boot_sector_reloc_sectors).checked_mul(SECTOR)?;
     let [m0, m1, m2] = l.metadata_offsets;
     Some([
         (0, reloc),
@@ -98,11 +112,11 @@ fn regions(l: &FveLayout) -> Option<[(u64, u64); 5]> {
 /// length in bytes (whole data units).
 pub fn check_layout(volume_sectors: u64, l: &FveLayout) -> Result<u64, LayoutError> {
     let bps = u64::from(l.sector_size);
-    if bps != 512 && bps != 4096 {
+    if !BDE_SECTOR_SIZES.contains(&bps) {
         return Err(LayoutError::SectorSize);
     }
     let bytes = volume_sectors
-        .checked_mul(512)
+        .checked_mul(SECTOR)
         .ok_or(LayoutError::Outside)?;
     let volume = bytes - bytes % bps;
     let r = regions(l).ok_or(LayoutError::Outside)?;
@@ -179,10 +193,10 @@ pub fn crypt_segments(volume_sectors: u64, l: &FveLayout) -> Result<Vec<Segment>
         match (zero, phys < enc) {
             (true, _) => Seg::Zero,
             (false, true) => Seg::Crypt {
-                dev: phys / 512,
-                iv: phys / 512,
+                dev: phys / SECTOR,
+                iv: phys / SECTOR,
             },
-            (false, false) => Seg::Linear { dev: phys / 512 },
+            (false, false) => Seg::Linear { dev: phys / SECTOR },
         }
     };
     let mut out: Vec<Segment> = Vec::new();
@@ -192,8 +206,8 @@ pub fn crypt_segments(volume_sectors: u64, l: &FveLayout) -> Result<Vec<Segment>
             _ => continue,
         };
         let seg = Segment {
-            start: a / 512,
-            len: (b - a) / 512,
+            start: a / SECTOR,
+            len: (b - a) / SECTOR,
             kind: source(a),
         };
         // Merge a continuation of the previous segment.
@@ -218,8 +232,8 @@ pub fn crypt_segments(volume_sectors: u64, l: &FveLayout) -> Result<Vec<Segment>
 /// ciphers the loader accepts (XTS, Windows 10 1511+).
 pub fn dm_cipher(bitlocker: u16) -> Option<(&'static str, usize)> {
     match bitlocker {
-        0x8004 => Some(("aes-xts-plain64", 32)),
-        0x8005 => Some(("aes-xts-plain64", 64)),
+        XTS_AES_128 => Some(("aes-xts-plain64", XTS_AES_128_KEY_LEN)),
+        XTS_AES_256 => Some(("aes-xts-plain64", XTS_AES_256_KEY_LEN)),
         _ => None,
     }
 }
@@ -243,7 +257,7 @@ pub fn crypt_table(
     keyref: &str,
     sector_size: u32,
 ) -> Vec<Target> {
-    let opts = if sector_size == 512 {
+    let opts = if u64::from(sector_size) == SECTOR {
         String::new()
     } else {
         // IV counted in data units, not 512-byte sectors: iv_offset is
@@ -273,10 +287,14 @@ pub fn crypt_table(
 /// sectors: BitLocker's non-data regions.
 pub fn reserved_ranges(l: &FveLayout) -> Vec<(u64, u64)> {
     let mut out: Vec<(u64, u64)> = regions(l)
-        .map(|r| r.iter().map(|&(o, len)| (o / 512, len / 512)).collect())
+        .map(|r| {
+            r.iter()
+                .map(|&(o, len)| (o / SECTOR, len / SECTOR))
+                .collect()
+        })
         .unwrap_or_default();
     if let Some(x) = extra(l) {
-        out.push((x / 512, l.region_size / 512));
+        out.push((x / SECTOR, l.region_size / SECTOR));
     }
     out
 }

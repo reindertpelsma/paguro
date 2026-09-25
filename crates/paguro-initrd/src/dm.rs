@@ -3,24 +3,87 @@
 //! never leaves this process.
 
 use std::fs::{File, OpenOptions};
+use std::mem::{offset_of, size_of};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use crate::plan::Target;
 use crate::sys::{self, R};
 
-const HDR: usize = 312;
-const SPEC: usize = 40;
+/// DM_NAME_LEN, DM_UUID_LEN, DM_MAX_TYPE_NAME (dm-ioctl.h).
 const NAME_LEN: usize = 128;
+const UUID_LEN: usize = 129;
+const MAX_TYPE_NAME: usize = 16;
 
+/// `struct dm_ioctl` (linux/dm-ioctl.h): layout only, used through
+/// `offset_of!`; the buffer is built with `put`, never cast.
+#[allow(dead_code)]
+#[repr(C)]
+struct DmIoctl {
+    version: [u32; 3],
+    data_size: u32,
+    data_start: u32,
+    target_count: u32,
+    open_count: i32,
+    flags: u32,
+    event_nr: u32,
+    padding: u32,
+    dev: u64,
+    name: [u8; NAME_LEN],
+    uuid: [u8; UUID_LEN],
+    data: [u8; 7],
+}
+
+/// `struct dm_target_spec` (linux/dm-ioctl.h), followed by its
+/// NUL-terminated parameter string.
+#[allow(dead_code)]
+#[repr(C)]
+struct DmTargetSpec {
+    sector_start: u64,
+    length: u64,
+    status: i32,
+    next: u32,
+    target_type: [u8; MAX_TYPE_NAME],
+}
+
+const HDR: usize = size_of::<DmIoctl>();
+const SPEC: usize = size_of::<DmTargetSpec>();
+const _: () = assert!(HDR == 312 && SPEC == 40);
+const _: () = assert!(offset_of!(DmIoctl, dev) == 40 && offset_of!(DmIoctl, name) == 48);
+const _: () = assert!(offset_of!(DmTargetSpec, target_type) == 24);
+
+/// DM_VERSION_MAJOR: the interface version this header speaks.
+const VERSION_MAJOR: u32 = 4;
+/// DM_IOCTL, the ioctl type byte.
+const DM_IOCTL: u8 = 0xfd;
+/// Each target spec (with its parameters) starts 8-byte aligned.
+const SPEC_ALIGN: usize = 8;
+
+// DM_*_CMD ioctl numbers (dm-ioctl.h, enum).
 const CMD_CREATE: u8 = 3;
 const CMD_REMOVE: u8 = 4;
 const CMD_SUSPEND: u8 = 6;
 const CMD_LOAD: u8 = 9;
 
+/// DM_READONLY_FLAG.
 pub const READONLY: u32 = 1;
-/// Ask the kernel to wipe the ioctl buffer (tables naming key material).
+/// DM_SECURE_DATA_FLAG: ask the kernel to wipe the ioctl buffer (tables
+/// naming key material).
 const SECURE_DATA: u32 = 1 << 15;
+
+// `dev` is new_encode_dev(): minor bits 0..8, major bits 8..20, minor
+// bits 8..20 at 20..32 (include/linux/kdev_t.h).
+const DEV_MAJOR_MASK: u64 = 0xfff00;
+const DEV_MAJOR_SHIFT: u32 = 8;
+const DEV_MINOR_LOW_MASK: u64 = 0xff;
+const DEV_MINOR_HIGH_SHIFT: u32 = 12;
+const DEV_MINOR_HIGH_MASK: u64 = 0xfff00;
+
+/// How long to wait for devtmpfs to create /dev/dm-N: polls × interval.
+const DEVNODE_POLLS: u32 = 200;
+const DEVNODE_POLL_MS: u64 = 10;
+/// Mode of the device nodes made when devtmpfs does not.
+const NODE_MODE: libc::mode_t = 0o600;
 
 pub struct Dm {
     ctl: File,
@@ -52,16 +115,28 @@ fn header(name: &str, flags: u32, size: usize) -> R<Vec<u8>> {
         return Err(format!("bad device-mapper name {name:?}"));
     }
     let mut b = vec![0u8; size];
-    put(&mut b, 0, &4u32.to_le_bytes());
-    put(&mut b, 12, &(size as u32).to_le_bytes());
-    put(&mut b, 16, &(HDR as u32).to_le_bytes());
-    put(&mut b, 28, &flags.to_le_bytes());
-    put(&mut b, 48, name.as_bytes());
+    put(
+        &mut b,
+        offset_of!(DmIoctl, version),
+        &VERSION_MAJOR.to_le_bytes(),
+    );
+    put(
+        &mut b,
+        offset_of!(DmIoctl, data_size),
+        &(size as u32).to_le_bytes(),
+    );
+    put(
+        &mut b,
+        offset_of!(DmIoctl, data_start),
+        &(HDR as u32).to_le_bytes(),
+    );
+    put(&mut b, offset_of!(DmIoctl, flags), &flags.to_le_bytes());
+    put(&mut b, offset_of!(DmIoctl, name), name.as_bytes());
     Ok(b)
 }
 
 fn u64_at(b: &[u8], at: usize) -> u64 {
-    b.get(at..at + 8)
+    b.get(at..at + size_of::<u64>())
         .and_then(|s| s.try_into().ok())
         .map_or(0, u64::from_le_bytes)
 }
@@ -81,7 +156,7 @@ impl Dm {
             );
             let c = sys::cstr("/dev/mapper/control")?;
             // SAFETY: mknod with a valid path.
-            unsafe { libc::mknod(c.as_ptr(), libc::S_IFCHR | 0o600, libc::makedev(ma, mi)) };
+            unsafe { libc::mknod(c.as_ptr(), libc::S_IFCHR | NODE_MODE, libc::makedev(ma, mi)) };
         }
         let ctl = OpenOptions::new()
             .read(true)
@@ -96,7 +171,7 @@ impl Dm {
         unsafe {
             sys::ioctl(
                 self.ctl.as_raw_fd(),
-                sys::iowr(0xfd, cmd, HDR),
+                sys::iowr(DM_IOCTL, cmd, HDR),
                 buf.as_mut_ptr(),
             )
         }
@@ -107,20 +182,21 @@ impl Dm {
         let mut b = header(name, 0, HDR)?;
         self.call(CMD_CREATE, &mut b)
             .map_err(|e| format!("dm create {name}: {e}"))?;
-        let dev = u64_at(&b, 40);
+        let dev = u64_at(&b, offset_of!(DmIoctl, dev));
         let r = self.load_resume(name, targets, flags);
         if let Err(e) = r {
             let _ = self.remove(name);
             return Err(e);
         }
-        let major = ((dev & 0xfff00) >> 8) as u32;
-        let minor = ((dev & 0xff) | ((dev >> 12) & 0xfff00)) as u32;
+        let major = ((dev & DEV_MAJOR_MASK) >> DEV_MAJOR_SHIFT) as u32;
+        let minor = ((dev & DEV_MINOR_LOW_MASK)
+            | ((dev >> DEV_MINOR_HIGH_SHIFT) & DEV_MINOR_HIGH_MASK)) as u32;
         let node = PathBuf::from(format!("/dev/dm-{minor}"));
-        for _ in 0..200 {
+        for _ in 0..DEVNODE_POLLS {
             if node.exists() {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(DEVNODE_POLL_MS));
         }
         if !node.exists() {
             // No devtmpfs: make the node ourselves.
@@ -129,7 +205,7 @@ impl Dm {
             unsafe {
                 libc::mknod(
                     c.as_ptr(),
-                    libc::S_IFBLK | 0o600,
+                    libc::S_IFBLK | NODE_MODE,
                     libc::makedev(major, minor),
                 )
             };
@@ -152,17 +228,33 @@ impl Dm {
         for t in targets {
             let mut params = t.params.clone().into_bytes();
             params.push(0);
-            while (SPEC + params.len()) % 8 != 0 {
+            while (SPEC + params.len()) % SPEC_ALIGN != 0 {
                 params.push(0);
             }
             let mut s = vec![0u8; SPEC];
-            put(&mut s, 0, &t.start.to_le_bytes());
-            put(&mut s, 8, &t.len.to_le_bytes());
-            put(&mut s, 20, &((SPEC + params.len()) as u32).to_le_bytes());
-            if t.kind.len() >= 16 {
+            put(
+                &mut s,
+                offset_of!(DmTargetSpec, sector_start),
+                &t.start.to_le_bytes(),
+            );
+            put(
+                &mut s,
+                offset_of!(DmTargetSpec, length),
+                &t.len.to_le_bytes(),
+            );
+            put(
+                &mut s,
+                offset_of!(DmTargetSpec, next),
+                &((SPEC + params.len()) as u32).to_le_bytes(),
+            );
+            if t.kind.len() >= MAX_TYPE_NAME {
                 return Err(format!("bad target type {}", t.kind));
             }
-            put(&mut s, 24, t.kind.as_bytes());
+            put(
+                &mut s,
+                offset_of!(DmTargetSpec, target_type),
+                t.kind.as_bytes(),
+            );
             specs.extend_from_slice(&s);
             specs.extend_from_slice(&params);
             zeroize::Zeroize::zeroize(&mut params);
@@ -170,7 +262,11 @@ impl Dm {
         let secure = targets.iter().any(|t| t.kind == "crypt");
         let lflags = (flags & READONLY) | if secure { SECURE_DATA } else { 0 };
         let mut b = header(name, lflags, HDR + specs.len())?;
-        put(&mut b, 20, &(targets.len() as u32).to_le_bytes());
+        put(
+            &mut b,
+            offset_of!(DmIoctl, target_count),
+            &(targets.len() as u32).to_le_bytes(),
+        );
         put(&mut b, HDR, &specs);
         zeroize::Zeroize::zeroize(&mut specs);
         let r = self.call(CMD_LOAD, &mut b);

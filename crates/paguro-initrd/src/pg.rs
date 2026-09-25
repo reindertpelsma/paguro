@@ -109,12 +109,21 @@ pub struct Status {
 const _: () = assert!(size_of::<VolumeAdd>() == 192);
 const _: () = assert!(size_of::<Claim>() == 48);
 const _: () = assert!(size_of::<Crosscheck>() == 24);
-const _: () = assert!(size_of::<Status>() == 8 * 56 + 16 * 48);
+const _: () = assert!(size_of::<StatusVolume>() == 56 && size_of::<StatusClaim>() == 48);
+const _: () = assert!(size_of::<Status>() == MAX_VOLUMES * 56 + MAX_CLAIMS * 48);
 
-const VOLUME_ADD: libc::c_ulong = sys::iowr(b'p', 1, size_of::<VolumeAdd>());
-const CLAIM: libc::c_ulong = sys::iowr(b'p', 2, size_of::<Claim>());
-const CROSSCHECK: libc::c_ulong = sys::iowr(b'p', 4, size_of::<Crosscheck>());
-const STATUS: libc::c_ulong = sys::iowr(b'p', 6, size_of::<Status>());
+/// The `/dev/paguro` ioctl type byte, and the numbers paguro_uapi.h
+/// gives each request (`PG_VOLUME_ADD` = `_IOWR('p', 1, …)`, …).
+const PG_IOCTL: u8 = b'p';
+const NR_VOLUME_ADD: u8 = 1;
+const NR_CLAIM: u8 = 2;
+const NR_CROSSCHECK: u8 = 4;
+const NR_STATUS: u8 = 6;
+
+const VOLUME_ADD: libc::c_ulong = sys::iowr(PG_IOCTL, NR_VOLUME_ADD, size_of::<VolumeAdd>());
+const CLAIM: libc::c_ulong = sys::iowr(PG_IOCTL, NR_CLAIM, size_of::<Claim>());
+const CROSSCHECK: libc::c_ulong = sys::iowr(PG_IOCTL, NR_CROSSCHECK, size_of::<Crosscheck>());
+const STATUS: libc::c_ulong = sys::iowr(PG_IOCTL, NR_STATUS, size_of::<Status>());
 
 pub struct Ctl {
     f: File,
