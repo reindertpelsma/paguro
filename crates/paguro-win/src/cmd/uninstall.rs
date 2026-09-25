@@ -543,8 +543,10 @@ pub fn uninstall(
         r = r.warn("PaguroB stays in firmware as 32 inert bytes, and the machine key stays enrolled in MokList");
     }
     Journal::remove(ctx.api, "uninstall", KEY)?;
-    let _ = ctx.api.remove_dir(&crate::journal::dir(ctx.api));
-    let _ = ctx.api.remove_dir(&ctx.data_dir());
+    // Last: everything left under %ProgramData%\paguro (the service's log
+    // and boot marker, the journal directory); what is in use goes at the
+    // next start.
+    let _ = crate::cmd::setup::remove_tree_or_later(ctx.api, &ctx.data_dir());
     Ok(r.line("paguro is uninstalled"))
 }
 

@@ -1427,6 +1427,7 @@ fn uninstall_removes_what_install_added() {
     let m = MockApi::standard();
     m.put_file("C:\\Users\\me\\Downloads\\paguro.exe", b"MZpaguro");
     common::ok(&m, &["install"]);
+    m.put_file("C:\\ProgramData\\paguro\\service.log", b"log");
     let r = common::run(
         &m,
         &["uninstall", "--yes", "--keep-images", "--skip-final-boot"],
@@ -1454,6 +1455,10 @@ fn uninstall_removes_what_install_added() {
     }
     assert!(!m.exists("C:\\Program Files\\paguro\\paguro.exe"));
     assert!(!m.exists("C:\\ProgramData\\paguro\\setup\\paguro.exe"));
+    assert!(
+        m.list_dir("C:\\ProgramData\\paguro").unwrap().is_none(),
+        "nothing left in ProgramData"
+    );
     let cmds = m.commands.borrow().join("\n");
     assert!(cmds.contains("reg.exe delete HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\paguro /f"), "{cmds}");
 }
