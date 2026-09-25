@@ -16,16 +16,15 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::stage4::{
-    NTFS_VOLUME, Part, boot_disk, fat32, fragment, gpt, identity, ini, io, mkntfs, ntfscat,
-    set_dirty, vhd, with_ntfs, write,
+    BOOT_ESP_MIB, ESP_CODE, GPT_SLACK_MIB, LINUX_ROOT_X86_64_CODE, NTFS_CLUSTER, NTFS_VOLUME, Part,
+    boot_disk, fat32, fragment, gpt, identity, ini, io, mkntfs, ntfscat, set_dirty, vhd, with_ntfs,
+    write,
 };
-use crate::{BOOT_WAIT, Env, R, STRETCH_WAIT, Vm, fresh, sh};
+use crate::{BOOT_WAIT, Env, FIRST_LBA, R, SECTOR, SECTORS_PER_MIB, STRETCH_WAIT, Vm, fresh, sh};
 
 const ESP_MIB: u64 = 48;
 const ROOT_MIB: u64 = 64;
 const NTFS_MIB: u64 = 400;
-/// The loader's ESP in `boot_disk`.
-const BOOT_ESP_MIB: u64 = 34;
 
 fn dir(env: &Env) -> R<PathBuf> {
     let d = env.work.join("linux-images");
@@ -78,16 +77,16 @@ fn gpt_vhd(env: &Env, name: &str) -> R<PathBuf> {
     let raw = d.join(format!("{name}.raw"));
     gpt(
         &raw,
-        ESP_MIB + ROOT_MIB + 2,
+        ESP_MIB + ROOT_MIB + GPT_SLACK_MIB,
         &[
             Part {
-                code: "ef00",
+                code: ESP_CODE,
                 mib: ESP_MIB,
                 image: Some(&esp),
                 guid: None,
             },
             Part {
-                code: "8304",
+                code: LINUX_ROOT_X86_64_CODE,
                 mib: ROOT_MIB,
                 image: Some(&root),
                 guid: None,
@@ -247,7 +246,7 @@ fn extract(img: &Path, at: u64, len: u64, out: &Path) -> R<()> {
 fn ntfs_of(disk: &Path, out: &Path) -> R<()> {
     extract(
         disk,
-        (2048 + BOOT_ESP_MIB * 2048) * 512,
+        (FIRST_LBA + BOOT_ESP_MIB * SECTORS_PER_MIB) * SECTOR,
         NTFS_MIB << 20,
         out,
     )
@@ -259,7 +258,10 @@ fn fsck_root(ntfs_img: &Path, vhd_path: &str, gpt: bool) -> R<()> {
     let data = ntfscat(ntfs_img, vhd_path)?;
     let tmp = ntfs_img.with_extension("root.ext4");
     let (at, len) = if gpt {
-        ((2048 + ESP_MIB * 2048) * 512, ROOT_MIB << 20)
+        (
+            (FIRST_LBA + ESP_MIB * SECTORS_PER_MIB) * SECTOR,
+            ROOT_MIB << 20,
+        )
     } else {
         (0, ROOT_MIB << 20)
     };
@@ -400,7 +402,7 @@ fn bde_case(env: &Env, name: &str, extra: &[&str]) -> R<()> {
     let mut extra = extra.to_vec();
     if let Some(x) = extra.iter_mut().find(|x| **x == "half") {
         let (lcn, len) = first_run(&n, "/paguro/linux.vhd")?;
-        half = ((lcn + len / 2) * 4096).to_string();
+        half = ((lcn + len / 2) * NTFS_CLUSTER).to_string();
         *x = &half;
     }
     let enc = n.with_extension("bde");

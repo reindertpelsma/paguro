@@ -7,8 +7,103 @@
 //! `0x55AA`-tagged and 4-byte aligned. A record is appended after the last one
 //! with state `VAR_ADDED`; the store has no checksum over its records.
 
+use crate::layout::field;
 use paguro_core::guid::Guid;
+use std::mem::size_of;
+use std::ops::Range;
 use std::path::Path;
+
+// The structures below are layout-only mirrors of VariableFormat.h and the
+// PI spec's firmware volume header: never instantiated, only measured.
+
+/// `EFI_FIRMWARE_VOLUME_HEADER` (PI 1.8 Vol. 3 §3.2.1), up to the block map.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct FvHeader {
+    zero_vector: [u8; 16],
+    file_system_guid: [u8; 16],
+    fv_length: u64,
+    signature: [u8; 4],
+    attributes: u32,
+    header_length: u16,
+    checksum: u16,
+    ext_header_offset: u16,
+    reserved: u8,
+    revision: u8,
+}
+const FV_SIGNATURE: Range<usize> = field!(FvHeader, signature);
+const FV_HEADER_LENGTH: usize = field!(FvHeader, header_length).start;
+const _: () = assert!(FV_SIGNATURE.start == 40 && FV_HEADER_LENGTH == 48);
+/// `EFI_FVH_SIGNATURE`.
+const FVH_SIGNATURE: &[u8; 4] = b"_FVH";
+
+/// `VARIABLE_STORE_HEADER`: the store's format GUID, its size, then records.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct VariableStoreHeader {
+    signature: [u8; 16],
+    size: u32,
+    format: u8,
+    state: u8,
+    reserved: u16,
+    reserved1: u32,
+}
+const STORE_SIGNATURE: Range<usize> = field!(VariableStoreHeader, signature);
+const STORE_SIZE: usize = field!(VariableStoreHeader, size).start;
+const STORE_HEADER_LEN: usize = size_of::<VariableStoreHeader>();
+const _: () = assert!(STORE_SIZE == 16 && STORE_HEADER_LEN == 28);
+
+/// `VARIABLE_HEADER` (the plain store format).
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct VariableHeader {
+    start_id: u16,
+    state: u8,
+    reserved: u8,
+    attributes: u32,
+    name_size: u32,
+    data_size: u32,
+    vendor_guid: [u8; 16],
+}
+/// `AUTHENTICATED_VARIABLE_HEADER` (the authenticated store format).
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct AuthenticatedVariableHeader {
+    start_id: u16,
+    state: u8,
+    reserved: u8,
+    attributes: u32,
+    monotonic_count: u64,
+    time_stamp: [u8; 16],
+    pub_key_index: u32,
+    name_size: u32,
+    data_size: u32,
+    vendor_guid: [u8; 16],
+}
+// The fields both formats share, at the same offsets.
+const VAR_START_ID: usize = field!(VariableHeader, start_id).start;
+const VAR_STATE: usize = field!(VariableHeader, state).start;
+const VAR_ATTRIBUTES: usize = field!(VariableHeader, attributes).start;
+const _: () = assert!(
+    VAR_STATE == field!(AuthenticatedVariableHeader, state).start
+        && VAR_ATTRIBUTES == field!(AuthenticatedVariableHeader, attributes).start
+        && VAR_ATTRIBUTES == 4
+);
+const PLAIN_HEADER_LEN: usize = size_of::<VariableHeader>();
+const AUTH_HEADER_LEN: usize = size_of::<AuthenticatedVariableHeader>();
+const _: () = assert!(PLAIN_HEADER_LEN == 32 && AUTH_HEADER_LEN == 60);
+/// Both headers end with the vendor GUID.
+const VENDOR_GUID_LEN: usize = 16;
+/// The fields between the attributes and the sizes in the authenticated
+/// format (monotonic count, timestamp, public key index), written as zeros.
+const AUTH_ONLY_LEN: usize =
+    field!(AuthenticatedVariableHeader, name_size).start - field!(VariableHeader, name_size).start;
+/// `VARIABLE_DATA`: every record's `StartId`.
+const VARIABLE_DATA: u16 = 0x55aa;
+/// Records are `HEADER_ALIGNMENT` (4) aligned.
+const HEADER_ALIGNMENT: usize = 4;
+/// Erased flash.
+const ERASED: u8 = 0xff;
 
 const AUTH_VARIABLE: Guid = Guid([
     0x78, 0x2c, 0xf3, 0xaa, 0x7b, 0x94, 0x9a, 0x43, 0xa1, 0x80, 0x2e, 0x14, 0x4e, 0xc3, 0x77, 0x92,
@@ -32,48 +127,59 @@ fn u32_at(b: &[u8], at: usize) -> Option<u32> {
 /// The variable store in `fv`: where its first record starts, where it
 /// ends, and the record header size (authenticated or plain format).
 fn store(fv: &[u8]) -> Result<(usize, usize, usize), String> {
-    if fv.get(40..44) != Some(b"_FVH") {
+    if fv.get(FV_SIGNATURE) != Some(FVH_SIGNATURE) {
         return Err("VARS: no firmware volume header".into());
     }
-    let hlen = usize::from(u16_at(fv, 48).ok_or("VARS: short")?);
+    let hlen = usize::from(u16_at(fv, FV_HEADER_LENGTH).ok_or("VARS: short")?);
     let sig = Guid(
-        fv.get(hlen..hlen + 16)
+        fv.get(hlen + STORE_SIGNATURE.start..hlen + STORE_SIGNATURE.end)
             .ok_or("VARS: short")?
             .try_into()
             .map_err(|_| "VARS")?,
     );
     let header_size = if sig == AUTH_VARIABLE {
-        60
+        AUTH_HEADER_LEN
     } else if sig == PLAIN_VARIABLE {
-        32
+        PLAIN_HEADER_LEN
     } else {
         return Err("VARS: unknown variable store".into());
     };
-    let store_size = u32_at(fv, hlen + 16).ok_or("VARS: short")? as usize;
-    Ok((hlen + 28, hlen + store_size, header_size))
+    let store_size = u32_at(fv, hlen + STORE_SIZE).ok_or("VARS: short")? as usize;
+    Ok((hlen + STORE_HEADER_LEN, hlen + store_size, header_size))
 }
 
 /// One record: `(state, attributes, name UTF-16 bytes, vendor, data)` and
 /// the next record's offset.
 #[allow(clippy::type_complexity)]
 fn record(fv: &[u8], at: usize, hs: usize) -> Option<((u8, u32, &[u8], Guid, &[u8]), usize)> {
-    if u16_at(fv, at)? != 0x55aa {
+    if u16_at(fv, at + VAR_START_ID)? != VARIABLE_DATA {
         return None;
     }
-    let state = *fv.get(at + 2)?;
-    let attrs = u32_at(fv, at + 4)?;
-    let (ns, ds) = if hs == 60 {
-        (u32_at(fv, at + 36)?, u32_at(fv, at + 40)?)
+    let state = *fv.get(at + VAR_STATE)?;
+    let attrs = u32_at(fv, at + VAR_ATTRIBUTES)?;
+    let (name_size, data_size) = if hs == AUTH_HEADER_LEN {
+        (
+            field!(AuthenticatedVariableHeader, name_size).start,
+            field!(AuthenticatedVariableHeader, data_size).start,
+        )
     } else {
-        (u32_at(fv, at + 8)?, u32_at(fv, at + 12)?)
+        (
+            field!(VariableHeader, name_size).start,
+            field!(VariableHeader, data_size).start,
+        )
     };
+    let (ns, ds) = (u32_at(fv, at + name_size)?, u32_at(fv, at + data_size)?);
     let (ns, ds) = (ns as usize, ds as usize);
-    let vendor = Guid(fv.get(at + hs - 16..at + hs)?.try_into().ok()?);
+    let vendor = Guid(
+        fv.get(at + hs - VENDOR_GUID_LEN..at + hs)?
+            .try_into()
+            .ok()?,
+    );
     let name = fv.get(at + hs..at + hs + ns)?;
     let data = fv.get(at + hs + ns..at + hs + ns + ds)?;
     Some((
         (state, attrs, name, vendor, data),
-        (at + hs + ns + ds + 3) & !3,
+        (at + hs + ns + ds).next_multiple_of(HEADER_ALIGNMENT),
     ))
 }
 
@@ -119,12 +225,12 @@ pub fn inject(
         at = next;
     }
     let name16 = name16(name);
-    let mut rec = vec![0xaa, 0x55, VAR_ADDED, 0];
+    let mut rec = VARIABLE_DATA.to_le_bytes().to_vec();
+    rec.extend([VAR_ADDED, 0]);
     rec.extend(attrs.to_le_bytes());
-    if header_size == 60 {
-        rec.extend([0u8; 8]); // monotonic count
-        rec.extend([0u8; 16]); // timestamp
-        rec.extend([0u8; 4]); // pubkey index
+    if header_size == AUTH_HEADER_LEN {
+        // Monotonic count, timestamp, public key index.
+        rec.extend([0u8; AUTH_ONLY_LEN]);
     }
     rec.extend((name16.len() as u32).to_le_bytes());
     rec.extend((data.len() as u32).to_le_bytes());
@@ -134,7 +240,7 @@ pub fn inject(
     if at + rec.len() > end {
         return Err("VARS: store full".into());
     }
-    if fv[at..at + rec.len()].iter().any(|b| *b != 0xff) {
+    if fv[at..at + rec.len()].iter().any(|b| *b != ERASED) {
         return Err("VARS: free space is not erased".into());
     }
     fv[at..at + rec.len()].copy_from_slice(&rec);

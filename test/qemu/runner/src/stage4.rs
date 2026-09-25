@@ -17,10 +17,154 @@ use std::sync::OnceLock;
 use paguro_core::bootstrap;
 use paguro_core::guid::{EFI_GLOBAL_VARIABLE, Guid, PAGURO_VENDOR};
 
-use crate::{BOOT_WAIT, Env, R, Vm, fresh, sh, sha256, vars};
+use paguro_boot::platform::attrs::NV_BS_RT;
+
+use crate::layout::field;
+use crate::{BOOT_WAIT, Env, FIRST_LBA, R, SECTOR, SECTORS_PER_MIB, Vm, fresh, sh, sha256, vars};
 
 /// The NTFS partition's GPT unique GUID (the entries' `volume`).
 pub const NTFS_VOLUME: &str = "7d1f0c2a-5b3e-4c8d-9a61-0e2f4b6c8d90";
+
+/// sgdisk's short partition type codes.
+pub(crate) const ESP_CODE: &str = "ef00";
+pub(crate) const BASIC_DATA_CODE: &str = "0700";
+pub(crate) const LINUX_FS_CODE: &str = "8300";
+pub(crate) const LINUX_ROOT_X86_64_CODE: &str = "8304";
+/// A GPT disk's room besides its partitions: the first MiB (protective MBR,
+/// GPT, alignment) and the backup GPT at the end.
+pub(crate) const GPT_SLACK_MIB: u64 = 2;
+/// The smallest round size that is FAT32 with one sector per cluster (over
+/// 65 525 clusters) — every payload ESP and superfloppy here.
+const PAYLOAD_FAT_MIB: u64 = 34;
+/// The loader's ESP in [`boot_disk`].
+pub(crate) const BOOT_ESP_MIB: u64 = 34;
+/// `mkntfs`'s cluster size here.
+pub(crate) const NTFS_CLUSTER: u64 = 4096;
+
+// NTFS on-disk structures patched in place (layout only; offsets from
+// `offset_of!`). Names follow the NTFS documentation (linux-ntfs, "NTFS
+// Documentation", Richard Russon & Yuval Fledel).
+
+/// `FILE_RECORD_SEGMENT_HEADER`: an MFT record's fixed part.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct MftRecordHeader {
+    signature: [u8; 4],
+    usa_offset: u16,
+    usa_count: u16,
+    lsn: u64,
+    sequence_number: u16,
+    link_count: u16,
+    attrs_offset: u16,
+    flags: u16,
+    bytes_in_use: u32,
+    bytes_allocated: u32,
+}
+const MFT_USA_OFFSET: usize = field!(MftRecordHeader, usa_offset).start;
+const MFT_USA_COUNT: usize = field!(MftRecordHeader, usa_count).start;
+const MFT_ATTRS_OFFSET: usize = field!(MftRecordHeader, attrs_offset).start;
+const MFT_BYTES_IN_USE: std::ops::Range<usize> = field!(MftRecordHeader, bytes_in_use);
+const _: () = assert!(MFT_ATTRS_OFFSET == 0x14 && MFT_BYTES_IN_USE.start == 0x18);
+
+/// An attribute record's common header.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct AttrHeader {
+    kind: u32,
+    length: u32,
+    non_resident: u8,
+    name_length: u8,
+    name_offset: u16,
+    flags: u16,
+    instance: u16,
+}
+const ATTR_TYPE: usize = field!(AttrHeader, kind).start;
+const ATTR_LENGTH: std::ops::Range<usize> = field!(AttrHeader, length);
+const ATTR_NON_RESIDENT: usize = field!(AttrHeader, non_resident).start;
+const ATTR_NAME_LENGTH: usize = field!(AttrHeader, name_length).start;
+/// A resident attribute's header: the common one, then its value.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct ResidentAttrHeader {
+    common: AttrHeader,
+    value_length: u32,
+    value_offset: u16,
+}
+const ATTR_VALUE_OFFSET: usize = field!(ResidentAttrHeader, value_offset).start;
+/// A non-resident attribute's header: the common one, then its mapping.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct NonResidentAttrHeader {
+    common: AttrHeader,
+    lowest_vcn: u64,
+    highest_vcn: u64,
+    mapping_pairs_offset: u16,
+}
+const ATTR_MAPPING_PAIRS_OFFSET: usize = field!(NonResidentAttrHeader, mapping_pairs_offset).start;
+const _: () = assert!(ATTR_VALUE_OFFSET == 0x14 && ATTR_MAPPING_PAIRS_OFFSET == 0x20);
+/// `$VOLUME_INFORMATION`'s value.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct VolumeInformation {
+    reserved: u64,
+    major_version: u8,
+    minor_version: u8,
+    flags: u16,
+}
+const VOLUME_FLAGS: usize = field!(VolumeInformation, flags).start;
+const _: () = assert!(VOLUME_FLAGS == 0x0a);
+/// `VOLUME_IS_DIRTY`, in `$VOLUME_INFORMATION`'s flags.
+const VOLUME_IS_DIRTY: u8 = 0x01;
+/// Attribute type codes.
+const AT_VOLUME_INFORMATION: usize = 0x70;
+const AT_DATA: usize = 0x80;
+/// The type code that ends a record's attribute list.
+const AT_END: u32 = 0xffff_ffff;
+/// MFT record 3: `$Volume`.
+const MFT_VOLUME: u64 = 3;
+/// Update sequence arrays protect every 512-byte stride of a record: its
+/// last two bytes hold the sequence number, the originals are in the array.
+const USA_STRIDE: usize = 512;
+/// Attribute records are 8-byte aligned.
+const ATTR_ALIGN: usize = 8;
+/// `FILE_ATTRIBUTE_COMPRESSED`, set through ntfs-3g's `system.ntfs_attrib_be`.
+const FILE_ATTRIBUTE_COMPRESSED: u32 = 0x0800;
+
+/// The FAT32 boot sector (Microsoft FAT spec §3.1, §3.3), up to
+/// `BS_FilSysType`. Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct Fat32BootSector {
+    jmp_boot: [u8; 3],
+    oem_name: [u8; 8],
+    byts_per_sec: u16,
+    sec_per_clus: u8,
+    rsvd_sec_cnt: u16,
+    num_fats: u8,
+    root_ent_cnt: u16,
+    tot_sec16: u16,
+    media: u8,
+    fat_sz16: u16,
+    sec_per_trk: u16,
+    num_heads: u16,
+    hidd_sec: u32,
+    tot_sec32: u32,
+    fat_sz32: u32,
+    ext_flags: u16,
+    fs_ver: u16,
+    root_clus: u32,
+    fs_info: u16,
+    bk_boot_sec: u16,
+    reserved: [u8; 12],
+    drv_num: u8,
+    reserved1: u8,
+    boot_sig: u8,
+    vol_id: u32,
+    vol_lab: [u8; 11],
+    fil_sys_type: [u8; 8],
+}
+const FAT32_FIL_SYS_TYPE: std::ops::Range<usize> = field!(Fat32BootSector, fil_sys_type);
+const _: () = assert!(FAT32_FIL_SYS_TYPE.start == 82);
 
 pub(crate) fn io<T>(r: std::io::Result<T>) -> R<T> {
     r.map_err(|e| e.to_string())
@@ -42,7 +186,17 @@ pub(crate) fn write(p: &Path, data: &[u8]) -> R<()> {
 pub(crate) fn fat32(path: &Path, mib: u64, files: &[(&str, &[u8])]) -> R<()> {
     let _ = std::fs::remove_file(path);
     sh(Command::new("mkfs.vfat")
-        .args(["-F", "32", "-S", "512", "-s", "1", "-n", "PAYLOAD", "-C"])
+        .args([
+            "-F",
+            "32",
+            "-S",
+            &SECTOR.to_string(),
+            "-s",
+            "1",
+            "-n",
+            "PAYLOAD",
+            "-C",
+        ])
         .arg(path)
         .arg((mib * 1024).to_string())
         .stdout(Stdio::null()))?;
@@ -94,11 +248,11 @@ pub(crate) fn gpt(path: &Path, mib: u64, parts: &[Part<'_>]) -> R<()> {
     io(f.set_len(mib << 20))?;
     drop(f);
     let mut cmd = Command::new("sgdisk");
-    let mut start = 2048u64;
+    let mut start = FIRST_LBA;
     let mut starts = Vec::new();
     for (i, p) in parts.iter().enumerate() {
         let n = i + 1;
-        let end = start + (p.mib << 11) - 1;
+        let end = start + p.mib * SECTORS_PER_MIB - 1;
         cmd.arg("-n").arg(format!("{n}:{start}:{end}"));
         cmd.arg("-t").arg(format!("{n}:{}", p.code));
         if let Some(g) = p.guid {
@@ -115,7 +269,7 @@ pub(crate) fn gpt(path: &Path, mib: u64, parts: &[Part<'_>]) -> R<()> {
                 .arg(format!("of={}", path.display()))
                 .args(["bs=1M", "conv=notrunc,sparse", "status=none"])
                 .arg("oflag=seek_bytes")
-                .arg(format!("seek={}", s * 512)))?;
+                .arg(format!("seek={}", s * SECTOR)))?;
         }
     }
     Ok(())
@@ -183,7 +337,15 @@ pub(crate) fn mkntfs(img: &Path, mib: u64) -> R<()> {
     io(f.set_len(mib << 20))?;
     drop(f);
     sh(Command::new("mkntfs")
-        .args(["-F", "-f", "-q", "-c", "4096", "-L", "Windows"])
+        .args([
+            "-F",
+            "-f",
+            "-q",
+            "-c",
+            &NTFS_CLUSTER.to_string(),
+            "-L",
+            "Windows",
+        ])
         .arg(img)
         .stderr(Stdio::null()))
 }
@@ -220,7 +382,7 @@ fn patch_record(img: &Path, recno: u64, edit: impl FnOnce(&mut Vec<u8>) -> R<()>
     impl Disk for F {
         fn read(&mut self, s: u64, b: &mut [u8; 512]) -> Result<(), IoError> {
             use std::os::unix::fs::FileExt;
-            self.0.read_exact_at(b, s * 512).map_err(|_| IoError)
+            self.0.read_exact_at(b, s * SECTOR).map_err(|_| IoError)
         }
     }
     let mut d = F(io(std::fs::File::open(img))?);
@@ -243,11 +405,11 @@ fn patch_record(img: &Path, recno: u64, edit: impl FnOnce(&mut Vec<u8>) -> R<()>
     let at = at.ok_or("record outside $MFT")?;
     let mut data = io(std::fs::read(img))?;
     let rec = &mut data[at as usize..(at + rb) as usize];
-    let count = u16::from_le_bytes([rec[6], rec[7]]) as usize;
-    let usa = u16::from_le_bytes([rec[4], rec[5]]) as usize;
+    let count = u16_at(rec, MFT_USA_COUNT);
+    let usa = u16_at(rec, MFT_USA_OFFSET);
     let usn = [rec[usa], rec[usa + 1]];
     for i in 1..count {
-        let e = i * 512 - 2;
+        let e = i * USA_STRIDE - 2;
         rec[e] = rec[usa + 2 * i];
         rec[e + 1] = rec[usa + 2 * i + 1];
     }
@@ -255,7 +417,7 @@ fn patch_record(img: &Path, recno: u64, edit: impl FnOnce(&mut Vec<u8>) -> R<()>
     edit(&mut v)?;
     rec.copy_from_slice(&v);
     for i in 1..count {
-        let e = i * 512 - 2;
+        let e = i * USA_STRIDE - 2;
         rec[usa + 2 * i] = rec[e];
         rec[usa + 2 * i + 1] = rec[e + 1];
         rec[e] = usn[0];
@@ -274,13 +436,13 @@ fn u32_at(b: &[u8], at: usize) -> usize {
 /// Attribute offsets of a (fixed-up) record: `(type, offset, length)`.
 fn attrs(rec: &[u8]) -> Vec<(usize, usize, usize)> {
     let mut out = Vec::new();
-    let mut pos = u16_at(rec, 0x14);
-    while pos + 8 <= rec.len() {
-        let ty = u32_at(rec, pos);
-        if ty == 0xffff_ffff {
+    let mut pos = u16_at(rec, MFT_ATTRS_OFFSET);
+    while pos + ATTR_ALIGN <= rec.len() {
+        let ty = u32_at(rec, pos + ATTR_TYPE);
+        if ty == AT_END as usize {
             break;
         }
-        let len = u32_at(rec, pos + 4);
+        let len = u32_at(rec, pos + ATTR_LENGTH.start);
         if len == 0 {
             break;
         }
@@ -292,13 +454,13 @@ fn attrs(rec: &[u8]) -> Vec<(usize, usize, usize)> {
 
 /// Set `$Volume`'s dirty bit, as an unclean Windows shutdown leaves it.
 pub(crate) fn set_dirty(img: &Path) -> R<()> {
-    patch_record(img, 3, |rec| {
+    patch_record(img, MFT_VOLUME, |rec| {
         let (_, pos, _) = *attrs(rec)
             .iter()
-            .find(|a| a.0 == 0x70)
+            .find(|a| a.0 == AT_VOLUME_INFORMATION)
             .ok_or("no $VOLUME_INFORMATION")?;
-        let v = pos + u16_at(rec, pos + 0x14);
-        rec[v + 0x0a] |= 1;
+        let v = pos + u16_at(rec, pos + ATTR_VALUE_OFFSET);
+        rec[v + VOLUME_FLAGS] |= VOLUME_IS_DIRTY;
         Ok(())
     })
 }
@@ -347,13 +509,17 @@ pub(crate) fn fragment(img: &Path, path: &str, k: u64) -> R<()> {
     patch_record(img, recno, |rec| {
         let (_, pos, len) = *attrs(rec)
             .iter()
-            .find(|a| a.0 == 0x80 && rec[a.1 + 9] == 0 && rec[a.1 + 8] == 1)
+            .find(|a| {
+                a.0 == AT_DATA
+                    && rec[a.1 + ATTR_NAME_LENGTH] == 0
+                    && rec[a.1 + ATTR_NON_RESIDENT] == 1
+            })
             .ok_or("no non-resident $DATA")?;
         let is_last = attrs(rec).last().map(|a| a.1) == Some(pos);
         if !is_last {
             return Err("$DATA is not the last attribute".into());
         }
-        let mp = u16_at(rec, pos + 0x20);
+        let mp = u16_at(rec, pos + ATTR_MAPPING_PAIRS_OFFSET);
         let mut runs = [paguro_core::runlist::Run { lcn: 0, count: 0 }; 4];
         let n = paguro_core::runlist::decode(&rec[pos + mp..pos + len], &mut runs)
             .map_err(|e| format!("{e:?}"))?;
@@ -372,24 +538,27 @@ pub(crate) fn fragment(img: &Path, path: &str, k: u64) -> R<()> {
             list.push((lcn + k * c, count - k * c));
         }
         let p = pairs(&list);
-        let new_len = (mp + p.len()).div_ceil(8) * 8;
+        let new_len = (mp + p.len()).div_ceil(ATTR_ALIGN) * ATTR_ALIGN;
         let end = pos + new_len;
-        if end + 8 > rec.len() {
+        // The end marker: AT_END and a zero length.
+        let end_marker = [AT_END.to_le_bytes(), [0; 4]].concat();
+        if end + end_marker.len() > rec.len() {
             return Err("runlist does not fit the record".into());
         }
         rec[pos + mp..pos + mp + p.len()].copy_from_slice(&p);
         for b in &mut rec[pos + mp + p.len()..end] {
             *b = 0;
         }
-        rec[pos + 4..pos + 8].copy_from_slice(&(new_len as u32).to_le_bytes());
-        rec[end..end + 8].copy_from_slice(&[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]);
-        rec[0x18..0x1c].copy_from_slice(&((end + 8) as u32).to_le_bytes());
+        rec[pos + ATTR_LENGTH.start..pos + ATTR_LENGTH.end]
+            .copy_from_slice(&(new_len as u32).to_le_bytes());
+        rec[end..end + end_marker.len()].copy_from_slice(&end_marker);
+        rec[MFT_BYTES_IN_USE].copy_from_slice(&((end + end_marker.len()) as u32).to_le_bytes());
         moved = Some((lcn, c, k));
         Ok(())
     })?;
     // Move the data to match the new map.
     let (lcn, c, k) = moved.ok_or("nothing moved")?;
-    let cb = 4096u64;
+    let cb = NTFS_CLUSTER;
     let mut data = io(std::fs::read(img))?;
     let base = (lcn * cb) as usize;
     let chunk = (c * cb) as usize;
@@ -466,14 +635,14 @@ fn esp_disk(env: &Env, dir: &Path, name: &str, mark: &str) -> R<PathBuf> {
         .iter()
         .map(|(a, b)| (a.as_str(), b.as_slice()))
         .collect();
-    fat32(&fat, 34, &refs)?;
+    fat32(&fat, PAYLOAD_FAT_MIB, &refs)?;
     let raw = dir.join(format!("{name}.raw"));
     gpt(
         &raw,
-        36,
+        PAYLOAD_FAT_MIB + GPT_SLACK_MIB,
         &[Part {
-            code: "ef00",
-            mib: 34,
+            code: ESP_CODE,
+            mib: PAYLOAD_FAT_MIB,
             image: Some(&fat),
             guid: None,
         }],
@@ -518,7 +687,7 @@ fn build_volume(env: &Env) -> R<Volume> {
         aa = io(std::fs::read(p))?;
         sf_files.push(("EFI/BOOT/BOOTAA64.EFI", &aa));
     }
-    fat32(&sf, 34, &sf_files)?;
+    fat32(&sf, PAYLOAD_FAT_MIB, &sf_files)?;
     let sf_vhd = dir.join("superfloppy.vhd");
     vhd(&sf, &sf_vhd, "fixed")?;
     // Refusals: no ESP, two ESPs, a broken FAT32 boot sector.
@@ -529,7 +698,7 @@ fn build_volume(env: &Env) -> R<Volume> {
         &noesp,
         4,
         &[Part {
-            code: "8300",
+            code: LINUX_FS_CODE,
             mib: 1,
             image: Some(&small),
             guid: None,
@@ -541,13 +710,13 @@ fn build_volume(env: &Env) -> R<Volume> {
         4,
         &[
             Part {
-                code: "ef00",
+                code: ESP_CODE,
                 mib: 1,
                 image: None,
                 guid: None,
             },
             Part {
-                code: "ef00",
+                code: ESP_CODE,
                 mib: 1,
                 image: None,
                 guid: None,
@@ -557,8 +726,8 @@ fn build_volume(env: &Env) -> R<Volume> {
     let badfat = dir.join("badfat.fat");
     let mut b = io(std::fs::read(&gpt_raw))?;
     // The ESP's boot sector: the FS type and signature broken.
-    let at = 2048 * 512;
-    b[at + 82..at + 90].copy_from_slice(b"NOTAFAT!");
+    let at = (FIRST_LBA * SECTOR) as usize;
+    b[at + FAT32_FIL_SYS_TYPE.start..at + FAT32_FIL_SYS_TYPE.end].copy_from_slice(b"NOTAFAT!");
     let badfat_img = dir.join("badfat.img");
     io(std::fs::write(&badfat_img, &b))?;
     let _ = std::fs::remove_file(&badfat);
@@ -598,7 +767,8 @@ fn build_volume(env: &Env) -> R<Volume> {
         let cdir = m.join("compressed");
         io(std::fs::create_dir_all(&cdir))?;
         let _ = Command::new("setfattr")
-            .args(["-h", "-v", "0x00000800", "-n", "system.ntfs_attrib_be"])
+            .args(["-h", "-v", &format!("{FILE_ATTRIBUTE_COMPRESSED:#010x}")])
+            .args(["-n", "system.ntfs_attrib_be"])
             .arg(&cdir)
             .output();
         io(std::fs::copy(&gpt_vhd, cdir.join("gpt.vhd")))?;
@@ -647,21 +817,21 @@ pub(crate) fn boot_disk(
         files.push(("EFI/paguro/paguro.ini", i));
     }
     files.extend_from_slice(extra);
-    fat32(&esp, 34, &files)?;
+    fat32(&esp, BOOT_ESP_MIB, &files)?;
     let ntfs_mib = io(std::fs::metadata(ntfs))?.len() >> 20;
     let disk = dir.join(format!("{name}-disk.img"));
     gpt(
         &disk,
-        34 + ntfs_mib + 2,
+        BOOT_ESP_MIB + ntfs_mib + GPT_SLACK_MIB,
         &[
             Part {
-                code: "ef00",
-                mib: 34,
+                code: ESP_CODE,
+                mib: BOOT_ESP_MIB,
                 image: Some(&esp),
                 guid: esp_guid,
             },
             Part {
-                code: "0700",
+                code: BASIC_DATA_CODE,
                 mib: ntfs_mib,
                 image: Some(ntfs),
                 guid: Some(guid),
@@ -715,7 +885,13 @@ fn boot(env: &Env, c: &Case<'_>, script: impl FnOnce(&mut Vm) -> R<()>) -> R<()>
     };
     let (vars, state) = fresh(env, c.name, template)?;
     if let (true, Some(i)) = (c.secure, &c.ini) {
-        vars::inject(&vars, "PaguroConfigHash", &PAGURO_VENDOR, 7, &sha256(&[i]))?;
+        vars::inject(
+            &vars,
+            "PaguroConfigHash",
+            &PAGURO_VENDOR,
+            NV_BS_RT,
+            &sha256(&[i]),
+        )?;
     }
     let mut vm = Vm::start_disks(env, c.name, c.secure, &[&disk], &vars, &state)?;
     let r = (|| {
@@ -1579,11 +1755,17 @@ pub fn bootstrap(env: &Env) -> R<()> {
     );
     let wrapped = paguro_crypto::xor32(&paguro_crypto::bootstrap_key(&ph, &salt), &vmk);
     let payload = bootstrap::write_payload(&volume, &salt, &wrapped);
-    vars::inject(&vars, bootstrap::VAR_NAME, &PAGURO_VENDOR, 7, &payload)?;
+    vars::inject(
+        &vars,
+        bootstrap::VAR_NAME,
+        &PAGURO_VENDOR,
+        NV_BS_RT,
+        &payload,
+    )?;
     let hd = bootstrap::HardDrive {
         partition_number: 1,
-        start_lba: 2048,
-        size_lba: 34 * 2048,
+        start_lba: FIRST_LBA,
+        size_lba: BOOT_ESP_MIB * SECTORS_PER_MIB,
         partition_guid: Guid::parse(BOOTSTRAP_ESP).map_err(|e| format!("{e:?}"))?,
     };
     let mut lo = [0u8; 512];
@@ -1597,12 +1779,12 @@ pub fn bootstrap(env: &Env) -> R<()> {
     )
     .map_err(|_| "load option")?;
     let entry = format!("Boot{BOOTSTRAP_ENTRY:04X}");
-    vars::inject(&vars, &entry, &EFI_GLOBAL_VARIABLE, 7, &lo[..n])?;
+    vars::inject(&vars, &entry, &EFI_GLOBAL_VARIABLE, NV_BS_RT, &lo[..n])?;
     vars::inject(
         &vars,
         "BootNext",
         &EFI_GLOBAL_VARIABLE,
-        7,
+        NV_BS_RT,
         &BOOTSTRAP_ENTRY.to_le_bytes(),
     )?;
 

@@ -12,10 +12,12 @@
 //! KVM is used when `/dev/kvm` is usable, TCG otherwise.
 #![allow(clippy::indexing_slicing)]
 
+mod layout;
 mod linux;
 mod stage4;
 mod vars;
 
+use paguro_boot::platform::attrs::{NV_BS, NV_BS_RT};
 use paguro_boot::platform::{DiskInfo, Input, Platform, PlatformError, Screen};
 use paguro_boot::tpm::{CreatedObject, Tpm, pcr12_after_load_taint, policy_digest};
 use paguro_core::guid::{EFI_GLOBAL_VARIABLE, Guid, PAGURO_VENDOR};
@@ -34,6 +36,45 @@ type R<T> = Result<T, String>;
 const PIN: &str = "correct horse";
 const VOLUME: &str = "6c0a1b2c-3d4e-4f60-8182-93a4b5c6d7e8";
 const RECOVERY_PW: &str = "000011-000022-000033-000044-000055-000066-000077-720885";
+
+/// The disks' sector size.
+const SECTOR: u64 = 512;
+/// Sectors per MiB.
+const SECTORS_PER_MIB: u64 = (1 << 20) / SECTOR;
+/// Where sgdisk puts the first partition (1 MiB alignment).
+const FIRST_LBA: u64 = SECTORS_PER_MIB;
+/// `BootOrder` / `BootNext` naming `Boot0200` (a UINT16, little-endian).
+const BOOT0200: [u8; 2] = 0x0200u16.to_le_bytes();
+/// QEMU's absolute pointer axes (usb-tablet, input-send-event): 0..=0x7fff.
+const ABS_AXIS_MAX: u64 = 0x7fff;
+/// ESC, which starts a VT100 sequence on the serial console.
+const ESC: u8 = 0x1b;
+/// Printable ASCII.
+const PRINTABLE: std::ops::Range<u8> = 0x20..0x7f;
+
+/// A TPM 2.0 response header (TCG TPM 2.0 Part 1 §18.3): tag, responseSize,
+/// responseCode, big-endian. Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct TpmResponseHeader {
+    tag: u16,
+    response_size: u32,
+    response_code: u32,
+}
+const TPM_RESPONSE_HEADER: usize = std::mem::size_of::<TpmResponseHeader>();
+const TPM_RESPONSE_SIZE: std::ops::Range<usize> = layout::field!(TpmResponseHeader, response_size);
+const _: () = assert!(TPM_RESPONSE_HEADER == 10 && TPM_RESPONSE_SIZE.start == 2);
+
+// Screen checks: a display shows colour `c` when it is at least
+// DOMINANT_SHARE percent of the pixels, each channel within COLOUR_TOLERANCE.
+const COLOUR_TOLERANCE: u8 = 4;
+const DOMINANT_SHARE: usize = 40;
+/// A drawn screen has at least this many non-background pixels in its middle.
+const MIN_CONTENT_PIXELS: usize = 2000;
+/// A binary PPM: magic, width, height, maxval, then RGB bytes.
+const PPM_MAGIC: &str = "P6";
+const PPM_MAXVAL: &str = "255";
+const RGB: usize = 3;
 
 fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     let mut h = Sha256::new();
@@ -200,13 +241,13 @@ fn make_data_disk(env: &Env) -> R<PathBuf> {
     f.set_len(64 << 20).map_err(|e| e.to_string())?;
     drop(f);
     sh(Command::new("sgdisk")
-        .args(["-n", "1:2048:+32M", "-t", "1:0700", "-u"])
+        .args(["-n", &format!("1:{FIRST_LBA}:+32M"), "-t", "1:0700", "-u"])
         .arg(format!("1:{VOLUME}"))
         .arg(&img)
         .stdout(Stdio::null()))?;
     let mut data = std::fs::read(&img).map_err(|e| e.to_string())?;
     let vol = std::fs::read(&bde).map_err(|e| e.to_string())?;
-    let at = 2048 * 512;
+    let at = (FIRST_LBA * SECTOR) as usize;
     data[at..at + vol.len()].copy_from_slice(&vol);
     std::fs::write(&img, data).map_err(|e| e.to_string())?;
     Ok(img)
@@ -324,17 +365,18 @@ impl Platform for ToolTpm {
         self.stream
             .write_all(cmd)
             .map_err(|_| PlatformError::Device(1))?;
-        let mut hdr = [0u8; 10];
+        let mut hdr = [0u8; TPM_RESPONSE_HEADER];
         self.stream
             .read_exact(&mut hdr)
             .map_err(|_| PlatformError::Device(2))?;
-        let n = u32::from_be_bytes([hdr[2], hdr[3], hdr[4], hdr[5]]) as usize;
-        if n < 10 || n > resp.len() {
+        let size: [u8; 4] = hdr[TPM_RESPONSE_SIZE].try_into().unwrap_or_default();
+        let n = u32::from_be_bytes(size) as usize;
+        if n < TPM_RESPONSE_HEADER || n > resp.len() {
             return Err(PlatformError::TooLarge);
         }
-        resp[..10].copy_from_slice(&hdr);
+        resp[..TPM_RESPONSE_HEADER].copy_from_slice(&hdr);
         self.stream
-            .read_exact(&mut resp[10..n])
+            .read_exact(&mut resp[TPM_RESPONSE_HEADER..n])
             .map_err(|_| PlatformError::Device(3))?;
         Ok(n)
     }
@@ -348,6 +390,7 @@ impl Platform for ToolTpm {
         Err(PlatformError::Unsupported)
     }
     fn random(&mut self, buf: &mut [u8]) -> Result<(), PlatformError> {
+        // xorshift32 (Marsaglia's 13/17/5 family), deterministic.
         for b in buf.iter_mut() {
             self.rng ^= self.rng << 13;
             self.rng ^= self.rng >> 7;
@@ -431,9 +474,9 @@ fn clean(raw: &[u8], esc: &mut bool, out: &mut String) {
             continue;
         }
         match b {
-            0x1b => *esc = true,
+            ESC => *esc = true,
             b'\r' => {}
-            b if b == b'\n' || b == b'\t' || (0x20..0x7f).contains(&b) => out.push(b as char),
+            b if b == b'\n' || b == b'\t' || PRINTABLE.contains(&b) => out.push(b as char),
             _ => {}
         }
     }
@@ -774,12 +817,12 @@ fn uninstall(env: &Env) -> R<()> {
     let (vars, state) = fresh(env, name, "OVMF_VARS_4M.fd")?;
     let esp = make_esp(env, name, &env.efi, &[])?;
     let ours: [(&str, u32, &[u8]); 6] = [
-        ("PaguroB", 3, &[0xb0; 32]),
-        ("PaguroConfigHash", 7, &[0xc0; 32]),
-        ("PaguroSetup", 7, &[0x5e; 32]),
-        ("PaguroTpmBroken", 7, &[1]),
-        ("PaguroBootstrap", 7, b"a stale payload"),
-        ("PaguroUninstall", 7, &[1]),
+        ("PaguroB", NV_BS, &[0xb0; 32]),
+        ("PaguroConfigHash", NV_BS_RT, &[0xc0; 32]),
+        ("PaguroSetup", NV_BS_RT, &[0x5e; 32]),
+        ("PaguroTpmBroken", NV_BS_RT, &[1]),
+        ("PaguroBootstrap", NV_BS_RT, b"a stale payload"),
+        ("PaguroUninstall", NV_BS_RT, &[1]),
     ];
     for (n, a, d) in ours {
         vars::inject(&vars, n, &PAGURO_VENDOR, a, d)?;
@@ -795,8 +838,14 @@ fn uninstall(env: &Env) -> R<()> {
         &mut lo,
     )
     .map_err(|_| "load option")?;
-    vars::inject(&vars, "Boot0200", &EFI_GLOBAL_VARIABLE, 7, &lo[..n])?;
-    vars::inject(&vars, "BootOrder", &EFI_GLOBAL_VARIABLE, 7, &[0x00, 0x02])?;
+    vars::inject(&vars, "Boot0200", &EFI_GLOBAL_VARIABLE, NV_BS_RT, &lo[..n])?;
+    vars::inject(
+        &vars,
+        "BootOrder",
+        &EFI_GLOBAL_VARIABLE,
+        NV_BS_RT,
+        &BOOT0200,
+    )?;
     let mut vm = Vm::launch(env, name, false, &[&esp], &vars, &state, None, &[])?;
     let r = (|| -> R<()> {
         vm.expect("paguro 0.0.0", BOOT_WAIT)?;
@@ -821,7 +870,7 @@ fn uninstall(env: &Env) -> R<()> {
         }
     }
     match vars::read(&vars, "BootNext", &EFI_GLOBAL_VARIABLE)? {
-        Some((_, v)) if v == [0x00, 0x02] => Ok(()),
+        Some((_, v)) if v == BOOT0200 => Ok(()),
         other => Err(format!("BootNext after the uninstall boot: {other:?}")),
     }
 }
@@ -960,7 +1009,7 @@ fn secure_boot_case_q(
     };
     let (vars, state) = fresh(env, name, "OVMF_VARS_4M.snakeoil.fd")?;
     if let Some(h) = hash {
-        vars::inject(&vars, "PaguroConfigHash", &PAGURO_VENDOR, 7, &h)?;
+        vars::inject(&vars, "PaguroConfigHash", &PAGURO_VENDOR, NV_BS_RT, &h)?;
     }
     let ini = ini_text();
     let esp = make_esp(
@@ -1137,27 +1186,29 @@ fn screendump_dev(sock: &Path, out: &Path, device: Option<&str>) -> R<(usize, us
         fields[1].parse().map_err(|_| "ppm width")?,
         fields[2].parse().map_err(|_| "ppm height")?,
     );
-    if fields[0] != "P6" || fields[3] != "255" || data.len() < at + w * h * 3 {
+    if fields[0] != PPM_MAGIC || fields[3] != PPM_MAXVAL || data.len() < at + w * h * RGB {
         return Err(format!("not a P6 PPM: {fields:?}"));
     }
-    Ok((w, h, data[at..at + w * h * 3].to_vec()))
+    Ok((w, h, data[at..at + w * h * RGB].to_vec()))
 }
 
 /// The most common colour of an RGB frame and its share (0..=100).
 fn dominant(rgb: &[u8]) -> ((u8, u8, u8), usize) {
     let mut counts = std::collections::HashMap::new();
-    for p in rgb.chunks_exact(3) {
+    for p in rgb.chunks_exact(RGB) {
         *counts.entry((p[0], p[1], p[2])).or_insert(0usize) += 1;
     }
     let (c, n) = counts
         .into_iter()
         .max_by_key(|(_, n)| *n)
         .unwrap_or(((0, 0, 0), 0));
-    (c, n * 100 / (rgb.len() / 3).max(1))
+    (c, n * 100 / (rgb.len() / RGB).max(1))
 }
 
 fn near(a: (u8, u8, u8), c: paguro_ui::theme::Color) -> bool {
-    a.0.abs_diff(c.r) <= 4 && a.1.abs_diff(c.g) <= 4 && a.2.abs_diff(c.b) <= 4
+    a.0.abs_diff(c.r) <= COLOUR_TOLERANCE
+        && a.1.abs_diff(c.g) <= COLOUR_TOLERANCE
+        && a.2.abs_diff(c.b) <= COLOUR_TOLERANCE
 }
 
 /// Wait until display `device`'s dominant colour is (or is not) `c`.
@@ -1173,7 +1224,7 @@ fn wait_colour(
     loop {
         let (w, h, rgb) = screendump_dev(sock, &env.work.join(format!("{name}.ppm")), device)?;
         let (d, share) = dominant(&rgb);
-        if near(d, c) == want && share >= 40 {
+        if near(d, c) == want && share >= DOMINANT_SHARE {
             return Ok((w, h));
         }
         if t0.elapsed() > Duration::from_secs(60) {
@@ -1209,11 +1260,13 @@ fn graphical_unlock(env: &Env) -> R<()> {
         }
         let bg = paguro_ui::builtin::THEMES[0].palette.background;
         let near = |p: &[u8]| {
-            p[0].abs_diff(bg.r) <= 4 && p[1].abs_diff(bg.g) <= 4 && p[2].abs_diff(bg.b) <= 4
+            p[0].abs_diff(bg.r) <= COLOUR_TOLERANCE
+                && p[1].abs_diff(bg.g) <= COLOUR_TOLERANCE
+                && p[2].abs_diff(bg.b) <= COLOUR_TOLERANCE
         };
-        let px = |x: usize, y: usize| &rgb[(y * w + x) * 3..(y * w + x) * 3 + 3];
+        let px = |x: usize, y: usize| &rgb[(y * w + x) * RGB..(y * w + x) * RGB + RGB];
         let mut counts = std::collections::HashMap::new();
-        for p in rgb.chunks_exact(3) {
+        for p in rgb.chunks_exact(RGB) {
             *counts.entry((p[0], p[1], p[2])).or_insert(0usize) += 1;
         }
         let (dominant, n) = counts
@@ -1240,7 +1293,7 @@ fn graphical_unlock(env: &Env) -> R<()> {
                 }
             }
         }
-        if text < 2000 {
+        if text < MIN_CONTENT_PIXELS {
             return Err(format!("only {text} non-background pixels in the middle"));
         }
         println!("  {w}x{h}, background {dominant:?} on {n} pixels, {text} content pixels");
@@ -1485,8 +1538,8 @@ fn pointer_tablet(env: &Env) -> R<()> {
             .rect;
         let (x, y) = (row.x + row.w / 2, row.y + row.h / 2);
         let (ax, ay) = (
-            x as u64 * 0x7fff / u64::from(w - 1),
-            y as u64 * 0x7fff / u64::from(h - 1),
+            x as u64 * ABS_AXIS_MAX / u64::from(w - 1),
+            y as u64 * ABS_AXIS_MAX / u64::from(h - 1),
         );
         let abs = |ax: u64, ay: u64| {
             format!(

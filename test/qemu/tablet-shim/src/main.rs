@@ -28,15 +28,42 @@ use uefi_raw::protocol::console::{
     AbsolutePointerState,
 };
 
+/// QEMU's usb-tablet coordinate range (hw/usb/dev-hid.c): 0..=0x7fff.
+const TABLET_MAX: u64 = 0x7fff;
+/// QEMU's usb-tablet report: buttons (u8), X (u16 LE), Y (u16 LE), wheel.
+const REPORT_BUTTONS: usize = 0;
+const REPORT_X: usize = 1;
+const REPORT_Y: usize = 3;
+/// A report must reach through Y.
+const REPORT_MIN_LEN: usize = REPORT_Y + 2;
+const REPORT_MAX_LEN: usize = 8;
+/// Buttons: bit 0 is the left button.
+const BUTTON_LEFT: u8 = 1;
+/// Synchronous interrupt transfer timeout, ms.
+const TRANSFER_TIMEOUT_MS: usize = 2;
+/// USB interface class HID and its boot-keyboard protocol (USB HID 1.11 §4).
+const USB_CLASS_HID: u8 = 3;
+const HID_PROTOCOL_KEYBOARD: u8 = 1;
+/// Endpoint descriptor fields (USB 2.0 §9.6.6): bEndpointAddress's
+/// direction bit (IN) and number, bmAttributes' transfer type (interrupt).
+const ENDPOINT_DIR_IN: u8 = 0x80;
+const ENDPOINT_NUMBER: u8 = 0x0f;
+const TRANSFER_TYPE_MASK: u8 = 3;
+const TRANSFER_TYPE_INTERRUPT: u8 = 3;
+/// The endpoint used when the interface lists no interrupt-in endpoint.
+const DEFAULT_ENDPOINT: u8 = 1;
+/// Room for this volume's device path plus the loader's file path.
+const PATH_BUF: usize = 512;
+
 static TABLET: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
-static ENDPOINT: AtomicU8 = AtomicU8::new(1);
+static ENDPOINT: AtomicU8 = AtomicU8::new(DEFAULT_ENDPOINT);
 
 static mut MODE: AbsolutePointerMode = AbsolutePointerMode {
     absolute_min_x: 0,
     absolute_min_y: 0,
     absolute_min_z: 0,
-    absolute_max_x: 0x7fff,
-    absolute_max_y: 0x7fff,
+    absolute_max_x: TABLET_MAX,
+    absolute_max_y: TABLET_MAX,
     absolute_max_z: 0,
     attributes: AbsolutePointerModeAttributes::empty(),
 };
@@ -77,14 +104,15 @@ unsafe extern "efiapi" fn get_state(
     let Ok(mut io) = io else {
         return uefi_raw::Status::DEVICE_ERROR;
     };
-    let mut buf = [0u8; 8];
-    match io.sync_interrupt_receive(ENDPOINT.load(Ordering::Relaxed), &mut buf, 2) {
-        Ok(n) if n >= 5 && !state.is_null() => {
+    let mut buf = [0u8; REPORT_MAX_LEN];
+    let ep = ENDPOINT.load(Ordering::Relaxed);
+    match io.sync_interrupt_receive(ep, &mut buf, TRANSFER_TIMEOUT_MS) {
+        Ok(n) if n >= REPORT_MIN_LEN && !state.is_null() => {
             let s = AbsolutePointerState {
-                current_x: u64::from(u16::from_le_bytes([buf[1], buf[2]])),
-                current_y: u64::from(u16::from_le_bytes([buf[3], buf[4]])),
+                current_x: u64::from(u16::from_le_bytes([buf[REPORT_X], buf[REPORT_X + 1]])),
+                current_y: u64::from(u16::from_le_bytes([buf[REPORT_Y], buf[REPORT_Y + 1]])),
                 current_z: 0,
-                active_buttons: u32::from(buf[0] & 1),
+                active_buttons: u32::from(buf[REPORT_BUTTONS] & BUTTON_LEFT),
             };
             // SAFETY: the caller passes a writable state.
             unsafe { state.write(s) };
@@ -106,13 +134,16 @@ fn find_tablet() -> Option<(Handle, u8)> {
         let Ok(i) = io.interface_descriptor() else {
             continue;
         };
-        if i.interface_class != 3 || i.interface_protocol == 1 {
+        if i.interface_class != USB_CLASS_HID || i.interface_protocol == HID_PROTOCOL_KEYBOARD {
             continue;
         }
         let ep = (0..i.num_endpoints)
             .filter_map(|e| io.endpoint_descriptor(e).ok())
-            .find(|e| e.endpoint_address & 0x80 != 0 && e.attributes & 3 == 3)
-            .map_or(1, |e| e.endpoint_address & 0x0f);
+            .find(|e| {
+                e.endpoint_address & ENDPOINT_DIR_IN != 0
+                    && e.attributes & TRANSFER_TYPE_MASK == TRANSFER_TYPE_INTERRUPT
+            })
+            .map_or(DEFAULT_ENDPOINT, |e| e.endpoint_address & ENDPOINT_NUMBER);
         return Some((*h, ep));
     }
     None
@@ -160,7 +191,7 @@ fn main() -> Status {
     let Ok(dp) = boot::open_protocol_exclusive::<DevicePath>(dev) else {
         return Status::LOAD_ERROR;
     };
-    let mut buf = [core::mem::MaybeUninit::uninit(); 512];
+    let mut buf = [core::mem::MaybeUninit::uninit(); PATH_BUF];
     let mut b = DevicePathBuilder::with_buf(&mut buf);
     for n in dp.node_iter() {
         b = match b.push(&n) {
