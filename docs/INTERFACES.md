@@ -344,8 +344,12 @@ Plus the standard `BootNext` / `Boot####` (the bootstrap entry, §9).
 
 **Uninstall request.** `B` is boot-services-only, so no OS can delete it. The
 Windows tool sets `PaguroUninstall` (1 byte, NV | BS | RT); on the next boot the
-loader deletes `PaguroB`, its own variables and the request, then resets into
-Windows without unlocking anything (DESIGN §6b).
+loader, right after the bootstrap step, deletes `PaguroB`, `PaguroConfigHash`,
+`PaguroSetup`, `PaguroTpmBroken` and `PaguroBootstrap`, then the request itself
+last (an interrupted run repeats on the next boot). It unlocks and measures
+nothing, sets `BootNext` to the first `BootOrder` entry whose file path ends in
+`\EFI\Microsoft\Boot\bootmgfw.efi` (case-insensitive) and resets; with no such
+entry it halts with a message (DESIGN §6b).
 
 **`PaguroTpmBroken` lifecycle.** It means "the standing TPM seal does not match
 this machine any more", and whoever makes it match again clears it:
@@ -417,7 +421,7 @@ record   type u16 | len u32 | value[len]        (no padding)
 | 1 | `VOLUME` | partition GUID[16] \| first_lba u64 \| sectors u64 (512-byte units) | 1 |
 | 2 | `VMK` | 32 bytes | 0–1 (absent = unencrypted volume) |
 | 3 | `FVEK` | cipher u16 \| key len u16 \| key | 0–1 |
-| 4 | `FVE_LAYOUT` | metadata offsets u64×3 \| region size u64 \| boot-sector reloc offset u64, sectors u32 \| encrypted_size u64 \| sector size u32 — offsets and sizes in bytes, the relocated length in 512-byte sectors, the sector size (the XTS data unit) 512 or 4096 | 0–1 |
+| 4 | `FVE_LAYOUT` | metadata offsets u64×3 \| region size u64 \| boot-sector reloc offset u64, sectors u32 \| encrypted_size u64 \| sector size u32 \| extra region offset u64 — offsets and sizes in bytes, the relocated length in 512-byte sectors, the sector size (the XTS data unit) 512 or 4096, the extra region (Windows 10+; 0 = none) one region size long. 64 bytes | 0–1 |
 | 5 | `B` | 32 bytes | 1 |
 | 6 | `PCRS` | mask u32 \| n×32-byte SHA-256 values (no TPM: mask `0x95`, zero values) | 1 |
 | 7 | `CONFIG` | the verified `paguro.ini` bytes | 0–1 |
@@ -443,14 +447,25 @@ module reads the extents itself (§10).
 - **TPM objects:** parent = SRK template, empty unique, AES-128-CFB symmetric;
   sealed object `fixedTPM | fixedParent`; policy order `PolicyPCR`,
   `PolicyAuthValue`.
+- **TPM sessions are salted and encrypted:** an ephemeral P-256 key agrees a
+  secret with the SRK's public point (on-curve checked, SRK name checked
+  against its public area), KDFe and KDFa derive the salt and session key,
+  parameters are encrypted with AES-128-CFB keyed by session key ‖ authValue.
+  Unseal uses a salted policy session with `encrypt` (the HMAC is checked before
+  `D` is decrypted); Create uses a salted HMAC session with `decrypt`, so
+  authValue and `D` never cross the bus in clear. This stops a passive bus
+  sniffer; an active interposer substituting the SRK's public point is not
+  covered, as for any TPM use.
 - **Event log:** `TCG_PCClientTaggedEvent`, tag id = first 4 bytes of the paguro
   event GUID, data = GUID ‖ label (`paguro/load-taint/v1`,
   `paguro/boot-taint/v1`).
 - **Provisioning boot:** the loader authors the first `paguro.ini`, seals against
   its load taint, and forwards both (`CONFIG`, `PROVISION`); the initrd writes
   them.
-- **Bootstrap entry:** found through `BootCurrent`; only that `Boot####` is
-  deleted, also when its payload is malformed.
+- **Bootstrap:** the payload comes from `PaguroBootstrap`, deleted first (also
+  when malformed or oversized); the entry deleted is `BootCurrent`'s, only when
+  the variable was present, its file is under `\EFI\paguro\`, and it is not in
+  `BootOrder` (kept if `BootOrder` cannot be read).
 - **Hash variable missing with Secure Boot on:** straight to recovery.
 - **GPT:** primary header only; entry array ≤ 16 KiB.
 

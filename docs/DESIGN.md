@@ -908,7 +908,9 @@ verifies a signature. The theme is compiled into the binary (§Theme), and PE
 verification of the next image belongs to the platform: `LoadImage` runs Secure
 Boot verification against `db`, and shim's `MokList` is reached through shim's
 own hooks (§4.2, Verifying the next image). The binary carries SHA-256, AES-XTS,
-AES-CCM (the FVEK unwrap) and HMAC — no asymmetric implementation at all.
+AES-CCM (the FVEK unwrap), HMAC, and one elliptic-curve operation: the ECDH
+that salts TPM sessions so `D` never crosses the TPM bus in clear. **No
+signature verification** — the one asymmetric step is key agreement.
 
 **Stage 2's parser is second line, not first**, and should still be small:
 when the first line is three primitives, a soft second line behind them is how
@@ -3111,8 +3113,12 @@ permissions.
 - **`TPMA_OBJECT_noDA` must be clear.** The reason the PIN is an `authValue` rather
   than a hash we compare is that the TPM's dictionary-attack lockout then applies.
   `noDA` switches that off silently.
-- **HMAC session, not a password session**, so `auth` never crosses the bus in
-  clear; response parameter encryption on top.
+- **Salted HMAC session, not a password session**, with parameter encryption:
+  the session is salted with the SRK's public key (P-256 ECDH), so neither
+  `auth` nor `D` crosses the bus in clear. This is load-bearing: `B` is
+  readable by a physical attacker, so `D` staying out of a bus sniffer's reach
+  is what keeps a phished passphrase useless. An active interposer that
+  substitutes the SRK's public key is outside it, as for any TPM use.
 - **Nothing lives in the TPM.** The sealed object is a file, and its parent is
   re-created from the TCG-standard storage-key template on each use, so Windows
   and Linux reproduce the same parent without an NV handle (INTERFACES §4; §11
@@ -3423,7 +3429,7 @@ the first boot bootstraps from the passphrase and seals itself.
 installer (Windows)
     obtain the VMK via Windows' own protector
     prompt for a passphrase -> pass_hash
-    Boot#### OptionalData
+    PaguroBootstrap (firmware variable)
       <- volume GUID || salt || VMK XOR
          HMAC(pass_hash, "paguro/bootstrap" || salt)
     set BootNext, reboot
@@ -3449,7 +3455,7 @@ first boot (initrd)
 ```
 
 **The first boot never parses unverified bytes**: there is no `.ini` to read, and
-the one it forwards is the one it authored. **The `OptionalData` wrapping is
+the one it forwards is the one it authored. **The bootstrap wrapping is
 single-factor, and that is sound only because there is no oracle** — `B` cannot
 come from Windows, residue may outlive deletion, and none of it can be tested
 against a guess.
@@ -3905,7 +3911,7 @@ obtain the VMK via Windows' own BitLocker protector
     (unaffected -- PCR 7 did not move)
 MokList lost: queue the machine key in MokNew again
 prompt for the Linux passphrase -> pass_hash
-Boot#### OptionalData
+PaguroBootstrap (firmware variable)
   <- volume GUID || salt || VMK XOR
      HMAC(pass_hash, "paguro/bootstrap" || salt)
 BootNext, reboot
