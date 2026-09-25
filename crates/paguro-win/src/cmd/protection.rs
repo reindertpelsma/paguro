@@ -264,7 +264,11 @@ pub fn options(ctx: &Ctx<'_>, target: Target, klid: Option<&str>) -> CmdResult {
     let level = windows_level(bl.as_ref());
     let asked = level != WindowsLevel::Off;
     let tpm = ctx.api.tpm_present();
-    let offers = if asked { offers(level, target, tpm) } else { Vec::new() };
+    let offers = if asked {
+        offers(level, target, tpm)
+    } else {
+        Vec::new()
+    };
     let saved = load(ctx);
     let suggested = klid.and_then(from_klid).unwrap_or(Keyboard::Us);
     let data = json!({
@@ -305,9 +309,13 @@ pub fn check(ctx: &Ctx<'_>, keyboard: &str) -> CmdResult {
     let s = ctx.secret(Secret::Pin, "PIN or passphrase to check", false)?;
     let refused = check_secret(&s, k);
     let ok = refused.is_empty();
-    let data = json!({ "ok": ok, "keyboard": k.name(), "length": s.chars().count(), "refused": refused });
+    let data =
+        json!({ "ok": ok, "keyboard": k.name(), "length": s.chars().count(), "refused": refused });
     if ok {
-        Ok(Report::new(data).line(format!("every character can be typed at boot ({})", layout_label(k))))
+        Ok(Report::new(data).line(format!(
+            "every character can be typed at boot ({})",
+            layout_label(k)
+        )))
     } else {
         Err(CmdError::refused(format!(
             "{} character(s) cannot be typed at boot on the {} layout (dead keys are not supported)",
@@ -341,7 +349,10 @@ pub fn set(ctx: &Ctx<'_>, a: &SetArgs) -> CmdResult {
     let choice = Choice::parse(&a.choice).ok_or_else(|| {
         CmdError::new(
             Exit::Usage,
-            format!("unknown choice {:?} (tpm_pin, passphrase, tpm_only, unprotected)", a.choice),
+            format!(
+                "unknown choice {:?} (tpm_pin, passphrase, tpm_only, unprotected)",
+                a.choice
+            ),
         )
     })?;
     let k = config::keyboard(&a.keyboard)?;
@@ -362,9 +373,17 @@ pub fn set(ctx: &Ctx<'_>, a: &SetArgs) -> CmdResult {
         .find(|o| o.id == choice)
         .ok_or_else(|| CmdError::internal("choice without an offer"))?;
     if !offer.offered {
-        return Err(CmdError::refused(format!("{} is not offered here: {}", choice.name(), offer.reason)));
+        return Err(CmdError::refused(format!(
+            "{} is not offered here: {}",
+            choice.name(),
+            offer.reason
+        )));
     }
-    let what = if choice == Choice::TpmPin { "Linux PIN" } else { "Linux passphrase" };
+    let what = if choice == Choice::TpmPin {
+        "Linux PIN"
+    } else {
+        "Linux passphrase"
+    };
     let mut refused = Vec::new();
     if choice.needs_secret() {
         let s = ctx.secret(Secret::Pin, what, true)?;
@@ -398,7 +417,8 @@ pub fn set(ctx: &Ctx<'_>, a: &SetArgs) -> CmdResult {
     if !ctx.dry_run {
         ctx.need_admin()?;
         ctx.api.create_dir_all(&ctx.data_dir())?;
-        let body = serde_json::to_vec_pretty(&saved).map_err(|e| CmdError::internal(e.to_string()))?;
+        let body =
+            serde_json::to_vec_pretty(&saved).map_err(|e| CmdError::internal(e.to_string()))?;
         ctx.api.write_file(&saved_path(ctx), &body)?;
     }
     let mut pending = Vec::new();
@@ -413,7 +433,11 @@ pub fn set(ctx: &Ctx<'_>, a: &SetArgs) -> CmdResult {
         "pending": pending,
     }))
     .lines(cfg.human)
-    .line(format!("protection: {} (keyboard {})", choice.name(), layout_label(k)));
+    .line(format!(
+        "protection: {} (keyboard {})",
+        choice.name(),
+        layout_label(k)
+    ));
     for w in cfg.warnings {
         r = r.warn(w);
     }
@@ -477,8 +501,14 @@ mod tests {
 
     #[test]
     fn tpm_only_is_capped_at_windows_level() {
-        assert_eq!(offered(WindowsLevel::TpmPin, Target::Image), ["tpm_pin", "passphrase"]);
-        assert_eq!(offered(WindowsLevel::TpmOnly, Target::Image), ["tpm_pin", "passphrase", "tpm_only"]);
+        assert_eq!(
+            offered(WindowsLevel::TpmPin, Target::Image),
+            ["tpm_pin", "passphrase"]
+        );
+        assert_eq!(
+            offered(WindowsLevel::TpmOnly, Target::Image),
+            ["tpm_pin", "passphrase", "tpm_only"]
+        );
         assert_eq!(offered(WindowsLevel::NoTpm, Target::Image), ["passphrase"]);
         assert_eq!(
             offered(WindowsLevel::TpmPin, Target::Disk),

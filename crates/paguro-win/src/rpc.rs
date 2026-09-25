@@ -94,7 +94,10 @@ pub const METHODS: &[Method] = &[
     m("service.info", Read),
     m("status", Read),
     m("checks.list", Read),
-    Method { dry_run_read: true, ..m("checks.fix", Admin) },
+    Method {
+        dry_run_read: true,
+        ..m("checks.fix", Admin)
+    },
     m("hw.export", Read),
     m("hw.modalias", Read),
     m("disk.create", Admin),
@@ -114,21 +117,53 @@ pub const METHODS: &[Method] = &[
     m("esp.verify", Read),
     m("esp.repair", Admin),
     m("mok.enroll", Elevated),
-    Method { gated: &["cert"], ..m("mok.status", Read) },
-    Method { gated: &["repair"], ..m("preflight", Read) },
-    Method { dry_run_read: true, ..m("restart-linux", Admin) },
-    Method { dry_run_read: true, ..m("stage-setup", Admin) },
-    Method { dry_run_read: true, ..m("repair", Admin) },
-    Method { progress: true, stub: true, ..m("install", Admin) },
-    Method { dry_run_read: true, progress: true, ..m("uninstall", Admin) },
+    Method {
+        gated: &["cert"],
+        ..m("mok.status", Read)
+    },
+    Method {
+        gated: &["repair"],
+        ..m("preflight", Read)
+    },
+    Method {
+        dry_run_read: true,
+        ..m("restart-linux", Admin)
+    },
+    Method {
+        dry_run_read: true,
+        ..m("stage-setup", Admin)
+    },
+    Method {
+        dry_run_read: true,
+        ..m("repair", Admin)
+    },
+    Method {
+        progress: true,
+        stub: true,
+        ..m("install", Admin)
+    },
+    Method {
+        dry_run_read: true,
+        progress: true,
+        ..m("uninstall", Admin)
+    },
     m("distro.list", Read),
     m("distro.rename", Admin),
     m("distro.remove", Admin),
-    Method { stub: true, ..m("distro.grow", Admin) },
-    Method { stub: true, ..m("distro.enter", Admin) },
+    Method {
+        stub: true,
+        ..m("distro.grow", Admin)
+    },
+    Method {
+        stub: true,
+        ..m("distro.enter", Admin)
+    },
     m("distro.leave", Admin),
     m("protection.options", Read),
-    Method { stub: true, ..m("protection.set", Admin) },
+    Method {
+        stub: true,
+        ..m("protection.set", Admin)
+    },
     m("protection.check", Read),
     m("secure-boot.status", Read),
 ];
@@ -222,8 +257,15 @@ impl RpcError {
     }
     pub fn from_json(v: &Value) -> Self {
         RpcError {
-            code: v.get("code").and_then(Value::as_i64).unwrap_or(codes::INVALID_REQUEST),
-            message: v.get("message").and_then(Value::as_str).unwrap_or("").to_string(),
+            code: v
+                .get("code")
+                .and_then(Value::as_i64)
+                .unwrap_or(codes::INVALID_REQUEST),
+            message: v
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             data: v.get("data").cloned().unwrap_or(Value::Null),
         }
     }
@@ -294,7 +336,11 @@ pub fn to_report(v: &Value) -> Report {
     let strings = |k: &str| -> Vec<String> {
         v.get(k)
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     Report {
@@ -369,7 +415,12 @@ fn truthy(v: Option<&Value>) -> bool {
     !matches!(v, None | Some(Value::Null) | Some(Value::Bool(false)))
 }
 
-fn authorize(m: &Method, c: &Caller, dry_run: bool, rest: &Map<String, Value>) -> Result<(), RpcError> {
+fn authorize(
+    m: &Method,
+    c: &Caller,
+    dry_run: bool,
+    rest: &Map<String, Value>,
+) -> Result<(), RpcError> {
     let need = if dry_run && m.dry_run_read {
         Access::Read
     } else {
@@ -545,7 +596,12 @@ pub struct ProtectionCheck {
 // ---------------------------------------------------------------------------
 
 /// Run `method` with `params` (a JSON object) against `api`.
-pub fn call(api: &dyn WinApi, method: &str, params: &Value, o: &Options<'_>) -> Result<(Report, bool), RpcError> {
+pub fn call(
+    api: &dyn WinApi,
+    method: &str,
+    params: &Value,
+    o: &Options<'_>,
+) -> Result<(Report, bool), RpcError> {
     let m = self::method(method)
         .ok_or_else(|| RpcError::new(codes::METHOD_NOT_FOUND, format!("no method {method:?}")))?;
     let (common, rest) = split(params)?;
@@ -567,7 +623,12 @@ pub fn call(api: &dyn WinApi, method: &str, params: &Value, o: &Options<'_>) -> 
 }
 
 /// `Ok(Err(_))` is the command's own failure; `Err(_)` bad parameters.
-fn dispatch(ctx: &Ctx<'_>, m: &Method, rest: Map<String, Value>, o: &Options<'_>) -> Result<CmdResult, RpcError> {
+fn dispatch(
+    ctx: &Ctx<'_>,
+    m: &Method,
+    rest: Map<String, Value>,
+    o: &Options<'_>,
+) -> Result<CmdResult, RpcError> {
     let none = |rest: Map<String, Value>| parse::<NoParams>(rest).map(|_| ());
     Ok(match m.name {
         "service.info" => {
@@ -691,7 +752,12 @@ fn dispatch(ctx: &Ctx<'_>, m: &Method, rest: Map<String, Value>, o: &Options<'_>
             none(rest)?;
             secureboot::status(ctx)
         }
-        other => return Err(RpcError::new(codes::METHOD_NOT_FOUND, format!("no method {other:?}"))),
+        other => {
+            return Err(RpcError::new(
+                codes::METHOD_NOT_FOUND,
+                format!("no method {other:?}"),
+            ));
+        }
     })
 }
 
@@ -712,7 +778,11 @@ fn service_info(o: &Options<'_>) -> Report {
     .line(format!(
         "paguro API {API_VERSION} ({}), caller {} ({})",
         if o.service { "service" } else { "direct" },
-        if o.caller.user.is_empty() { "this process" } else { &o.caller.user },
+        if o.caller.user.is_empty() {
+            "this process"
+        } else {
+            &o.caller.user
+        },
         if o.caller.elevated {
             "elevated administrator"
         } else if o.caller.admin {
@@ -755,8 +825,10 @@ pub fn handle_line(
     };
     let id = req.get("id").cloned();
     let bad = |msg: &str| {
-        Some(json!({ "jsonrpc": "2.0", "id": id.clone().unwrap_or(Value::Null),
-            "error": RpcError::new(codes::INVALID_REQUEST, msg).to_json() }))
+        Some(
+            json!({ "jsonrpc": "2.0", "id": id.clone().unwrap_or(Value::Null),
+            "error": RpcError::new(codes::INVALID_REQUEST, msg).to_json() }),
+        )
     };
     if req.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return bad("not a JSON-RPC 2.0 request");
@@ -805,8 +877,16 @@ mod tests {
     #[test]
     fn methods_are_unique_and_named_like_commands() {
         for (i, a) in METHODS.iter().enumerate() {
-            assert!(METHODS[i + 1..].iter().all(|b| b.name != a.name), "{}", a.name);
-            assert!(a.name.chars().all(|c| c.is_ascii_lowercase() || c == '.' || c == '-'));
+            assert!(
+                METHODS[i + 1..].iter().all(|b| b.name != a.name),
+                "{}",
+                a.name
+            );
+            assert!(
+                a.name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '.' || c == '-')
+            );
         }
     }
 
@@ -814,22 +894,50 @@ mod tests {
     fn access_policy() {
         let m = MockApi::standard();
         let u = user();
-        let admin = Caller { admin: true, ..user() };
-        let r = line(&m, &u, json!({"jsonrpc":"2.0","id":1,"method":"config.set","params":{"tpm":false}}));
+        let admin = Caller {
+            admin: true,
+            ..user()
+        };
+        let r = line(
+            &m,
+            &u,
+            json!({"jsonrpc":"2.0","id":1,"method":"config.set","params":{"tpm":false}}),
+        );
         assert_eq!(r["error"]["code"], codes::COMMAND_BASE - 7);
         assert_eq!(r["error"]["data"]["code"], "needs_elevation");
         // dry-run plans are readable where the GUI shows them.
-        let r = line(&m, &u, json!({"jsonrpc":"2.0","id":2,"method":"uninstall","params":{"dry_run":true}}));
+        let r = line(
+            &m,
+            &u,
+            json!({"jsonrpc":"2.0","id":2,"method":"uninstall","params":{"dry_run":true}}),
+        );
         assert!(r.get("result").is_some(), "{r}");
         // A gated parameter.
-        let r = line(&m, &u, json!({"jsonrpc":"2.0","id":3,"method":"preflight","params":{"repair":true}}));
+        let r = line(
+            &m,
+            &u,
+            json!({"jsonrpc":"2.0","id":3,"method":"preflight","params":{"repair":true}}),
+        );
         assert_eq!(r["error"]["data"]["code"], "needs_elevation");
-        let r = line(&m, &u, json!({"jsonrpc":"2.0","id":3,"method":"preflight","params":{"repair":false}}));
+        let r = line(
+            &m,
+            &u,
+            json!({"jsonrpc":"2.0","id":3,"method":"preflight","params":{"repair":false}}),
+        );
         assert!(r["error"]["data"]["code"] != "needs_elevation", "{r}");
         // Raw firmware writes need elevation even for an administrator.
-        let r = line(&m, &admin, json!({"jsonrpc":"2.0","id":4,"method":"efi.vars.delete","params":{"name":"PaguroSetup"}}));
+        let r = line(
+            &m,
+            &admin,
+            json!({"jsonrpc":"2.0","id":4,"method":"efi.vars.delete","params":{"name":"PaguroSetup"}}),
+        );
         assert_eq!(r["error"]["data"]["code"], "needs_elevation");
-        assert!(m.mutations.borrow().iter().all(|x| !x.contains("PaguroSetup")));
+        assert!(
+            m.mutations
+                .borrow()
+                .iter()
+                .all(|x| !x.contains("PaguroSetup"))
+        );
     }
 
     #[test]
@@ -842,29 +950,60 @@ mod tests {
         assert_eq!(r["error"]["code"], codes::INVALID_REQUEST);
         let r = line(&m, &u, json!({"jsonrpc":"2.0","id":1,"method":"nope"}));
         assert_eq!(r["error"]["code"], codes::METHOD_NOT_FOUND);
-        let r = line(&m, &u, json!({"jsonrpc":"2.0","id":1,"method":"status","params":{"bogus":1}}));
+        let r = line(
+            &m,
+            &u,
+            json!({"jsonrpc":"2.0","id":1,"method":"status","params":{"bogus":1}}),
+        );
         assert_eq!(r["error"]["code"], codes::INVALID_PARAMS);
-        let r = line(&m, &u, json!({"jsonrpc":"2.0","id":1,"method":"status","params":[1]}));
+        let r = line(
+            &m,
+            &u,
+            json!({"jsonrpc":"2.0","id":1,"method":"status","params":[1]}),
+        );
         assert_eq!(r["error"]["code"], codes::INVALID_PARAMS);
         // A notification gets no response.
-        assert!(handle_line(&m, r#"{"jsonrpc":"2.0","method":"status"}"#, &u, true, &|_| {}).is_none());
+        assert!(
+            handle_line(
+                &m,
+                r#"{"jsonrpc":"2.0","method":"status"}"#,
+                &u,
+                true,
+                &|_| {}
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn a_missing_secret_is_asked_back() {
         let m = MockApi::standard();
-        let admin = Caller { admin: true, ..user() };
+        let admin = Caller {
+            admin: true,
+            ..user()
+        };
         crate::cmd::protection::tests_support::bitlocker_tpm(&m);
-        let r = line(&m, &admin, json!({"jsonrpc":"2.0","id":1,"method":"protection.set","params":{"choice":"passphrase"}}));
+        let r = line(
+            &m,
+            &admin,
+            json!({"jsonrpc":"2.0","id":1,"method":"protection.set","params":{"choice":"passphrase"}}),
+        );
         assert_eq!(r["error"]["data"]["data"]["needs_input"], "pin", "{r}");
         assert_eq!(r["error"]["data"]["data"]["confirm"], true);
-        let r = line(&m, &admin, json!({"jsonrpc":"2.0","id":1,"method":"protection.set","params":{"choice":"passphrase","pin":"correct horse"}}));
+        let r = line(
+            &m,
+            &admin,
+            json!({"jsonrpc":"2.0","id":1,"method":"protection.set","params":{"choice":"passphrase","pin":"correct horse"}}),
+        );
         assert_eq!(r["result"]["data"]["choice"], "passphrase", "{r}");
     }
 
     #[test]
     fn roundtrip_to_client_types() {
-        let r = Report::new(json!({"a":1})).line("x").warn("w").exit(Exit::Pending);
+        let r = Report::new(json!({"a":1}))
+            .line("x")
+            .warn("w")
+            .exit(Exit::Pending);
         let back = to_report(&result_json(&r, true));
         assert_eq!(back, r);
         let e = CmdError::refused("no").with_data(json!({"k":2}));

@@ -50,7 +50,11 @@ pub fn status(ctx: &Ctx<'_>) -> CmdResult {
         .ok()
         .flatten()
         .is_some_and(|v| v.data == [1]);
-    let ms_ca = if sb { microsoft_ca_in_db(ctx.api) } else { None };
+    let ms_ca = if sb {
+        microsoft_ca_in_db(ctx.api)
+    } else {
+        None
+    };
     let mok = mok::status(ctx, None).map(|r| r.data).unwrap_or_default();
     let pending = mok.at("pending_request").as_bool().unwrap_or(false);
     let enrolled = mok.at("enrolled").as_bool().unwrap_or(false);
@@ -97,5 +101,12 @@ pub fn status(ctx: &Ctx<'_>) -> CmdResult {
 /// For `checks`: the error text of a failed read, or the state.
 pub fn describe(ctx: &Ctx<'_>) -> Result<(bool, Option<bool>), CmdError> {
     let sb = transition::secure_boot(ctx)?;
-    Ok((sb, if sb { microsoft_ca_in_db(ctx.api) } else { None }))
+    Ok((
+        sb,
+        if sb {
+            microsoft_ca_in_db(ctx.api)
+        } else {
+            None
+        },
+    ))
 }

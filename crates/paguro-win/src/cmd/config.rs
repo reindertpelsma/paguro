@@ -78,8 +78,7 @@ pub fn validate(ctx: &Ctx<'_>) -> CmdResult {
 }
 
 /// `paguro config set` arguments; every field optional.
-#[derive(Clone, Debug, Default)]
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SetArgs {
     pub entry: Option<String>,
@@ -129,8 +128,14 @@ pub fn keyboard(name: &str) -> Result<paguro_core::config::Keyboard, CmdError> {
         .copied()
         .find(|k| k.name().eq_ignore_ascii_case(name))
         .ok_or_else(|| {
-            let all: Vec<&str> = paguro_core::config::Keyboard::ALL.iter().map(|k| k.name()).collect();
-            CmdError::new(Exit::Usage, format!("unknown keyboard {name:?} (one of {})", all.join(", ")))
+            let all: Vec<&str> = paguro_core::config::Keyboard::ALL
+                .iter()
+                .map(|k| k.name())
+                .collect();
+            CmdError::new(
+                Exit::Usage,
+                format!("unknown keyboard {name:?} (one of {})", all.join(", ")),
+            )
         })
 }
 

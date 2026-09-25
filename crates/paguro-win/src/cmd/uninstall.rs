@@ -387,7 +387,11 @@ fn run_step(
             index,
             total,
             id,
-            serde_json::to_value(st).ok().and_then(|v| v.as_str().map(String::from)).as_deref().unwrap_or("done"),
+            serde_json::to_value(st)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .as_deref()
+                .unwrap_or("done"),
             detail,
         ),
         Err(e) => ctx.step("uninstall", index, total, id, "failed", &e.message),
@@ -413,7 +417,12 @@ fn run_step(
     }
 }
 
-pub fn uninstall(ctx: &Ctx<'_>, delete_images: bool, skip_final_boot: bool, yes: bool) -> CmdResult {
+pub fn uninstall(
+    ctx: &Ctx<'_>,
+    delete_images: bool,
+    skip_final_boot: bool,
+    yes: bool,
+) -> CmdResult {
     let o = Opts {
         delete_images,
         skip_final_boot,

@@ -56,7 +56,10 @@ pub fn modalias(_ctx: &Ctx<'_>, hardware: &serde_json::Value) -> CmdResult {
 }
 
 /// Read an export file for [`modalias`] (front-end side).
-pub fn read_export(api: &dyn crate::api::WinApi, input: &str) -> Result<serde_json::Value, CmdError> {
+pub fn read_export(
+    api: &dyn crate::api::WinApi,
+    input: &str,
+) -> Result<serde_json::Value, CmdError> {
     let b = api
         .read_file(input, MAX_EXPORT)?
         .ok_or_else(|| CmdError::not_found(format!("{input}: no such file")))?;

@@ -41,7 +41,11 @@ impl V<'_> {
         match s.get("$ref").and_then(Value::as_str) {
             Some(r) => {
                 let name = r.strip_prefix("#/$defs/").expect("local $ref");
-                self.resolve(self.defs.get(name).unwrap_or_else(|| panic!("no $defs/{name}")))
+                self.resolve(
+                    self.defs
+                        .get(name)
+                        .unwrap_or_else(|| panic!("no $defs/{name}")),
+                )
             }
             None => s,
         }
@@ -78,7 +82,11 @@ impl V<'_> {
                 errs.push(format!("{at}: expected {t}, got {v}"));
                 return;
             }
-            Some(Value::Array(ts)) if !ts.iter().any(|t| Self::type_ok(t.as_str().unwrap_or(""), v)) => {
+            Some(Value::Array(ts))
+                if !ts
+                    .iter()
+                    .any(|t| Self::type_ok(t.as_str().unwrap_or(""), v)) =>
+            {
                 errs.push(format!("{at}: expected one of {ts:?}, got {v}"));
                 return;
             }
@@ -96,7 +104,12 @@ impl V<'_> {
         }
         if let Some(o) = v.as_object() {
             let props = s.get("properties").and_then(Value::as_object);
-            for r in s.get("required").and_then(Value::as_array).into_iter().flatten() {
+            for r in s
+                .get("required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
                 let r = r.as_str().unwrap_or("");
                 if !o.contains_key(r) {
                     errs.push(format!("{at}: missing required {r}"));
@@ -153,12 +166,24 @@ fn methods_match_the_schema() {
     for m in rpc::METHODS {
         let d = &methods[m.name];
         assert_eq!(d["access"], access(m.access), "{}: access", m.name);
-        let gated: Vec<&str> = d["gated"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+        let gated: Vec<&str> = d["gated"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
         assert_eq!(gated, m.gated, "{}: gated", m.name);
-        assert_eq!(d["dry_run_read"] == true, m.dry_run_read, "{}: dry_run_read", m.name);
+        assert_eq!(
+            d["dry_run_read"] == true,
+            m.dry_run_read,
+            "{}: dry_run_read",
+            m.name
+        );
         assert_eq!(d["progress"] == true, m.progress, "{}: progress", m.name);
         assert_eq!(d["stub"].is_string(), m.stub, "{}: stub", m.name);
-        assert!(d["cmdlets"].as_array().is_some_and(|a| !a.is_empty()), "{}: a cmdlet", m.name);
+        assert!(
+            d["cmdlets"].as_array().is_some_and(|a| !a.is_empty()),
+            "{}: a cmdlet",
+            m.name
+        );
     }
     assert_eq!(s["version"], rpc::API_VERSION);
 }
@@ -176,12 +201,20 @@ fn rust_fields(method: &str) -> BTreeSet<String> {
         progress: None,
     };
     let e = rpc::call(&api, method, &json!({ "__probe__": 1 }), &o).expect_err("probe must fail");
-    assert_eq!(e.code, rpc::codes::INVALID_PARAMS, "{method}: {}", e.message);
+    assert_eq!(
+        e.code,
+        rpc::codes::INVALID_PARAMS,
+        "{method}: {}",
+        e.message
+    );
     let msg = e.message;
     if msg.contains("there are no fields") {
         return BTreeSet::new();
     }
-    let tail = msg.split("expected").nth(1).unwrap_or_else(|| panic!("{method}: {msg}"));
+    let tail = msg
+        .split("expected")
+        .nth(1)
+        .unwrap_or_else(|| panic!("{method}: {msg}"));
     tail.split('`')
         .skip(1)
         .step_by(2)
@@ -194,22 +227,45 @@ fn params_match_the_schema() {
     let s = schema();
     let defs = s["$defs"].as_object().expect("$defs");
     let v = V { defs };
-    let common: BTreeSet<String> = defs["CommonParams"]["properties"].as_object().unwrap().keys().cloned().collect();
+    let common: BTreeSet<String> = defs["CommonParams"]["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
     assert_eq!(common, rpc::COMMON.iter().map(|c| c.to_string()).collect());
     for (name, d) in s["methods"].as_object().unwrap() {
         let p = v.resolve(&d["params"]);
-        assert_eq!(p["additionalProperties"], false, "{name}: params are closed");
-        let declared: BTreeSet<String> = p["properties"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
-        assert_eq!(declared, rust_fields(name), "{name}: schema params vs the Rust struct");
+        assert_eq!(
+            p["additionalProperties"], false,
+            "{name}: params are closed"
+        );
+        let declared: BTreeSet<String> = p["properties"]
+            .as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        assert_eq!(
+            declared,
+            rust_fields(name),
+            "{name}: schema params vs the Rust struct"
+        );
         // The examples exercise every parameter.
         let mut seen = BTreeSet::new();
         for ex in d["examples"].as_array().expect("examples") {
             let mut own = ex.as_object().unwrap().clone();
             own.retain(|k, _| !common.contains(k));
             seen.extend(own.keys().cloned());
-            v.validate(&d["params"], &Value::Object(own), &format!("{name} example"));
+            v.validate(
+                &d["params"],
+                &Value::Object(own),
+                &format!("{name} example"),
+            );
         }
-        assert!(declared.is_subset(&seen), "{name}: examples miss {:?}", declared.difference(&seen).collect::<Vec<_>>());
+        assert!(
+            declared.is_subset(&seen),
+            "{name}: examples miss {:?}",
+            declared.difference(&seen).collect::<Vec<_>>()
+        );
     }
 }
 
@@ -227,10 +283,16 @@ fn responses_match_the_schema_and_the_fixtures() {
             let api = MockApi::demo();
             let req = json!({ "jsonrpc": "2.0", "id": 1, "method": name, "params": ex });
             let notes = std::cell::RefCell::new(Vec::new());
-            let resp = rpc::handle_line(&api, &req.to_string(), &admin(), true, &|n| notes.borrow_mut().push(n.clone()))
-                .expect("a response");
+            let resp = rpc::handle_line(&api, &req.to_string(), &admin(), true, &|n| {
+                notes.borrow_mut().push(n.clone())
+            })
+            .expect("a response");
             if let Some(r) = resp.get("result") {
-                v.validate(&json!({ "$ref": "#/$defs/Result" }), r, &format!("{name} result"));
+                v.validate(
+                    &json!({ "$ref": "#/$defs/Result" }),
+                    r,
+                    &format!("{name} result"),
+                );
                 v.validate(&d["result"], &r["data"], &format!("{name} data"));
             } else {
                 let e = &resp["error"];
@@ -239,11 +301,19 @@ fn responses_match_the_schema_and_the_fixtures() {
                     code != rpc::codes::INVALID_PARAMS && code != rpc::codes::METHOD_NOT_FOUND,
                     "{name} example {i}: {e}"
                 );
-                v.validate(&json!({ "$ref": "#/$defs/ErrorData" }), &e["data"], &format!("{name} error"));
+                v.validate(
+                    &json!({ "$ref": "#/$defs/ErrorData" }),
+                    &e["data"],
+                    &format!("{name} error"),
+                );
             }
             for n in notes.borrow().iter() {
                 assert_eq!(n["method"], "progress");
-                v.validate(&json!({ "$ref": "#/$defs/Progress" }), &n["params"], &format!("{name} progress"));
+                v.validate(
+                    &json!({ "$ref": "#/$defs/Progress" }),
+                    &n["params"],
+                    &format!("{name} progress"),
+                );
             }
             let fx = json!({
                 "method": name,
@@ -251,7 +321,11 @@ fn responses_match_the_schema_and_the_fixtures() {
                 "notifications": *notes.borrow(),
                 "response": resp,
             });
-            let file = if i == 0 { format!("{name}.json") } else { format!("{name}.{i}.json") };
+            let file = if i == 0 {
+                format!("{name}.json")
+            } else {
+                format!("{name}.{i}.json")
+            };
             expected.insert(file.clone());
             let text = serde_json::to_string_pretty(&fx).unwrap() + "\n";
             let path = dir.join(&file);
@@ -264,11 +338,18 @@ fn responses_match_the_schema_and_the_fixtures() {
         }
     }
     let present: BTreeSet<String> = std::fs::read_dir(&dir)
-        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
         .unwrap_or_default();
     let extra: Vec<_> = present.difference(&expected).collect();
     assert!(extra.is_empty(), "fixtures without an example: {extra:?}");
-    assert!(stale.is_empty(), "stale fixtures (run with PAGURO_BLESS=1): {stale:?}");
+    assert!(
+        stale.is_empty(),
+        "stale fixtures (run with PAGURO_BLESS=1): {stale:?}"
+    );
 }
 
 #[test]
@@ -276,9 +357,16 @@ fn every_method_has_a_cli_command() {
     let s = schema();
     for (name, d) in s["methods"].as_object().unwrap() {
         let argv: Vec<&str> = std::iter::once("paguro")
-            .chain(d["cli_example"].as_array().unwrap_or_else(|| panic!("{name}: cli_example")).iter().filter_map(Value::as_str))
+            .chain(
+                d["cli_example"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{name}: cli_example"))
+                    .iter()
+                    .filter_map(Value::as_str),
+            )
             .collect();
-        let cli = paguro_win::cli::Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{name}: {argv:?}: {e}"));
+        let cli = paguro_win::cli::Cli::try_parse_from(&argv)
+            .unwrap_or_else(|e| panic!("{name}: {argv:?}: {e}"));
         let (m, _) = paguro_win::cli::request(&cli.command)
             .unwrap_or_else(|e| panic!("{name}: {}", e.message))
             .unwrap_or_else(|| panic!("{name}: direct-only"));
@@ -289,7 +377,9 @@ fn every_method_has_a_cli_command() {
 #[test]
 fn the_validator_refuses() {
     let s = schema();
-    let v = V { defs: s["$defs"].as_object().unwrap() };
+    let v = V {
+        defs: s["$defs"].as_object().unwrap(),
+    };
     let bad = [
         json!({ "id": "tpm_pin", "offered": "yes", "recommended": true, "reason": "" }),
         json!({ "id": "tpm_pin", "offered": true, "recommended": true }),
@@ -297,11 +387,21 @@ fn the_validator_refuses() {
     ];
     for b in bad {
         let mut e = Vec::new();
-        v.check(&json!({ "$ref": "#/$defs/ProtectionOffer" }), &b, "x", &mut e);
+        v.check(
+            &json!({ "$ref": "#/$defs/ProtectionOffer" }),
+            &b,
+            "x",
+            &mut e,
+        );
         assert!(!e.is_empty(), "{b}");
     }
     let mut e = Vec::new();
-    v.check(&json!({ "$ref": "#/$defs/NameParams" }), &json!({ "name": "a", "other": 1 }), "x", &mut e);
+    v.check(
+        &json!({ "$ref": "#/$defs/NameParams" }),
+        &json!({ "name": "a", "other": 1 }),
+        "x",
+        &mut e,
+    );
     assert!(!e.is_empty());
     let mut e = Vec::new();
     v.check(&json!({ "$ref": "#/$defs/Distribution" }), &json!({ "name": "a", "kind": "image", "default": true, "exists": true, "bootable": true, "size": null }), "x", &mut e);

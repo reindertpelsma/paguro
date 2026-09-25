@@ -563,7 +563,10 @@ pub fn boot_target(pf: &Preflight, entry: &str) -> Result<Vec<u8>, CmdError> {
         if hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
             return Ok(format!("disk:{}", hex.to_ascii_uppercase()).into_bytes());
         }
-        return Err(CmdError::new(Exit::Usage, "a dedicated-disk entry is disk:<4 hex digits of its Boot####>"));
+        return Err(CmdError::new(
+            Exit::Usage,
+            "a dedicated-disk entry is disk:<4 hex digits of its Boot####>",
+        ));
     }
     let known = pf
         .config
@@ -571,7 +574,9 @@ pub fn boot_target(pf: &Preflight, entry: &str) -> Result<Vec<u8>, CmdError> {
         .and_then(|f| f.parsed.as_ref().ok())
         .is_some_and(|c| c.entries.iter().any(|e| e.name == entry));
     if !known {
-        return Err(CmdError::not_found(format!("no [Boot.{entry}] entry in paguro.ini")));
+        return Err(CmdError::not_found(format!(
+            "no [Boot.{entry}] entry in paguro.ini"
+        )));
     }
     Ok(entry.as_bytes().to_vec())
 }
@@ -616,7 +621,10 @@ pub fn restart_linux(ctx: &Ctx<'_>, entry: Option<&str>, yes: bool) -> CmdResult
             r = r.line("would write the PIN bypass");
         }
         Action::Restart if crate::cmd::protection::load(ctx).is_some_and(|p| !p.pin_bypass) => {
-            extra.insert("pin_bypass".into(), json!({ "skipped": "the PIN bypass is off (protection settings)" }));
+            extra.insert(
+                "pin_bypass".into(),
+                json!({ "skipped": "the PIN bypass is off (protection settings)" }),
+            );
             r = r.line("no PIN bypass (turned off): the loader will ask for the PIN");
         }
         Action::Restart => match write_bypass(ctx, &pf, &esp_vol) {
@@ -650,8 +658,15 @@ pub fn restart_linux(ctx: &Ctx<'_>, entry: Option<&str>, yes: bool) -> CmdResult
     };
     if !ctx.dry_run {
         match &target {
-            Some(t) => ctx.api.fw_set(BOOT_TARGET_VAR, &paguro_core::guid::PAGURO_VENDOR, t, attr::NV_BS_RT)?,
-            None => ctx.api.fw_delete(BOOT_TARGET_VAR, &paguro_core::guid::PAGURO_VENDOR)?,
+            Some(t) => ctx.api.fw_set(
+                BOOT_TARGET_VAR,
+                &paguro_core::guid::PAGURO_VENDOR,
+                t,
+                attr::NV_BS_RT,
+            )?,
+            None => ctx
+                .api
+                .fw_delete(BOOT_TARGET_VAR, &paguro_core::guid::PAGURO_VENDOR)?,
         }
         bootent::set_boot_next(ctx.api, n)?;
     }

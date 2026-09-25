@@ -29,7 +29,10 @@ pub struct WslDistro {
 /// `wsl.exe -l -v`, which writes UTF-16: tolerate the NULs a byte-wise
 /// decode leaves, and a BOM.
 pub fn parse_wsl_list(out: &str) -> Vec<WslDistro> {
-    let clean: String = out.chars().filter(|&c| c != '\0' && c != '\u{feff}').collect();
+    let clean: String = out
+        .chars()
+        .filter(|&c| c != '\0' && c != '\u{feff}')
+        .collect();
     clean
         .lines()
         .skip_while(|l| !l.trim_start_matches('*').trim_start().starts_with("NAME"))
@@ -137,7 +140,8 @@ pub fn list(ctx: &Ctx<'_>) -> CmdResult {
                 if x.default { "* " } else { "  " },
                 x.name,
                 x.kind,
-                x.size.map_or("-".to_string(), |s| format!("{} GB", s >> 30)),
+                x.size
+                    .map_or("-".to_string(), |s| format!("{} GB", s >> 30)),
                 x.path.as_deref().unwrap_or(""),
             )
         })
@@ -194,7 +198,14 @@ pub fn remove(ctx: &Ctx<'_>, name: &str, delete_image: bool, yes: bool) -> CmdRe
             if !ctx.dry_run {
                 deleted = ctx.api.remove_file(p)?;
             }
-            r = r.line(format!("{} {p}", if ctx.dry_run { "would delete" } else { "deleted" }));
+            r = r.line(format!(
+                "{} {p}",
+                if ctx.dry_run {
+                    "would delete"
+                } else {
+                    "deleted"
+                }
+            ));
         }
     }
     if let Some(o) = r.data.as_object_mut() {
@@ -223,7 +234,10 @@ fn target(ctx: &Ctx<'_>, name: Option<&str>, path: Option<&str>) -> Result<Strin
                 .ok_or_else(|| CmdError::not_found(format!("{n}: its volume is not mounted")))
         }
         (None, Some(p)) => Ok(p.to_string()),
-        _ => Err(CmdError::new(Exit::Usage, "give a distribution name or --path, not both")),
+        _ => Err(CmdError::new(
+            Exit::Usage,
+            "give a distribution name or --path, not both",
+        )),
     }
 }
 
@@ -234,7 +248,9 @@ pub fn enter(ctx: &Ctx<'_>, name: Option<&str>, path: Option<&str>) -> CmdResult
     let p = target(ctx, name, path)?;
     let lower = p.to_ascii_lowercase();
     if !(lower.ends_with(".vhd") || lower.ends_with(".vhdx")) {
-        return Err(CmdError::refused(format!("{p}: only .vhd and .vhdx files can be attached")));
+        return Err(CmdError::refused(format!(
+            "{p}: only .vhd and .vhdx files can be attached"
+        )));
     }
     let data = json!({
         "path": p,
@@ -246,7 +262,9 @@ pub fn enter(ctx: &Ctx<'_>, name: Option<&str>, path: Option<&str>) -> CmdResult
         return Ok(Report::new(data).line(format!("would attach {p} to WSL2")));
     }
     ctx.need_admin()?;
-    let o = ctx.api.run("wsl.exe", &["--mount", "--vhd", &p, "--bare"], None)?;
+    let o = ctx
+        .api
+        .run("wsl.exe", &["--mount", "--vhd", &p, "--bare"], None)?;
     if !o.ok() {
         return Err(CmdError::new(
             Exit::Platform,

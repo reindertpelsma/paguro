@@ -78,7 +78,15 @@ impl<'a> Ctx<'a> {
     }
 
     /// Report a step of a long operation (nothing without a sink).
-    pub fn step(&self, operation: &'static str, index: usize, total: usize, step: &str, state: &str, detail: &str) {
+    pub fn step(
+        &self,
+        operation: &'static str,
+        index: usize,
+        total: usize,
+        step: &str,
+        state: &str,
+        detail: &str,
+    ) {
         if let Some(p) = self.progress {
             p(&Progress {
                 operation,
@@ -93,7 +101,10 @@ impl<'a> Ctx<'a> {
 
     /// A secret the request carried; `None` when it did not.
     pub fn given(&self, which: Secret) -> Option<&Zeroizing<String>> {
-        self.secrets.iter().find(|(k, _)| *k == which).map(|(_, v)| v)
+        self.secrets
+            .iter()
+            .find(|(k, _)| *k == which)
+            .map(|(_, v)| v)
     }
 
     /// The refusal that asks the client for a secret and to call again.
@@ -104,7 +115,12 @@ impl<'a> Ctx<'a> {
 
     /// A secret: from the request, from standard input, or typed at the
     /// console (twice when `confirm`, since nothing can verify it).
-    pub fn secret(&self, which: Secret, what: &str, confirm: bool) -> Result<Zeroizing<String>, CmdError> {
+    pub fn secret(
+        &self,
+        which: Secret,
+        what: &str,
+        confirm: bool,
+    ) -> Result<Zeroizing<String>, CmdError> {
         let s = if let Some(s) = self.given(which) {
             s.clone()
         } else if self.passphrase_stdin {

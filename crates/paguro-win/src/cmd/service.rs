@@ -18,7 +18,8 @@ use crate::out::{CmdError, CmdResult, Exit, Report};
 
 pub const NAME: &str = "paguro";
 pub const DISPLAY: &str = "paguro";
-pub const DESCRIPTION: &str = "paguro: firmware variables, the ESP, images and the way into Linux (INTERFACES §11.7)";
+pub const DESCRIPTION: &str =
+    "paguro: firmware variables, the ESP, images and the way into Linux (INTERFACES §11.7)";
 pub const BOOTSTRAP_VAR: &str = "PaguroBootstrap";
 pub const BOOT_TARGET_VAR: &str = "PaguroBootTarget";
 pub const SETUP_VAR: &str = "PaguroSetup";
@@ -52,7 +53,9 @@ pub fn startup_cleanup(api: &dyn WinApi) -> Result<Value, CmdError> {
         return Ok(json!({ "boot_unix": boot, "already_done": true, "deleted": [] }));
     }
     if !api.firmware_is_uefi() {
-        return Ok(json!({ "boot_unix": boot, "already_done": false, "deleted": [], "uefi": false }));
+        return Ok(
+            json!({ "boot_unix": boot, "already_done": false, "deleted": [], "uefi": false }),
+        );
     }
     let mut deleted = Vec::new();
     for name in ONE_SHOTS {
@@ -87,7 +90,13 @@ fn checked(ctx: &Ctx<'_>, args: &[&str]) -> Result<(), CmdError> {
     } else {
         Err(CmdError::new(
             Exit::Platform,
-            format!("sc.exe {} failed ({}): {}{}", args.join(" "), o.status, o.stdout.trim(), o.stderr.trim()),
+            format!(
+                "sc.exe {} failed ({}): {}{}",
+                args.join(" "),
+                o.status,
+                o.stdout.trim(),
+                o.stderr.trim()
+            ),
         ))
     }
 }
@@ -106,11 +115,32 @@ pub fn install(ctx: &Ctx<'_>, exe: &str) -> CmdResult {
     } else {
         checked(
             ctx,
-            &["create", NAME, "binPath=", &bin, "start=", "auto", "obj=", "LocalSystem", "DisplayName=", DISPLAY],
+            &[
+                "create",
+                NAME,
+                "binPath=",
+                &bin,
+                "start=",
+                "auto",
+                "obj=",
+                "LocalSystem",
+                "DisplayName=",
+                DISPLAY,
+            ],
         )?;
     }
     checked(ctx, &["description", NAME, DESCRIPTION])?;
-    checked(ctx, &["failure", NAME, "reset=", "86400", "actions=", "restart/5000/restart/5000//"])?;
+    checked(
+        ctx,
+        &[
+            "failure",
+            NAME,
+            "reset=",
+            "86400",
+            "actions=",
+            "restart/5000/restart/5000//",
+        ],
+    )?;
     // Already running is fine (1056).
     let _ = sc(ctx, &["start", NAME])?;
     Ok(Report::new(plan).line(format!("service {NAME} installed and started")))
@@ -118,21 +148,26 @@ pub fn install(ctx: &Ctx<'_>, exe: &str) -> CmdResult {
 
 pub fn uninstall(ctx: &Ctx<'_>) -> CmdResult {
     if ctx.dry_run {
-        return Ok(Report::new(json!({ "name": NAME })).line(format!("would remove the service {NAME}")));
+        return Ok(
+            Report::new(json!({ "name": NAME })).line(format!("would remove the service {NAME}"))
+        );
     }
     ctx.need_admin()?;
     if !installed(ctx)? {
-        return Ok(Report::new(json!({ "name": NAME, "removed": false })).line("the service is not installed"));
+        return Ok(Report::new(json!({ "name": NAME, "removed": false }))
+            .line("the service is not installed"));
     }
     let _ = sc(ctx, &["stop", NAME])?;
     checked(ctx, &["delete", NAME])?;
-    Ok(Report::new(json!({ "name": NAME, "removed": true })).line(format!("service {NAME} removed")))
+    Ok(Report::new(json!({ "name": NAME, "removed": true }))
+        .line(format!("service {NAME} removed")))
 }
 
 pub fn control(ctx: &Ctx<'_>, start: bool) -> CmdResult {
     let verb = if start { "start" } else { "stop" };
     if ctx.dry_run {
-        return Ok(Report::new(json!({ "name": NAME, "action": verb })).line(format!("would {verb} {NAME}")));
+        return Ok(Report::new(json!({ "name": NAME, "action": verb }))
+            .line(format!("would {verb} {NAME}")));
     }
     ctx.need_admin()?;
     checked(ctx, &[verb, NAME])?;

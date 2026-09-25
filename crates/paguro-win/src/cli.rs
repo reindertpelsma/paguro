@@ -152,7 +152,9 @@ pub enum Command {
 pub enum ChecksCmd {
     List,
     /// Fix one check where Windows allows it (wsl2, fast_startup, bitlocker).
-    Fix { id: String },
+    Fix {
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -464,7 +466,9 @@ pub fn request(c: &Command) -> Result<Option<(&'static str, Value)>, CmdError> {
             HwCmd::Modalias { .. } => r("hw.modalias", json!({})),
         },
         C::Disk { cmd } => match cmd {
-            DiskCmd::Create { size, path } => r("disk.create", json!({ "path": path, "size": size })),
+            DiskCmd::Create { size, path } => {
+                r("disk.create", json!({ "path": path, "size": size }))
+            }
             DiskCmd::Inspect { path } => r("disk.inspect", json!({ "path": path })),
         },
         C::Config { cmd } => match cmd {
@@ -486,7 +490,9 @@ pub fn request(c: &Command) -> Result<Option<(&'static str, Value)>, CmdError> {
             EfiCmd::Vars { cmd } => match cmd {
                 VarsCmd::List => r("efi.vars.list", json!({})),
                 VarsCmd::Get { name } => r("efi.vars.get", json!({ "name": name })),
-                VarsCmd::Set { name, hex } => r("efi.vars.set", json!({ "name": name, "hex": hex })),
+                VarsCmd::Set { name, hex } => {
+                    r("efi.vars.set", json!({ "name": name, "hex": hex }))
+                }
                 VarsCmd::Delete { name } => r("efi.vars.delete", json!({ "name": name })),
             },
             EfiCmd::BootEntry { cmd } => match cmd {
@@ -494,12 +500,15 @@ pub fn request(c: &Command) -> Result<Option<(&'static str, Value)>, CmdError> {
                 EntryCmd::Create => r("efi.boot-entry.create", json!({})),
                 EntryCmd::Delete { entry } => r("efi.boot-entry.delete", json!({ "entry": entry })),
             },
-            EfiCmd::Bootnext { entry, clear } => r("efi.bootnext", json!({ "entry": entry, "clear": clear })),
+            EfiCmd::Bootnext { entry, clear } => {
+                r("efi.bootnext", json!({ "entry": entry, "clear": clear }))
+            }
         },
         C::Esp { cmd } => match cmd {
-            EspCmd::Install { shim, mm, loader } => {
-                r("esp.install", json!({ "shim": shim, "mm": mm, "loader": loader }))
-            }
+            EspCmd::Install { shim, mm, loader } => r(
+                "esp.install",
+                json!({ "shim": shim, "mm": mm, "loader": loader }),
+            ),
             EspCmd::Verify => r("esp.verify", json!({})),
             EspCmd::Repair => r("esp.repair", json!({})),
         },
@@ -507,11 +516,14 @@ pub fn request(c: &Command) -> Result<Option<(&'static str, Value)>, CmdError> {
             MokCmd::Enroll { cert, .. } => r("mok.enroll", json!({ "cert": cert })),
             MokCmd::Status { cert } => r("mok.status", json!({ "cert": cert })),
         },
-        C::SecureBoot { cmd: SecureBootCmd::Status } => r("secure-boot.status", json!({})),
+        C::SecureBoot {
+            cmd: SecureBootCmd::Status,
+        } => r("secure-boot.status", json!({})),
         C::Protection { cmd } => match cmd {
-            ProtectionCmd::Options { target: t, klid } => {
-                r("protection.options", json!({ "target": target(*t), "klid": klid }))
-            }
+            ProtectionCmd::Options { target: t, klid } => r(
+                "protection.options",
+                json!({ "target": target(*t), "klid": klid }),
+            ),
             ProtectionCmd::Set {
                 choice,
                 keyboard,
@@ -521,26 +533,40 @@ pub fn request(c: &Command) -> Result<Option<(&'static str, Value)>, CmdError> {
                 "protection.set",
                 json!({ "choice": choice, "keyboard": keyboard, "pin_bypass": !no_pin_bypass, "target": target(*t) }),
             ),
-            ProtectionCmd::Check { keyboard } => r("protection.check", json!({ "keyboard": keyboard })),
+            ProtectionCmd::Check { keyboard } => {
+                r("protection.check", json!({ "keyboard": keyboard }))
+            }
         },
         C::Distro { cmd } => match cmd {
             DistroCmd::List => r("distro.list", json!({})),
-            DistroCmd::Rename { name, new_name } => {
-                r("distro.rename", json!({ "name": name, "new_name": new_name }))
-            }
+            DistroCmd::Rename { name, new_name } => r(
+                "distro.rename",
+                json!({ "name": name, "new_name": new_name }),
+            ),
             DistroCmd::Remove {
                 name,
                 delete_image,
                 yes,
-            } => r("distro.remove", json!({ "name": name, "delete_image": delete_image, "yes": yes })),
-            DistroCmd::Grow { name, size } => r("distro.grow", json!({ "name": name, "size": size })),
-            DistroCmd::Enter { name, path, .. } => r("distro.enter", json!({ "name": name, "path": path })),
-            DistroCmd::Leave { name, path } => r("distro.leave", json!({ "name": name, "path": path })),
+            } => r(
+                "distro.remove",
+                json!({ "name": name, "delete_image": delete_image, "yes": yes }),
+            ),
+            DistroCmd::Grow { name, size } => {
+                r("distro.grow", json!({ "name": name, "size": size }))
+            }
+            DistroCmd::Enter { name, path, .. } => {
+                r("distro.enter", json!({ "name": name, "path": path }))
+            }
+            DistroCmd::Leave { name, path } => {
+                r("distro.leave", json!({ "name": name, "path": path }))
+            }
         },
         C::Preflight { repair } => r("preflight", json!({ "repair": repair })),
         C::RestartLinux { yes, entry } => r("restart-linux", json!({ "yes": yes, "entry": entry })),
         C::StageSetup => r("stage-setup", json!({})),
-        C::Repair { stage, bootstrap } => r("repair", json!({ "stage": stage, "bootstrap": bootstrap })),
+        C::Repair { stage, bootstrap } => {
+            r("repair", json!({ "stage": stage, "bootstrap": bootstrap }))
+        }
         C::Install(i) => {
             let source = if i.iso.is_some() {
                 install::Source::Iso
@@ -567,7 +593,9 @@ pub fn request(c: &Command) -> Result<Option<(&'static str, Value)>, CmdError> {
             "uninstall",
             json!({ "yes": yes, "delete_images": delete_images, "skip_final_boot": skip_final_boot }),
         ),
-        C::Service { cmd: ServiceCmd::Info } => r("service.info", json!({})),
+        C::Service {
+            cmd: ServiceCmd::Info,
+        } => r("service.info", json!({})),
         C::Service { .. } => Ok(None),
     }
 }
@@ -575,7 +603,12 @@ pub fn request(c: &Command) -> Result<Option<(&'static str, Value)>, CmdError> {
 /// How a front end reaches the API.
 pub trait Transport {
     /// Call `method`; notifications arriving meanwhile go to `note`.
-    fn call(&self, method: &str, params: &Value, note: &mut dyn FnMut(&Value)) -> Result<Value, RpcError>;
+    fn call(
+        &self,
+        method: &str,
+        params: &Value,
+        note: &mut dyn FnMut(&Value),
+    ) -> Result<Value, RpcError>;
     /// A service (not this process).
     fn remote(&self) -> bool;
 }
@@ -587,7 +620,12 @@ pub struct Local<'a> {
 }
 
 impl Transport for Local<'_> {
-    fn call(&self, method: &str, params: &Value, note: &mut dyn FnMut(&Value)) -> Result<Value, RpcError> {
+    fn call(
+        &self,
+        method: &str,
+        params: &Value,
+        note: &mut dyn FnMut(&Value),
+    ) -> Result<Value, RpcError> {
         let note = RefCell::new(note);
         let prog = |p: &crate::ctx::Progress| {
             if let Ok(mut n) = note.try_borrow_mut() {
@@ -629,7 +667,9 @@ pub fn progress_line(n: &Value) -> Option<String> {
 
 /// Paths the service resolves: made absolute against this process's
 /// directory, since the service's is not the caller's.
-const PATH_PARAMS: [&str; 8] = ["path", "shim", "mm", "loader", "cert", "script", "iso", "mok_cert"];
+const PATH_PARAMS: [&str; 8] = [
+    "path", "shim", "mm", "loader", "cert", "script", "iso", "mok_cert",
+];
 
 pub fn absolutize(params: &mut Map<String, Value>, abs: &dyn Fn(&str) -> Option<String>) {
     for k in PATH_PARAMS {
@@ -694,10 +734,11 @@ fn pre(api: &dyn WinApi, c: &Command, params: &mut Map<String, Value>) -> Result
             params.insert("hardware".into(), hw::read_export(api, input)?);
         }
         Command::Mok {
-            cmd: MokCmd::Enroll {
-                password_stdin: true,
-                ..
-            },
+            cmd:
+                MokCmd::Enroll {
+                    password_stdin: true,
+                    ..
+                },
         } => {
             let raw = api.read_stdin(crate::cmd::mok::MAX_PASSWORD_STDIN)?;
             let s = std::str::from_utf8(&raw)
@@ -737,13 +778,19 @@ fn post(
             Ok(r)
         }
         Command::Distro {
-            cmd: DistroCmd::Enter { no_shell: false, .. },
+            cmd: DistroCmd::Enter {
+                no_shell: false, ..
+            },
         } if !cli.dry_run => {
             let shell: Vec<String> = r
                 .data
                 .at("command")
                 .as_array()
-                .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             if let Some((prog, args)) = shell.split_first() {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -761,7 +808,11 @@ fn post(
                 .data
                 .at("shell")
                 .as_array()
-                .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             if let Some((prog, args)) = shell.split_first() {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -794,7 +845,9 @@ fn direct_only(api: &dyn WinApi, cli: &Cli) -> CmdResult {
                         .ok()
                         .and_then(|p| p.parent().map(|d| d.join("paguro-service.exe")))
                         .map(|p| p.display().to_string())
-                        .ok_or_else(|| CmdError::not_found("cannot find paguro-service.exe; pass --exe"))?,
+                        .ok_or_else(|| {
+                            CmdError::not_found("cannot find paguro-service.exe; pass --exe")
+                        })?,
                 };
                 service::install(&ctx, &exe)
             }
@@ -922,4 +975,3 @@ fn execute(
     let r = call_with_secrets(api, t, cli, method, params.clone(), &mut note)?;
     post(api, t, cli, &params, r, &mut note)
 }
-

@@ -304,8 +304,15 @@ impl MockApi {
             }
         });
         let ctx = crate::ctx::Ctx::new(&m);
-        for (f, tag) in [("shimx64.efi", "shim"), ("mmx64.efi", "mm"), ("paguro.efi", "loader")] {
-            m.put_file(&format!("C:\\paguro\\in\\{f}"), format!("MZ{tag}").as_bytes());
+        for (f, tag) in [
+            ("shimx64.efi", "shim"),
+            ("mmx64.efi", "mm"),
+            ("paguro.efi", "loader"),
+        ] {
+            m.put_file(
+                &format!("C:\\paguro\\in\\{f}"),
+                format!("MZ{tag}").as_bytes(),
+            );
         }
         let _ = crate::cmd::esp::install(
             &ctx,

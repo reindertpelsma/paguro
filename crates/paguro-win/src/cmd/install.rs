@@ -35,7 +35,6 @@ use crate::journal::{Journal, StepState};
 use crate::keys;
 use crate::out::{At, CmdError, CmdResult, Exit, Report, guid_text};
 
-
 pub const STEPS: [&str; 9] = [
     "host",
     "hw-export",
@@ -95,10 +94,19 @@ fn finish_checks(ctx: &Ctx<'_>, a: &InstallArgs) -> Result<(Vec<Value>, Vec<Stri
                 missing.push(format!("the disk file: {}", i.problems.join("; ")));
             }
             checks.push(json!({ "id": "disk", "state": if ok { "ok" } else { "fail" }, "detail": i.problems }));
-            let kind = i.json.at("efi_fs").at("kind").as_str().unwrap_or("none").to_string();
+            let kind = i
+                .json
+                .at("efi_fs")
+                .at("kind")
+                .as_str()
+                .unwrap_or("none")
+                .to_string();
             let esp_ok = kind == "gpt_esp" || kind == "superfloppy";
             if !esp_ok {
-                missing.push("a nested ESP with the bootloader (no GPT ESP or FAT32 found on the disk)".into());
+                missing.push(
+                    "a nested ESP with the bootloader (no GPT ESP or FAT32 found on the disk)"
+                        .into(),
+                );
             }
             checks.push(json!({ "id": "nested_esp", "state": if esp_ok { "ok" } else { "fail" }, "detail": kind }));
         }
@@ -107,7 +115,11 @@ fn finish_checks(ctx: &Ctx<'_>, a: &InstallArgs) -> Result<(Vec<Value>, Vec<Stri
             checks.push(json!({ "id": "disk", "state": "fail", "detail": e.message }));
         }
     }
-    for id in ["paguro_package", "initramfs_dm_paguro", "bootloader_settings"] {
+    for id in [
+        "paguro_package",
+        "initramfs_dm_paguro",
+        "bootloader_settings",
+    ] {
         checks.push(json!({ "id": id, "state": "unverified", "detail": "STUB: checked from inside the image by the Linux side, which is not built yet" }));
     }
     Ok((checks, missing))
@@ -301,27 +313,48 @@ pub fn install(ctx: &Ctx<'_>, a: &InstallArgs) -> CmdResult {
         ));
     }
     if a.shell && a.finish {
-        return Err(CmdError::new(Exit::Usage, "--shell and --finish are the two halves of a manual install: one at a time"));
+        return Err(CmdError::new(
+            Exit::Usage,
+            "--shell and --finish are the two halves of a manual install: one at a time",
+        ));
     }
     match a.source {
-        Source::Iso if a.iso.is_none() => return Err(CmdError::new(Exit::Usage, "--iso needs the ISO file")),
-        Source::Wsl if a.wsl_distro.is_none() => return Err(CmdError::new(Exit::Usage, "--from-wsl needs the WSL distribution's name")),
+        Source::Iso if a.iso.is_none() => {
+            return Err(CmdError::new(Exit::Usage, "--iso needs the ISO file"));
+        }
+        Source::Wsl if a.wsl_distro.is_none() => {
+            return Err(CmdError::new(
+                Exit::Usage,
+                "--from-wsl needs the WSL distribution's name",
+            ));
+        }
         _ => {}
     }
-    let size = if a.size.is_empty() { "32G" } else { a.size.as_str() };
-    let a = &InstallArgs { size: size.into(), ..a.clone() };
+    let size = if a.size.is_empty() {
+        "32G"
+    } else {
+        a.size.as_str()
+    };
+    let a = &InstallArgs {
+        size: size.into(),
+        ..a.clone()
+    };
     let args = json!({
         "distro": a.distro, "path": a.path, "size": a.size, "script": a.script,
         "mok_cert": a.mok_cert, "source": a.source, "iso": a.iso, "wsl_distro": a.wsl_distro,
     });
     let existing = Journal::load(ctx.api, "install", &a.distro)?;
-    if a.finish && existing.as_ref().and_then(|j| j.state("build")) != Some(StepState::AwaitingUser) {
+    if a.finish && existing.as_ref().and_then(|j| j.state("build")) != Some(StepState::AwaitingUser)
+    {
         return Err(CmdError::refused(format!(
             "nothing to finish: start with `paguro install {} --path … --shell`",
             a.distro
         )));
     }
-    if !a.finish && !a.shell && existing.as_ref().and_then(|j| j.state("build")) == Some(StepState::AwaitingUser) {
+    if !a.finish
+        && !a.shell
+        && existing.as_ref().and_then(|j| j.state("build")) == Some(StepState::AwaitingUser)
+    {
         return Err(CmdError::refused(format!(
             "this install waits for the manual step: `paguro install {} --path {} --finish` (or --shell again)",
             a.distro, a.path
@@ -342,8 +375,7 @@ pub fn install(ctx: &Ctx<'_>, a: &InstallArgs) -> CmdResult {
                 o.insert("missing".into(), json!(missing));
             }
         }
-        return Ok(Report::new(data)
-            .lines(STEPS.iter().map(|s| format!("would run: {s}"))));
+        return Ok(Report::new(data).lines(STEPS.iter().map(|s| format!("would run: {s}"))));
     }
     let mut j = match existing {
         Some(j) => j,
