@@ -16,7 +16,9 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
     {
         InitializeComponent();
         Title = VM.Title;
-        AppWindow.Resize(new Windows.Graphics.SizeInt32(1180, 800));
+        // 1180×800, or what fits the screen's work area (the CI runner's is 1024×768).
+        var work = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(AppWindow.Id, Microsoft.UI.Windowing.DisplayAreaFallback.Primary).WorkArea;
+        AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(work.X, work.Y, Math.Min(1180, work.Width), Math.Min(800, work.Height)));
         VM.Session.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName == nameof(Session.Banner) || e.PropertyName == nameof(Session.State))
