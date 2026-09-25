@@ -24,6 +24,8 @@
   <!-- `dotnet publish -p:PublishSingleFile=true`: one paguro-app.exe
        (INTERFACES §11.7a), everything self-extracted on first start. -->
   <PropertyGroup Condition="'$(PublishSingleFile)' == 'true'">
+    <!-- The Windows App SDK embeds resources.pri in the single file only with MSIX tooling on. -->
+    <EnableMsixTooling>true</EnableMsixTooling>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
