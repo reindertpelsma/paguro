@@ -401,7 +401,10 @@ pub fn exhaustive() -> Result<(), String> {
         .filter(|c| c.expect == "ok" && c.patches.is_empty() && c.sectors.is_none())
     {
         let (img, n) = patched(c);
-        let m = mutate_bytes(&img, n, c.lbs, 1)?;
+        // Every byte of the sectors the check reads; for a GPT (its CRCs make
+        // each run read ~200 sectors) every 7th byte, to stay in CI's budget.
+        let stride = if c.image.starts_with("gpt") { 7 } else { 1 };
+        let m = mutate_bytes(&img, n, c.lbs, stride)?;
         let [fail, torn] = faults(&img, n, c.lbs)?;
         println!(
             "payload {:<14} bytes {m:?} fail {} torn {torn:?}",
