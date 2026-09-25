@@ -625,6 +625,32 @@
 
    [F5] language   [F3] graphics
 
+== start-failed ==
+ paguro
+
+   Linux could not be started
+
+   Its boot image is missing or was refused. Nothing was changed on your
+   disk.
+
+   [Enter]  Continue
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   [F5] language   [F3] graphics
+
 == no-installation ==
  paguro
 

@@ -392,6 +392,7 @@ pub fn all() -> [Fixture; FIXTURES] {
         plain("plaintext", Screen::Notice(Notice::SealOverPlaintext)),
         plain("volume-missing", Screen::Notice(Notice::VolumeMissing)),
         plain("not-implemented", Screen::Notice(Notice::NotImplemented)),
+        plain("start-failed", Screen::Notice(Notice::StartFailed)),
         plain("no-installation", Screen::NoInstallation),
         plain("volumes-1", Screen::SelectVolume(volumes(1, false))),
         with(
@@ -477,7 +478,7 @@ pub fn all() -> [Fixture; FIXTURES] {
     ]
 }
 
-pub const FIXTURES: usize = 49;
+pub const FIXTURES: usize = 50;
 
 /// The resolutions the golden tests and `--all` render.
 pub const RESOLUTIONS: [(u32, u32); 4] = [(800, 600), (1366, 768), (1920, 1080), (3840, 2160)];

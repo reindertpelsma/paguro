@@ -97,6 +97,7 @@ fn screen() -> impl Strategy<Value = Screen> {
         Screen::Notice(Notice::SealOverPlaintext),
         Screen::Notice(Notice::VolumeMissing),
         Screen::Notice(Notice::NotImplemented),
+        Screen::Notice(Notice::StartFailed),
         Screen::ChooseKeyboard {
             current: paguro_core::config::Keyboard::Fr,
         },

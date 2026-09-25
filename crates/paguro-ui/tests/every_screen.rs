@@ -39,7 +39,8 @@ fn t(s: &str) -> Vec<Key> {
     keys(s)
 }
 
-type Case = (&'static str, fn() -> World, Vec<Key>, Outcome);
+/// Name, world, keys, how it ends, a line of text it must show.
+type Case = (&'static str, fn() -> World, Vec<Key>, Outcome, &'static str);
 
 fn cases() -> Vec<Case> {
     let e = Key::Enter;
@@ -53,6 +54,7 @@ fn cases() -> Vec<Case> {
             },
             script(&[&[e], &t(PIN), &[e]]),
             Outcome::Started(Rung::Tpm),
+            "Enter your password or PIN",
         ),
         (
             "wrong-pin-then-right",
@@ -63,6 +65,7 @@ fn cases() -> Vec<Case> {
             },
             script(&[&t("1wrong"), &[e], &t("1"), &t(PIN), &[e]]),
             Outcome::Started(Rung::Tpm),
+            "That did not unlock Linux",
         ),
         (
             "cannot-unlock",
@@ -73,6 +76,7 @@ fn cases() -> Vec<Case> {
             },
             vec![Key::Escape, e],
             Outcome::StartWindows,
+            "Cannot unlock Linux",
         ),
         (
             "tpm-locked",
@@ -84,6 +88,7 @@ fn cases() -> Vec<Case> {
             },
             script(&[&t("1wrong"), &[e], &t("1"), &t(PIN), &[e, e], &t("w")]),
             Outcome::StartWindows,
+            "Too many incorrect attempts",
         ),
         (
             "config-invalid-then-recovery-key",
@@ -97,6 +102,7 @@ fn cases() -> Vec<Case> {
             },
             script(&[&t("r3"), &t(RECOVERY_PW), &[e]]),
             Outcome::Started(Rung::RecoveryKey),
+            "Configuration is not valid",
         ),
         (
             "hibernated-and-dirty",
@@ -108,6 +114,7 @@ fn cases() -> Vec<Case> {
             },
             vec![e, e],
             Outcome::Started(Rung::ClearKey),
+            "Windows saved a session",
         ),
         (
             "pcr12",
@@ -119,6 +126,7 @@ fn cases() -> Vec<Case> {
             },
             vec![e],
             Outcome::StartWindows,
+            "already used paguro",
         ),
         (
             "volume-missing",
@@ -130,6 +138,7 @@ fn cases() -> Vec<Case> {
             },
             t("r"),
             Outcome::Started(Rung::ClearKey),
+            "The Linux volume was not found",
         ),
         (
             "seal-over-plaintext",
@@ -141,6 +150,19 @@ fn cases() -> Vec<Case> {
             },
             vec![e],
             Outcome::Halted(BootError::SealOverPlaintext),
+            "This configuration protects nothing",
+        ),
+        (
+            "start-failed",
+            || {
+                let mut w = World::new();
+                w.v.clear_key = Some(VMK);
+                w.m.start_fails = true;
+                w
+            },
+            vec![e],
+            Outcome::Halted(BootError::Platform(paguro_boot::PlatformError::Device(26))),
+            "Linux could not be started",
         ),
         (
             "no-installation",
@@ -152,6 +174,7 @@ fn cases() -> Vec<Case> {
             },
             vec![Key::Escape],
             Outcome::Halted(BootError::NoVolume),
+            "No Linux installation found",
         ),
         (
             "select-volume",
@@ -166,6 +189,7 @@ fn cases() -> Vec<Case> {
             },
             vec![Key::Down, e],
             Outcome::Started(Rung::Unencrypted),
+            "Which volume holds your Linux installation?",
         ),
         (
             "browse-to-a-uki-and-its-root",
@@ -177,6 +201,7 @@ fn cases() -> Vec<Case> {
             },
             vec![e, Key::Char('r'), e, Key::Char('d'), e],
             Outcome::Started(Rung::ClearKey),
+            "Which disk holds Linux?",
         ),
         (
             "browse-a-disk-esp",
@@ -205,6 +230,7 @@ fn cases() -> Vec<Case> {
                 e,
             ],
             Outcome::Started(Rung::ClearKey),
+            "Choose a UEFI application",
         ),
         (
             "disk-without-esp",
@@ -217,6 +243,7 @@ fn cases() -> Vec<Case> {
             // the toast, back on the disk screen); its default image.
             vec![Key::Down, e, Key::Down, e, Key::Char('1')],
             Outcome::Started(Rung::ClearKey),
+            "This disk has no EFI partition",
         ),
         (
             "typed-path",
@@ -227,6 +254,7 @@ fn cases() -> Vec<Case> {
             },
             script(&[&[e], &t("paguro/debian.vhd"), &[e, e]]),
             Outcome::Started(Rung::ClearKey),
+            "Type the path of what to start",
         ),
         (
             "refused-path-then-good",
@@ -243,6 +271,7 @@ fn cases() -> Vec<Case> {
                 &[e, e],
             ]),
             Outcome::Started(Rung::ClearKey),
+            "That is not a usable path on this volume.",
         ),
         (
             "choosers-from-the-unlock-screen",
@@ -259,6 +288,7 @@ fn cases() -> Vec<Case> {
                 &[e],
             ]),
             Outcome::Started(Rung::Tpm),
+            "Keyboard layout",
         ),
     ]
 }
@@ -296,7 +326,7 @@ fn kind(s: &Screen) -> &'static str {
 fn every_screen_in_every_variant_and_mode() {
     let mut seen = BTreeSet::new();
     let mut boots = 0;
-    for (name, world, keys, want) in cases() {
+    for (name, world, keys, want, says) in cases() {
         for theme in UiTheme::ALL {
             for mode in UiMode::ALL {
                 let mut w = world();
@@ -315,6 +345,23 @@ fn every_screen_in_every_variant_and_mode() {
                 }
                 // What each mode must have shown.
                 let console = g.d.console.as_ref().unwrap();
+                let text = match mode {
+                    UiMode::Text => console.all_text(),
+                    UiMode::Auto => g.d.serial.as_ref().unwrap().all_text(),
+                    UiMode::Graphics => String::new(),
+                };
+                if mode != UiMode::Graphics {
+                    assert!(text.contains(says), "{ctx}: no {says:?} in\n{text}");
+                }
+                if mode != UiMode::Text {
+                    let bg = paguro_ui::builtin::THEMES
+                        [UiTheme::ALL.iter().position(|t| *t == theme).unwrap()]
+                    .palette
+                    .background;
+                    for f in &g.d.shown {
+                        assert_eq!(dominant(&f.px), bg, "{ctx}: the variant's background");
+                    }
+                }
                 match mode {
                     UiMode::Text => {
                         assert!(g.d.shown.is_empty(), "{ctx}");
@@ -349,6 +396,7 @@ fn every_screen_in_every_variant_and_mode() {
         "pcr12",
         "plaintext",
         "volume-missing",
+        "start-failed",
         "no-installation",
         "volumes",
         "browse",
