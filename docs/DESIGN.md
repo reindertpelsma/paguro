@@ -73,9 +73,18 @@ the disk design for that reason.
 ### Why not just a dedicated partition
 
 A partition is the technically robust answer — an LBA range neither filesystem
-can touch. It is rejected here **only** for the installability and reversibility
-properties above. If those do not matter to a given user, a partition is strictly
-simpler and they should use one.
+can touch — and for a user who wants nothing else it is simpler. paguro chooses
+an image file for what a partition cannot give:
+
+- **installability and reversibility** (above): nothing repartitioned, and
+  uninstall is deleting files;
+- **Windows can reach Linux.** On a single-disk laptop — most laptops — a Linux
+  partition is invisible to Windows: Windows has no ext4 driver, Hyper-V passes
+  through whole disks but not partitions, and `wsl --mount` attaches whole disks,
+  so it cannot take the disk Windows is running from. An image file on C: is just
+  a file, which WSL2 mounts (§8b);
+- **one pool of space** shared with Windows, and more than one distribution
+  without carving the disk up (§2).
 
 ### The storage path, and what killed Wubi
 
@@ -208,19 +217,31 @@ because the complaints are unusually consistent: survey the dual-boot writing of
 the last two years and **almost every mechanical grievance is a consequence of
 the two things paguro does not do — repartition, and install a bootloader.**
 
-Counts are across nine articles and forum threads (How-To Geek, Yahoo Tech, XDA
-×2, It's FOSS, MakeUseOf, Corsair, CrispyWire, Linux Mint forums).
+Surveyed: the articles and threads listed under *Sources* below. The table
+names the complaint, not how often it came up — a handful of articles is a
+sample, not a statistic.
 
-| Complaint | Cited by | paguro |
-|---|---|---|
-| **Windows updates overwrite GRUB / boot entries** | **6** | Microsoft's bootloader is never replaced and `bootmgfw.efi` is never touched; there is nothing to overwrite. A wiped ESP is repaired from a running Windows, and §4.6's transition re-creates the entry as its *normal* operation |
-| **Partitioning risk — "a mistake deletes your Windows partition"** | 5 | no repartitioning at all |
-| Rebooting is friction; Linux ends up unused | 4 | **not solved by the storage half** — §1b is the answer, and it is the unproven one |
-| **Fast Startup locks NTFS; Windows partition won't mount** | 3 | *restart* performs a full shutdown, so the transition path never produces a hybrid-hibernated volume (§4.6). The universal advice — "disable Fast Startup" — becomes unnecessary rather than mandatory |
-| **Secure Boot / SBAT breakage** | 3 | GRUB was the August 2024 revocation's target and paguro doesn't use it. The shim ecosystem is still shared — but §4.6's pre-flight **detects the change before the reboot and stages the fix automatically**, so the cost is a PIN prompt in Windows instead of a machine that won't start. The residual is that we ship an update, which is ordinary maintenance |
-| **BitLocker demands its recovery key** | 3 | Microsoft's boot path is untouched, so PCR 4 and 7 do not move and **Windows never prompts.** §6 |
-| Storage split is permanent, resizing later is risky | 2 | §5.6 — the image grows on demand |
-| Clock skew (UTC vs local time) | 3 | **solved at install.** Linux copies Windows' timezone and uses a local-time RTC, so the two agree and Windows is not modified. NTP still runs, which also covers a DST change while the machine is off |
+| Complaint | paguro |
+|---|---|
+| **Windows updates overwrite GRUB / boot entries** | Microsoft's bootloader is never replaced and `bootmgfw.efi` is never touched; there is nothing to overwrite. A wiped ESP is repaired from a running Windows, and §4.6's transition re-creates the entry as its *normal* operation |
+| **Partitioning risk — "a mistake deletes your Windows partition"** | no repartitioning at all |
+| Rebooting is friction; Linux ends up unused | **not solved by the storage half** — §1b is the answer, and it is the unproven one |
+| **Fast Startup locks NTFS; Windows partition won't mount** | *restart* performs a full shutdown, so the transition path never produces a hybrid-hibernated volume (§4.6). The universal advice — "disable Fast Startup" — becomes unnecessary rather than mandatory |
+| **Secure Boot / SBAT breakage** | GRUB was the August 2024 revocation's target and paguro doesn't use it. The shim ecosystem is still shared — but §4.6's pre-flight **detects the change before the reboot and stages the fix automatically**, so the cost is a PIN prompt in Windows instead of a machine that won't start. The residual is that we ship an update, which is ordinary maintenance |
+| **BitLocker demands its recovery key** | Microsoft's boot path is untouched, so PCR 4 and 7 do not move and **Windows never prompts.** §6 |
+| Storage split is permanent, resizing later is risky | §5.6 — the image grows on demand |
+| Clock skew (UTC vs local time) | **solved at install.** Linux copies Windows' timezone and uses a local-time RTC, so the two agree and Windows is not modified. NTP still runs, which also covers a DST change while the machine is off |
+
+*Sources:*
+[How-To Geek](https://www.howtogeek.com/dont-need-to-dual-boot-anymore-theres-a-better-way/),
+[Yahoo Tech](https://tech.yahoo.com/computing/articles/dual-booting-linux-no-longer-160013039.html),
+[XDA: why I stopped dual booting](https://www.xda-developers.com/why-i-stopped-dual-booting-windows-and-linux-on-my-pc/),
+[XDA: 5 pitfalls](https://www.xda-developers.com/5-pitfalls-of-dual-booting-windows-and-linux-that-i-wasnt-prepared-for/),
+[It's FOSS](https://itsfoss.com/dual-boot-issues/),
+[MakeUseOf: Fast Startup](https://www.makeuseof.com/stop-chasing-faster-boot-times-disable-windows-fast-startup/),
+[Corsair](https://www.corsair.com/us/en/explorer/diy-builder/storage/what-is-dual-booting-and-is-it-worth-it/),
+Linux Mint forums ([343070](https://forums.linuxmint.com/viewtopic.php?t=343070),
+[416387](https://forums.linuxmint.com/viewtopic.php?t=416387)).
 
 **The BitLocker row is the most legible benefit in the document and the easiest to
 demonstrate.** Installing any conventional Linux bootloader changes the measured
@@ -306,6 +327,7 @@ needing daily.
 |---|---|---|
 | **NVIDIA** | **kayfabe** — emulated GPU, guest loads the real unmodified driver | nothing to the shared Windows install |
 | AMD / Intel | **Helios** — WDDM miniport forwarding Vulkan over Venus | a test-signed display driver in the shared install; see below |
+| NVIDIA, by choice | **Helios** works here too, for anyone who prefers it to kayfabe | the same driver cost, and the VM runs Helios's driver instead of the native NVIDIA one — losing what kayfabe keeps (CUDA, NVENC, the vendor's own driver) |
 | any, *Linux* guest | DRM native context (AMD/Intel, Mesa 25.0+), nvkvm-pv (NVIDIA) | n/a — different problem, listed for orientation |
 
 ### Neither backend is available today
@@ -541,7 +563,9 @@ adjacency, and returns instantly on removal. A partition can only grow into free
 space immediately after it, and can only give space back if the geometry
 cooperates.
 
-**File requirements** (verified at setup and at every boot):
+**File requirements for images paguro boots** — the paguro host and stock
+distribution images (verified at setup and at every boot). WSL2 distribution
+disks are dynamic VHDX and follow different rules (§8b):
 - **fixed VHD** — not dynamic, whose block allocation table raw mapping cannot
   follow
 - fully allocated, **not sparse** (`FILE_ATTRIBUTE_SPARSE_FILE` clear)
@@ -3752,31 +3776,49 @@ kernel, drivers, firmware, wifi and hardware support on this project in
 perpetuity — §8c's stated long-term risk, adopted deliberately. **A Debian image
 carries all of it instead.**
 
-#### Running WSL2 distributions is a userspace capability, not a mode
+#### Your WSL2 distributions, on the metal
 
-Once a Linux is running on the metal it can mount a VHD and run a rootfs in a
-namespace, which is all a WSL2 distribution is. **No paguro machinery is
-involved** — it needs no bootloader support, no module, and no cooperation from
-the design at all. It works on a paguro-supplied image and equally on one the user
-installed themselves, which is the property worth having: the capability cannot
-rot with us.
-
-That matters for §1a's *"you don't need to dual boot, use WSL2"* objection, and
-the answer is now a consequence rather than a feature: **your WSL2 distribution
-runs on the metal because it is a rootfs, and a rootfs runs anywhere.**
+A WSL2 distribution is a rootfs in a VHDX. The paguro host runs it **as a
+privileged container**, fullscreen or in a window, so the distribution a user
+already lives in under Windows runs natively with the real GPU and full I/O —
+and is still there, unchanged, the next time they are in Windows.
 
 ```text
-paguro boots       a full distro image from NTFS
-that distro runs   a WSL2 ext4.vhd as a privileged container,
-                   fullscreen or in a window
+paguro boots       the paguro host (fixed VHD, bare ext4, UKI on NTFS)
+the host runs      the user's WSL2 ext4.vhdx as a privileged container
 ```
 
-**Fixed VHD is the format for images**, because WSL cannot mount a raw `.img` — it
-wants `.vhd`/`.vhdx`. A fixed VHD is raw plus a 512-byte footer, so the payload is
-contiguous from offset 0 and the extent map is the file's extents minus the last
-sector. **One format serves both** — the same file is a WSL2 disk and a
-bare-metal root, with no conversion in either direction, and it still grows by
-extending the file and rewriting the footer.
+**The disk is used as is — no conversion.** WSL2's `ext4.vhdx` is a *dynamic*
+VHDX (1 TB virtual by default), so it cannot be a raw extent map like the
+host's image. It is handled in layers, each doing one job:
+
+| Layer | Job |
+|---|---|
+| the module | claims the `.vhdx` file like any image (§4.3): its extents are protected in views B and C, whatever runs |
+| file exposure | the claimed file appears to Linux as a regular file that can grow (INTERFACES §10.5) |
+| `qemu-storage-daemon` | reads and writes the VHDX format — BAT, log replay, allocation on write — and exports a block device |
+| the container | mounts the ext4 on it |
+
+Growth is the design's ordinary growth path: ntfs3 extends the file when Windows
+is not running; in VM mode the guest extends it and the host claims the new
+extents before verifying them against the flushed MFT (INTERFACES §11.3). The
+VHDX format stays qemu's job; paguro writes no VHDX code.
+
+**Requirements:** the distribution is shut down in Windows (`wsl --shutdown`,
+and no hibernation), and the file is not NTFS-sparse — paguro turns WSL's
+optional sparse mode off for the distributions it runs
+(`wsl --manage <distro> --set-sparse false`).
+
+**Performance** is WSL2's class, not native: every I/O goes through the VHDX
+layer. Anyone who needs full speed installs a stock distribution image instead
+(below), which boots directly.
+
+**Fixed VHD is the format for images paguro boots**, because WSL cannot mount a
+raw `.img` — it wants `.vhd`/`.vhdx`. A fixed VHD is raw plus a 512-byte footer,
+so the payload is contiguous from offset 0 and the extent map is the file's
+extents minus the last sector. The same file is a WSL2 disk and a bare-metal
+root, with no conversion in either direction, and it still grows by extending
+the file and rewriting the footer.
 
 ##### Namespaces, and what the boundary is not
 
