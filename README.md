@@ -77,19 +77,19 @@ paguro exists; uninstall is a handful of deletions and a reboot.
 
 | Path | What | Runs in |
 |---|---|---|
-| `crates/paguro-core` | every format and parser: NTFS, VHD, GPT, FAT32, BitLocker metadata, `paguro.ini`, seals, handoff, TPM responses | everywhere — `no_std`, no alloc |
-| `crates/paguro-crypto` | key derivation, XTS-AES, AES-CCM, BitLocker's stretch | everywhere — `no_std`, symmetric only |
-| `crates/paguro-boot` | the loader's stage machine behind a platform trait | UEFI, and the host for tests |
-| `crates/paguro-efi` | the UEFI adapter: firmware calls, GOP, block device publishing | UEFI (x86_64, aarch64) |
-| `crates/paguro-ui`, `paguro-theme`, `paguro-ui-preview` | the loader's UI renderer, the build-time theme compiler, a preview tool | UEFI / build / host |
+| `crates/paguro-core` ([README](crates/paguro-core/README.md)) | every format and parser: NTFS, VHD, GPT, FAT32, BitLocker metadata, `paguro.ini`, seals, handoff, TPM responses | everywhere — `no_std`, no alloc |
+| `crates/paguro-crypto` ([README](crates/paguro-crypto/README.md)) | key derivation, XTS-AES, AES-CCM, BitLocker's stretch | everywhere — `no_std`, symmetric only |
+| `crates/paguro-boot` ([README](crates/paguro-boot/README.md)) | the loader's stage machine behind a platform trait | UEFI, and the host for tests |
+| `crates/paguro-efi` ([README](crates/paguro-efi/README.md)) | the UEFI adapter: firmware calls, GOP, block device publishing | UEFI (x86_64, aarch64) |
+| `crates/paguro-ui` ([README](crates/paguro-ui/README.md)), `paguro-theme` ([README](crates/paguro-theme/README.md)), `paguro-ui-preview` ([README](crates/paguro-ui-preview/README.md)) | the loader's UI renderer, the build-time theme compiler, a preview tool | UEFI / build / host |
 | `themes/` | themes: layout, colours, fonts, images, strings | build time |
-| `crates/paguro-initrd` | builds the views, writes seals, records PCRs | the initrd |
-| `crates/paguro-win` | the Windows command-line tool | Windows |
-| `crates/paguro-harness` | differential and model tests, the BitLocker test-volume writer | Linux host |
+| `crates/paguro-initrd` ([README](crates/paguro-initrd/README.md)) | builds the views, writes seals, records PCRs | the initrd |
+| `crates/paguro-win` ([README](crates/paguro-win/README.md)) | the Windows command-line tool | Windows |
+| `crates/paguro-harness` ([README](crates/paguro-harness/README.md)) | differential and model tests, the BitLocker test-volume writer | Linux host |
 | `kernel/dm-paguro` | the enforcement module (C) | Linux kernel |
 | `windows/minifilter` | clean refusals in Windows (C/WDK) | Windows kernel |
-| `test/qemu`, `test/uefi-probe`, `test/fixtures` | QEMU scenarios, the probe payload, disk fixtures | Linux host |
-| `fuzz/` | fuzz targets for every parser | Linux host |
+| `test/qemu` ([README](test/qemu/runner/README.md)), `test/uefi-probe` ([README](test/uefi-probe/README.md)), `test/fixtures` | QEMU scenarios, the probe payload, disk fixtures | Linux host |
+| `fuzz/` ([README](fuzz/README.md)) | fuzz targets for every parser | Linux host |
 
 **The trusted core is one module we write.** Its runtime logic is a few hundred
 lines of dependency-free C, compiled into userspace too and differential-tested
