@@ -29,6 +29,15 @@
 
 #define PG_TAG 'fgaP'
 #define RSMB 0x52534D42u /* 'RSMB' */
+#define RSMB_TABLE_ID 0u  /* the raw SMBIOS provider has one table */
+
+/* FltGetVolumeGuidName's "\??\Volume{8-4-4-4-12}": its length, where the
+ * braced GUID starts ("\??\Volume" is 10 characters) and the GUID's
+ * length with braces, all in characters; and the buffer it is read into. */
+#define PG_VOLUME_NAME_CHARS 48
+#define PG_VOLUME_GUID_AT    10
+#define PG_GUID_STRING_CHARS 38
+#define PG_VOLUME_NAME_BUF   64
 
 typedef struct _PG_ENTRY {
     BOOLEAN InUse;
@@ -145,7 +154,7 @@ static BOOLEAN PgIsService(VOID)
  */
 static BOOLEAN PgVolumeGuid(PCFLT_RELATED_OBJECTS Obj, PG_INSTANCE_CTX *Ctx)
 {
-    WCHAR buf[64];
+    WCHAR buf[PG_VOLUME_NAME_BUF];
     UNICODE_STRING name, g;
     GUID guid;
     if (Ctx->HaveGuid)
@@ -156,10 +165,10 @@ static BOOLEAN PgVolumeGuid(PCFLT_RELATED_OBJECTS Obj, PG_INSTANCE_CTX *Ctx)
     if (!NT_SUCCESS(FltGetVolumeGuidName(Obj->Volume, &name, NULL)))
         return FALSE;
     /* \??\Volume{8-4-4-4-12}: 48 characters, the GUID from offset 10. */
-    if (name.Length != 48 * sizeof(WCHAR))
+    if (name.Length != PG_VOLUME_NAME_CHARS * sizeof(WCHAR))
         return FALSE;
-    g.Buffer = buf + 10;
-    g.Length = g.MaximumLength = 38 * sizeof(WCHAR);
+    g.Buffer = buf + PG_VOLUME_GUID_AT;
+    g.Length = g.MaximumLength = PG_GUID_STRING_CHARS * sizeof(WCHAR);
     if (!NT_SUCCESS(RtlGUIDFromString(&g, &guid)))
         return FALSE;
     Ctx->Volume = guid;
@@ -501,11 +510,11 @@ static NTSTATUS PgMessage(PVOID ConnCookie, PVOID In, ULONG InLen, PVOID Out, UL
         return STATUS_INVALID_PARAMETER;
     switch (m.Type) {
     case PG_MSG_PROTECT:
-        if (m.DenyFlags == 0 || (m.DenyFlags & ~PG_DENY_ALL) || RtlEqualMemory(m.Volume, &zero, 16))
+        if (m.DenyFlags == 0 || (m.DenyFlags & ~PG_DENY_ALL) || RtlEqualMemory(m.Volume, &zero, sizeof(m.Volume)))
             return STATUS_INVALID_PARAMETER;
         return PgUpdate((const GUID *)m.Volume, (const FILE_ID_128 *)m.FileId, m.DenyFlags);
     case PG_MSG_UNPROTECT:
-        if (m.DenyFlags != 0 || RtlEqualMemory(m.Volume, &zero, 16))
+        if (m.DenyFlags != 0 || RtlEqualMemory(m.Volume, &zero, sizeof(m.Volume)))
             return STATUS_INVALID_PARAMETER;
         return PgUpdate((const GUID *)m.Volume, (const FILE_ID_128 *)m.FileId, 0);
     case PG_MSG_ALLOW_UNLOAD:
@@ -555,13 +564,13 @@ static BOOLEAN PgInVm(VOID)
     ULONG size = 0, got = 0;
     PUCHAR buf;
     BOOLEAN vm = FALSE;
-    (VOID)ExGetSystemFirmwareTable(RSMB, 0, NULL, 0, &size);
+    (VOID)ExGetSystemFirmwareTable(RSMB, RSMB_TABLE_ID, NULL, 0, &size);
     if (size == 0 || size > PG_SMBIOS_MAX_BLOB)
         return FALSE;
     buf = (PUCHAR)ExAllocatePool2(POOL_FLAG_PAGED, size, PG_TAG);
     if (buf == NULL)
         return FALSE;
-    if (NT_SUCCESS(ExGetSystemFirmwareTable(RSMB, 0, buf, size, &got)) && got <= size)
+    if (NT_SUCCESS(ExGetSystemFirmwareTable(RSMB, RSMB_TABLE_ID, buf, size, &got)) && got <= size)
         vm = pg_smbios_has_vm_marker(buf, got) ? TRUE : FALSE;
     ExFreePoolWithTag(buf, PG_TAG);
     return vm;
