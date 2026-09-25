@@ -10,7 +10,8 @@ device-mapper targets and a control device.
 
 Userspace names **devices and files, never extents** (`/dev/paguro`,
 `paguro_uapi.h`): `PG_VOLUME_ADD` (devices, GUID, BitLocker's reserved
-ranges), `PG_CLAIM` (MFT record + sequence), `PG_GROW`, `PG_CROSSCHECK`
+ranges; `READ_ONLY` makes every claim and view table on the volume
+read-only, as a dirty `$Volume` does, though a read-only view B is allowed), `PG_CLAIM` (MFT record + sequence), `PG_GROW`, `PG_CROSSCHECK`
 (ntfs3's FIEMAP, compared only), `PG_RELEASE`, `PG_STATUS`, and
 `PG_VOLUME_REMOVE`. The module reads the plaintext volume itself and derives
 every extent with the NTFS core below. Nothing in the request path parses
@@ -102,7 +103,10 @@ Invariants, function by function:
   ext4 check, and at least one partition verified; **bare ext4** (`0xEF53` at
   byte 1080) needs a plausible geometry no larger than the payload and the
   backup superblock in group 1 (or `s_backup_bgs[0]` under `sparse_super2`)
-  agreeing on UUID, block count and its group number; **ISO 9660** needs the
+  agreeing on UUID, block count and its group number — or, with a single
+  block group (no backup), the root directory (inode 2, through group 0's
+  descriptor and the inode table) a directory whose `i_block` starts with an
+  extent header (`0xF30A`); **ISO 9660** needs the
   PVD's both-endian fields to agree, volume space size × block size = the
   payload, and the root directory's `.` record to point at itself. Anything
   else is refused. The backup GPT, partition starts and ext4's group-1 copy

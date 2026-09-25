@@ -251,7 +251,7 @@ static long pg_volume_add(struct pg_volume_add *a)
 	u32 i;
 	s32 err = 0;
 
-	if (a->nreserved > PG_MAX_RESERVED)
+	if (a->nreserved > PG_MAX_RESERVED || (a->flags & ~PG_VOLUME_READ_ONLY))
 		return -EINVAL;
 	for (i = 0; i < PG_MAX_VOLUMES; i++) {
 		if (pg_volumes[i].id && (pg_volumes[i].raw == raw ||
@@ -308,6 +308,7 @@ static long pg_volume_add(struct pg_volume_add *a)
 	vol->plain = plain;
 	memcpy(vol->guid, a->guid, sizeof(vol->guid));
 	vol->flags = flags;
+	vol->add_flags = a->flags;
 	vol->sectors = v.sectors;
 	vol->cluster_bytes = v.cluster_bytes;
 	vol->record_bytes = v.record_bytes;
@@ -320,8 +321,9 @@ static long pg_volume_add(struct pg_volume_add *a)
 	a->volume_id = vol->id;
 	a->volume_flags = flags;
 	a->sectors = v.sectors;
-	pr_info("paguro: volume %u: %llu sectors, %llu-byte clusters, flags %#x, %zu reserved ranges\n",
-		vol->id, v.sectors, v.cluster_bytes, flags, vol->nreserved);
+	pr_info("paguro: volume %u: %llu sectors, %llu-byte clusters, flags %#x, %zu reserved ranges%s\n",
+		vol->id, v.sectors, v.cluster_bytes, flags, vol->nreserved,
+		vol->add_flags & PG_VOLUME_READ_ONLY ? ", read-only" : "");
 	return 0;
 }
 
@@ -378,7 +380,7 @@ static long pg_claim_ioctl(struct pg_claim *a)
 	c->rec = a->mft_record;
 	c->seq = a->mft_seq;
 	c->format = a->format;
-	c->state = vol->flags & PG_NTFS_VOLUME_DIRTY ? PG_CLAIM_READONLY : 0;
+	c->state = pg_volume_ro(vol) ? PG_CLAIM_READONLY : 0;
 	c->limit = pg_limit(a->format, size);
 	c->file = file;
 	c->nfile = nfile;

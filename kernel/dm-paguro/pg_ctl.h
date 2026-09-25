@@ -25,6 +25,7 @@ struct pg_volume {
 	dev_t raw, plain;
 	u8 guid[16];
 	u16 flags;			/* $VOLUME_INFORMATION */
+	u32 add_flags;			/* PG_VOLUME_* from PG_VOLUME_ADD */
 	u64 sectors;
 	u64 cluster_bytes, record_bytes, mft_lcn;	/* geometry at add */
 	struct pg_extent reserved[PG_MAX_RESERVED];	/* normalised */
@@ -54,6 +55,13 @@ extern struct mutex pg_mutex;
 extern rwlock_t pg_lock;
 extern struct pg_volume pg_volumes[PG_MAX_VOLUMES];
 extern struct pg_claim_state pg_claims[PG_MAX_CLAIMS];
+
+/* Read-only: $Volume says dirty, or userspace said so (PG_VOLUME_READ_ONLY). */
+static inline bool pg_volume_ro(const struct pg_volume *v)
+{
+	return (v->flags & PG_NTFS_VOLUME_DIRTY) ||
+	       (v->add_flags & PG_VOLUME_READ_ONLY);
+}
 
 /* Lookups by id; callers hold pg_mutex. NULL if absent. */
 struct pg_volume *pg_volume_get(u32 id);

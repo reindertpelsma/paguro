@@ -279,6 +279,10 @@ static int pg_volume_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		ti->error = "volume needs repair: no view B, view C read-only";
 		goto bad;
 	}
+	if ((vol->add_flags & PG_VOLUME_READ_ONLY) && pg_table_writable(ti)) {
+		ti->error = "volume added read-only: load the table read-only";
+		goto bad;
+	}
 	r = pg_get_dev(ti, x->mode == 'b' ? vol->raw : vol->plain, &x->dev);
 	if (r) {
 		ti->error = "device lookup failed";

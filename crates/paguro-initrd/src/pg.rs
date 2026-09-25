@@ -10,6 +10,9 @@ pub const MAX_RESERVED: usize = 8;
 pub const MAX_VOLUMES: usize = 8;
 pub const MAX_CLAIMS: usize = 16;
 
+/// `PG_VOLUME_ADD` flag: every claim and view on the volume read-only.
+pub const VOLUME_READ_ONLY: u32 = 1;
+
 pub const FORMAT_RAW: u32 = 0;
 pub const FORMAT_VHD: u32 = 1;
 
@@ -33,7 +36,8 @@ pub struct VolumeAdd {
     pub plain_minor: u32,
     pub guid: [u8; 16],
     pub nreserved: u32,
-    pub pad0: u32,
+    /// `VOLUME_READ_ONLY`.
+    pub flags: u32,
     pub reserved: [Range; MAX_RESERVED],
     pub volume_id: u32,
     pub volume_flags: u32,

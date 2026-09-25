@@ -37,7 +37,7 @@ struct pg_volume_add {
 	__u32 plain_major, plain_minor;	/* plaintext NTFS (view C, parsing) */
 	__u8 guid[16];			/* GPT partition GUID, informational */
 	__u32 nreserved;		/* BitLocker's non-data regions, <= 8 */
-	__u32 pad0;
+	__u32 flags;			/* PG_VOLUME_* */
 	struct pg_uapi_range reserved[PG_MAX_RESERVED];
 	/* out */
 	__u32 volume_id;
@@ -46,6 +46,13 @@ struct pg_volume_add {
 	__s32 error;
 	__u32 pad1;
 };
+
+/*
+ * PG_VOLUME_ADD flags. READ_ONLY (set by the initrd from the handoff's
+ * hibernation or dirty state): every claim on the volume is read-only and
+ * every view table must be loaded read-only. Unknown bits: -EINVAL.
+ */
+#define PG_VOLUME_READ_ONLY 1
 
 #define PG_FORMAT_RAW 0
 #define PG_FORMAT_VHD 1		/* last sector is the VHD footer */

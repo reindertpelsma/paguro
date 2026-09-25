@@ -207,6 +207,25 @@ dmc pa8 --readonly --table "0 $(lim "$C8") paguro-image $C8" && cmp /dev/mapper/
     ok "read-only view A of a dirty volume" || bad "ro view A: $(cat /tmp/dmerr)"
 umount /mnt4; dmsetup remove pa8; dmsetup remove pvc6; pgctl release "$C8"; pgctl remove "$V6"
 
+# ---- PG_VOLUME_READ_ONLY: a clean volume the initrd says to keep read-only -----
+L7=$(losetup -f); losetup -r "$L7" /fx/vol512.img; N7=$(blockdev --getsz "$L7")
+V7=$(pgctl add "$L7" "$L7" ro 2>/dev/null) && [ "$(vstat "$V7" flags)" = 0 ] &&
+    ok "volume added read-only (clean \$Volume)" || bad "read-only add"
+set -- $ID_vol512_img_contig_img
+C9=$(pgctl claim "$V7" "$1" "$2" 2>/dev/null) &&
+    pgctl status | grep -q "^claim $C9 .* state 0x1 " && ok "its claims are read-only" || bad "read-only claim: $(pgctl status | grep "^claim $C9 ")"
+dmc pvb7 --readonly --table "0 $N7 paguro-volume $V7 b" && ok "read-only view B allowed" || bad "ro view B: $(cat /tmp/dmerr)"
+dmsetup remove pvb7
+dmc pvc7 --table "0 $N7 paguro-volume $V7 c" && bad "writable view C on a read-only volume" ||
+    ok "no writable view C on a read-only volume"
+dmc pvc7 --readonly --table "0 $N7 paguro-volume $V7 c" && mount -t ntfs3 -o ro /dev/mapper/pvc7 /mnt4 &&
+    pgctl crosscheck "$C9" /mnt4/contig.img > /dev/null && ok "read-only view C, cross-check" || bad "ro view C"
+dmc pa9 --table "0 $(lim "$C9") paguro-image $C9" && bad "writable view A on a read-only volume" ||
+    ok "no writable view A on a read-only volume"
+dmc pa9 --readonly --table "0 $(lim "$C9") paguro-image $C9" && cmp /dev/mapper/pa9 /ref/contig.img &&
+    ok "read-only view A reads the file" || bad "ro view A"
+umount /mnt4; dmsetup remove pa9; dmsetup remove pvc7; pgctl release "$C9"; pgctl remove "$V7"; losetup -d "$L7"
+
 # ---- growth: append-only extends, anything else goes read-only ----------------
 umount /mnt
 mount -t ntfs3 /dev/mapper/pvc /mnt || bad "ntfs3 read-write on view C"

@@ -286,7 +286,9 @@ fn boot(t: &mut Taken, opts: &Opts) -> R<()> {
     };
     let plain_no = sys::devno(&plain)?;
 
-    // 2. Register the volume with the module.
+    // 2. Register the volume with the module; a hibernated or dirty volume
+    //    read-only in the module itself, not only in what we ask of it.
+    let degraded = t.state & (state::HIBERNATED | state::DIRTY) != 0;
     let ctl = Ctl::open()?;
     let mut va = pg::VolumeAdd {
         raw_major: raw.0,
@@ -295,6 +297,7 @@ fn boot(t: &mut Taken, opts: &Opts) -> R<()> {
         plain_minor: plain_no.1,
         guid: t.volume.partition.0,
         nreserved: reserved.len() as u32,
+        flags: if degraded { pg::VOLUME_READ_ONLY } else { 0 },
         ..Default::default()
     };
     for (slot, &(start, len)) in va.reserved.iter_mut().zip(&reserved) {
@@ -316,7 +319,6 @@ fn boot(t: &mut Taken, opts: &Opts) -> R<()> {
     let probes = probe_ntfs(&dm, &plain, &claimable)?;
 
     // 4. Claims and cross-checks: FIEMAP can only subtract.
-    let degraded = t.state & (state::HIBERNATED | state::DIRTY) != 0;
     let mut root_view = None;
     for (img, p) in claimable.iter().zip(&probes) {
         let mut c = pg::Claim {

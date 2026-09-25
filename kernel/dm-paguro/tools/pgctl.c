@@ -2,7 +2,7 @@
 /*
  * pgctl: a minimal /dev/paguro client for tests and bring-up.
  *
- *   pgctl add <raw-dev> <plain-dev> [R<start>+<len>...]   -> volume id
+ *   pgctl add <raw-dev> <plain-dev> [R<start>+<len>...] [ro]   -> volume id
  *   pgctl claim <volume> <mft-record> <mft-seq> [raw|vhd]  -> claim id
  *   pgctl grow <claim>
  *   pgctl crosscheck <claim> <file-on-ntfs3>               (FIEMAP -> module)
@@ -126,7 +126,9 @@ int main(int argc, char **argv)
 		for (i = 4; i < argc && a.nreserved < PG_MAX_RESERVED; i++) {
 			unsigned long long s, l;
 
-			if (sscanf(argv[i], "R%llu+%llu", &s, &l) == 2) {
+			if (!strcmp(argv[i], "ro"))
+				a.flags |= PG_VOLUME_READ_ONLY;
+			else if (sscanf(argv[i], "R%llu+%llu", &s, &l) == 2) {
 				a.reserved[a.nreserved].start = s;
 				a.reserved[a.nreserved++].len = l;
 			}
