@@ -623,6 +623,7 @@ fn build_volume(env: &Env) -> R<Volume> {
 /// A boot disk: GPT with the loader's ESP (`paguro.efi` as the
 /// removable-media default, `\EFI\paguro\paguro.ini` when given) and the
 /// NTFS partition `ntfs` under `guid`.
+#[allow(clippy::too_many_arguments)]
 fn boot_disk(
     env: &Env,
     name: &str,
@@ -631,6 +632,7 @@ fn boot_disk(
     ini: Option<&[u8]>,
     ntfs: &Path,
     guid: &str,
+    extra: &[(&str, &[u8])],
 ) -> R<PathBuf> {
     let dir = env.work.join("stage4");
     let esp = dir.join(format!("{name}-esp.fat"));
@@ -642,6 +644,7 @@ fn boot_disk(
     if let Some(i) = ini {
         files.push(("EFI/paguro/paguro.ini", i));
     }
+    files.extend_from_slice(extra);
     fat32(&esp, 34, &files)?;
     let ntfs_mib = io(std::fs::metadata(ntfs))?.len() >> 20;
     let disk = dir.join(format!("{name}-disk.img"));
@@ -700,6 +703,7 @@ fn boot(env: &Env, c: &Case<'_>, script: impl FnOnce(&mut Vm) -> R<()>) -> R<()>
         c.ini.as_deref(),
         ntfs,
         c.guid,
+        &[],
     )?;
     let template = if c.secure {
         "OVMF_VARS_4M.snakeoil.fd"
@@ -1113,6 +1117,7 @@ pub fn aarch64(env: &Env) -> R<()> {
         Some(&ini),
         &v.ntfs,
         NTFS_VOLUME,
+        &[],
     )?;
     let dir = env.work.join("stage4");
     // AAVMF pflash images must be exactly 64 MiB.
@@ -1358,4 +1363,140 @@ pub fn bde_disagree(env: &Env) -> R<()> {
     });
     let _ = std::fs::remove_file(&bad);
     r
+}
+
+/// Every notice the real disks lead to — NTFS dirty, hibernation (Fast
+/// Startup), the configured volume missing, a start that fails, a TPM seal
+/// over a plaintext volume — in every variant (graphics and auto) and in
+/// text mode, with `[UI]` in the configuration: the variant's background
+/// on screen (screendump) where graphics show, the notice's title on the
+/// serial port where the text UI does (the mirror in auto, ConOut in text).
+pub fn notice_screens(env: &Env) -> R<()> {
+    use paguro_core::config::{UiMode, UiTheme};
+    let v = volume(env)?;
+    let dir = env.work.join("stage4");
+    let dirty = dir.join("ntfs-dirty-ui.img");
+    io(std::fs::copy(&v.ntfs, &dirty))?;
+    set_dirty(&dirty)?;
+    let hib = dir.join("ntfs-hiber-ui.img");
+    io(std::fs::copy(&v.ntfs, &hib))?;
+    with_ntfs(&hib, |m| {
+        let mut h = b"HIBR".to_vec();
+        h.resize(64 << 10, 0);
+        write(&m.join("hiberfil.sys"), &h)
+    })?;
+    let seal_path = format!("EFI/paguro/{NTFS_VOLUME}/tpm_seal.bin");
+    let seal: &[u8] = b"PGRTPM\x00\x01not-a-seal";
+    let gpt = "root = \\paguro\\gpt.vhd";
+    // name, title, entry, patched volume, volume GUID, a seal on the ESP
+    type Notice<'a> = (&'a str, &'a str, &'a str, Option<&'a Path>, &'a str, bool);
+    let cases: [Notice<'_>; 5] = [
+        (
+            "dirty",
+            "Windows didn't shut down cleanly last time",
+            gpt,
+            Some(&dirty),
+            NTFS_VOLUME,
+            false,
+        ),
+        (
+            "hibernated",
+            "Windows saved a session",
+            gpt,
+            Some(&hib),
+            NTFS_VOLUME,
+            false,
+        ),
+        (
+            "volume-missing",
+            "The Linux volume was not found",
+            gpt,
+            None,
+            "0badc0de-0000-4000-8000-000000000001",
+            false,
+        ),
+        (
+            "start-failed",
+            "Linux could not be started",
+            "root = \\paguro\\gpt.vhd\nefi = \\EFI\\bad\\garbage.efi",
+            None,
+            NTFS_VOLUME,
+            false,
+        ),
+        (
+            "plaintext",
+            "This configuration protects nothing",
+            gpt,
+            None,
+            NTFS_VOLUME,
+            true,
+        ),
+    ];
+    let runs = [
+        (UiTheme::Dark, UiMode::Auto),
+        (UiTheme::Light, UiMode::Graphics),
+        (UiTheme::DarkContrast, UiMode::Auto),
+        (UiTheme::LightContrast, UiMode::Graphics),
+        (UiTheme::Light, UiMode::Text),
+    ];
+    let mut done = 0;
+    for (case, title, entry, ntfs, guid, with_seal) in cases {
+        for (theme, mode) in runs {
+            let name = format!("ui-{case}-{}-{}", theme.name(), mode.name());
+            let mut ini = ini(entry);
+            ini.extend_from_slice(
+                format!("\n[UI]\ntheme = {}\nmode = {}\n", theme.name(), mode.name()).as_bytes(),
+            );
+            let extra: Vec<(&str, &[u8])> = if with_seal {
+                vec![(seal_path.as_str(), seal)]
+            } else {
+                Vec::new()
+            };
+            let disk = boot_disk(
+                env,
+                &name,
+                &env.efi,
+                "EFI/BOOT/BOOTX64.EFI",
+                Some(&ini),
+                ntfs.unwrap_or(&v.ntfs),
+                guid,
+                &extra,
+            )?;
+            let (vars, state) = fresh(env, &name, "OVMF_VARS_4M.fd")?;
+            let sock = state.join("qmp.sock");
+            let mut vm = Vm::launch(env, &name, false, &[&disk], &vars, &state, Some(&sock), &[])?;
+            let bg = paguro_ui::builtin::THEMES
+                [UiTheme::ALL.iter().position(|t| *t == theme).unwrap_or(0)]
+            .palette
+            .background;
+            let r = (|| -> R<()> {
+                vm.expect("paguro 0.0.0", BOOT_WAIT)?;
+                vm.expect("paguro: screen notice", 120)?;
+                if mode != UiMode::Text {
+                    crate::wait_colour(env, &sock, &name, None, bg, true)?;
+                }
+                if mode != UiMode::Graphics {
+                    vm.expect(title, 30)?;
+                }
+                if mode == UiMode::Text {
+                    crate::wait_colour(env, &sock, &name, None, bg, false)?;
+                }
+                if mode == UiMode::Graphics {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    if vm.text().contains(title) {
+                        return Err("the text UI reached the serial port in graphics mode".into());
+                    }
+                }
+                Ok(())
+            })();
+            vm.stop();
+            let _ = std::fs::remove_file(&disk);
+            r.map_err(|e| format!("{name}: {e}"))?;
+            done += 1;
+        }
+    }
+    let _ = std::fs::remove_file(dirty);
+    let _ = std::fs::remove_file(hib);
+    println!("  {done} boots: 5 notices × 4 variants and text mode");
+    Ok(())
 }

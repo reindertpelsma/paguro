@@ -476,22 +476,6 @@ impl Vm {
         Self::launch(env, name, secure, &[esp, data], vars, state, qmp, &[])
     }
 
-    /// As [`Vm::start_with`], with extra QEMU arguments (devices).
-    #[allow(clippy::too_many_arguments)]
-    fn start_ext(
-        env: &Env,
-        name: &str,
-        secure: bool,
-        esp: &Path,
-        data: &Path,
-        vars: &Path,
-        state: &Path,
-        qmp: Option<&Path>,
-        extra: &[&str],
-    ) -> R<Vm> {
-        Self::launch(env, name, secure, &[esp, data], vars, state, qmp, extra)
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn launch(
         env: &Env,
@@ -811,7 +795,7 @@ fn load_taint_and_unseal(env: &Env) -> R<()> {
         &[("paguro.ini", &ini), (&tpm_seal_path(), &seal_file)],
     )?;
     let mut vm = Vm::start(env, name, false, &esp, &data, &vars, &state)?;
-    let r = (|| {
+    let r = (|| -> R<()> {
         vm.expect("stage1 skipped (secure boot off)", BOOT_WAIT)?;
         vm.expect("stage2 ok (1 entries, default debian)", 10)?;
         let load = pcr12_after_load_taint(&ini);
@@ -876,6 +860,16 @@ fn secure_boot_case(
     hash: Option<[u8; 32]>,
     script: impl FnOnce(&mut Vm) -> R<()>,
 ) -> R<()> {
+    secure_boot_case_q(env, name, hash, |vm, _| script(vm))
+}
+
+/// As [`secure_boot_case`], with the QMP socket (for screendumps).
+fn secure_boot_case_q(
+    env: &Env,
+    name: &str,
+    hash: Option<[u8; 32]>,
+    script: impl FnOnce(&mut Vm, &Path) -> R<()>,
+) -> R<()> {
     let Some(efi) = signed(env) else {
         eprintln!("  (skipped: no --efi-signed)");
         return Ok(());
@@ -895,13 +889,25 @@ fn secure_boot_case(
         ],
     )?;
     let data = make_data_disk(env)?;
-    let mut vm = Vm::start(env, name, true, &esp, &data, &vars, &state)?;
+    let sock = state.join("qmp.sock");
+    let mut vm = Vm::start_with(env, name, true, &esp, &data, &vars, &state, Some(&sock))?;
     let r = (|| {
         vm.expect("paguro 0.0.0", BOOT_WAIT)?;
-        script(&mut vm)
+        script(&mut vm, &sock)
     })();
     vm.stop();
     r
+}
+
+/// F2 through the four variants, each on screen by its background.
+fn cycle_variants(env: &Env, vm: &mut Vm, sock: &Path, name: &str) -> R<()> {
+    let themes = paguro_ui::builtin::THEMES;
+    wait_colour(env, sock, name, None, themes[0].palette.background, true)?;
+    for t in themes.iter().skip(1).chain(themes.first()) {
+        vm.send_seq("\x1bOQ")?;
+        wait_colour(env, sock, name, None, t.palette.background, true)?;
+    }
+    Ok(())
 }
 
 fn secure_boot_hash_missing(env: &Env) -> R<()> {
@@ -914,9 +920,11 @@ fn secure_boot_hash_missing(env: &Env) -> R<()> {
 }
 
 fn secure_boot_hash_mismatch(env: &Env) -> R<()> {
-    secure_boot_case(env, "sb-hash-mismatch", Some([0xee; 32]), |vm| {
+    secure_boot_case_q(env, "sb-hash-mismatch", Some([0xee; 32]), |vm, sock| {
         vm.expect("stage1 hash mismatch", 10)?;
         vm.expect("Configuration is not valid", 10)?;
+        // In every variant (F2 over the serial port), then recovery.
+        cycle_variants(env, vm, sock, "sb-hash-mismatch")?;
         vm.send("r")?;
         vm.expect("recovery (HashMismatch)", 10)?;
         vm.expect(&format!("pcr12={} (recovery)", hex(&capped(1))), 10)?;
@@ -1158,19 +1166,6 @@ fn graphical_unlock(env: &Env) -> R<()> {
     r
 }
 
-/// The recovery unlock menu this firmware shows (no configuration, no
-/// passphrase seal): for pointer targets.
-fn recovery_menu() -> paguro_boot::platform::Screen {
-    paguro_boot::platform::Screen::Unlock(paguro_boot::platform::UnlockMenu {
-        password_or_pin: false,
-        recovery_passphrase: false,
-        recovery_key: true,
-        tpm: Err(paguro_boot::platform::Grey::RecoveryMode),
-        unattested: true,
-        first_boot: false,
-    })
-}
-
 /// The loader's "paguro: graphics WxH on display N" line for display 0.
 fn resolution(line: &str) -> R<(u32, u32)> {
     let wh = line.split_whitespace().next().ok_or("no resolution")?;
@@ -1182,21 +1177,25 @@ fn resolution(line: &str) -> R<(u32, u32)> {
 }
 
 /// `auto`: graphics on the display and the text UI on the serial port at
-/// once, driven from the serial port with VT100 escape sequences: F5 and
-/// arrows through the language list, F4 and a lone Esc, F2 (the light
-/// variant on screen), F3 (text on the display and back), then the unlock.
+/// once, driven from the serial port with VT100 escape sequences, on the
+/// screen a machine without any Linux volume shows ("No Linux installation
+/// found": it needs no volume, so the UI is tested apart from them): F5
+/// and End/Up/Down/Home through the language list (Dutch and back), F4 and
+/// a lone Esc, F2 through all four variants (each on screen by its
+/// background), F3 twice (the firmware console on the display, then
+/// graphics again), then Enter on "Start Windows".
 fn serial_vt100_auto(env: &Env) -> R<()> {
     let name = "serial-vt100-auto";
     let (vars, state) = fresh(env, name, "OVMF_VARS_4M.fd")?;
     let esp = make_esp(env, name, &env.efi, &[])?;
-    let data = make_data_disk(env)?;
     let sock = state.join("qmp.sock");
-    let mut vm = Vm::start_with(env, name, false, &esp, &data, &vars, &state, Some(&sock))?;
+    let mut vm = Vm::launch(env, name, false, &[&esp], &vars, &state, Some(&sock), &[])?;
     let themes = paguro_ui::builtin::THEMES;
     let r = (|| {
         vm.expect("serial console(s)", BOOT_WAIT)?;
-        vm.expect("paguro: screen unlock", 60)?;
-        vm.expect("Unlock Linux", 20)?;
+        vm.expect("recovery (NoConfig)", 60)?;
+        vm.expect("paguro: screen no-installation", 60)?;
+        vm.expect("No Linux installation found", 20)?;
         wait_colour(env, &sock, name, None, themes[0].palette.background, true)?;
         let raw = vm.raw();
         if !raw.windows(4).any(|w| w == b"\x1b[2J") {
@@ -1209,31 +1208,29 @@ fn serial_vt100_auto(env: &Env) -> R<()> {
         vm.send_seq("\x1b[A")?;
         vm.send_seq("\x1b[B")?;
         vm.send_seq("\r")?;
-        vm.expect("Linux ontgrendelen", 20)?;
+        vm.expect("Geen Linux-installatie gevonden", 20)?;
         // F5, Home, Enter: English again.
         vm.send_seq("\x1b[15~")?;
         vm.expect("Taal", 20)?;
         vm.send_seq("\x1b[H")?;
         vm.send_seq("\r")?;
-        vm.expect("Unlock Linux", 20)?;
+        vm.expect("No Linux installation found", 20)?;
         // F4, then a lone Esc: back where we were.
         vm.send_seq("\x1b[14~")?;
         vm.expect("Keyboard layout", 20)?;
         vm.send_seq("\x1b")?;
-        vm.expect("Unlock Linux", 20)?;
-        // F2: the light variant.
-        vm.send_seq("\x1bOQ")?;
-        wait_colour(env, &sock, name, None, themes[1].palette.background, true)?;
+        vm.expect("No Linux installation found", 20)?;
+        // F2 through every variant and back to dark.
+        cycle_variants(env, &mut vm, &sock, name)?;
         // F3: the display shows the firmware text console; F3 again: back.
+        let bg = themes[0].palette.background;
         vm.send_seq("\x1bOR")?;
-        wait_colour(env, &sock, name, None, themes[1].palette.background, false)?;
+        wait_colour(env, &sock, name, None, bg, false)?;
         vm.send_seq("\x1bOR")?;
-        wait_colour(env, &sock, name, None, themes[1].palette.background, true)?;
-        vm.send("3")?;
-        vm.expect("Enter your recovery key", 20)?;
-        vm.send(RECOVERY_PW)?;
-        vm.send("\r")?;
-        vm.expect("halted: NotImplemented(\"stage 3: recovery password\")", 60)?;
+        wait_colour(env, &sock, name, None, bg, true)?;
+        // Enter: Start Windows (there is no Windows here).
+        vm.send_seq("\r")?;
+        vm.expect("no Windows Boot Manager entry", 30)?;
         Ok(())
     })();
     vm.stop();
@@ -1242,6 +1239,8 @@ fn serial_vt100_auto(env: &Env) -> R<()> {
 
 /// `[UI] mode = text`: the text UI on ConOut only (its serial terminal
 /// carries it), the display shows the firmware console, not the theme.
+/// There is no data disk: the configured volume is missing, a screen that
+/// needs no volume.
 fn mode_text(env: &Env) -> R<()> {
     ui_mode_case(
         env,
@@ -1249,18 +1248,20 @@ fn mode_text(env: &Env) -> R<()> {
         "theme = light\nmode = text",
         |env, vm, sock, name| {
             vm.expect("paguro: ui light text us", 10)?;
-            vm.expect("Unlock Linux", 30)?;
+            vm.expect("The Linux volume was not found", 30)?;
             let bg = paguro_ui::builtin::THEMES[1].palette.background;
             wait_colour(env, sock, name, None, bg, false)?;
-            vm.send("3")?;
-            vm.expect("Enter your recovery key", 20)?;
+            // R: recover; with no volume at all, the no-installation screen.
+            vm.send("r")?;
+            vm.expect("No Linux installation found", 30)?;
             Ok(())
         },
     )
 }
 
 /// `[UI] mode = graphics`, light: the theme on the display, no text UI on
-/// the serial port (only the log), keys still accepted from it.
+/// the serial port (only the log), keys still accepted from it; recovery
+/// then starts in dark.
 fn mode_graphics_light(env: &Env) -> R<()> {
     ui_mode_case(
         env,
@@ -1268,21 +1269,24 @@ fn mode_graphics_light(env: &Env) -> R<()> {
         "theme = light\nmode = graphics",
         |env, vm, sock, name| {
             vm.expect("paguro: ui light graphics us", 10)?;
-            vm.expect("paguro: screen unlock", 30)?;
+            vm.expect("paguro: screen notice", 30)?;
             let bg = paguro_ui::builtin::THEMES[1].palette.background;
             wait_colour(env, sock, name, None, bg, true)?;
             std::thread::sleep(Duration::from_secs(2));
-            if vm.text().contains("Unlock Linux") {
+            if vm.text().contains("The Linux volume was not found") {
                 return Err("text UI on the serial port in graphics mode".into());
             }
-            vm.send("3")?;
-            vm.expect("paguro: screen secret", 20)?;
+            vm.send("r")?;
+            vm.expect("paguro: screen no-installation", 30)?;
+            let dark = paguro_ui::builtin::THEMES[0].palette.background;
+            wait_colour(env, sock, name, None, dark, true)?;
             Ok(())
         },
     )
 }
 
-/// A configured boot (Secure Boot off, no seal) with `[UI] ui`.
+/// A configured boot (Secure Boot off, no seal, no data disk) with `[UI]
+/// ui`.
 fn ui_mode_case(
     env: &Env,
     name: &str,
@@ -1293,9 +1297,8 @@ fn ui_mode_case(
     let mut ini = ini_text();
     ini.extend_from_slice(format!("\n[UI]\n{ui}\n").as_bytes());
     let esp = make_esp(env, name, &env.efi, &[("paguro.ini", &ini)])?;
-    let data = make_data_disk(env)?;
     let sock = state.join("qmp.sock");
-    let mut vm = Vm::start_with(env, name, false, &esp, &data, &vars, &state, Some(&sock))?;
+    let mut vm = Vm::launch(env, name, false, &[&esp], &vars, &state, Some(&sock), &[])?;
     let r = (|| {
         vm.expect("stage2 ok (1 entries, default debian)", BOOT_WAIT)?;
         script(env, &mut vm, &sock, name)
@@ -1309,14 +1312,12 @@ fn two_displays(env: &Env) -> R<()> {
     let name = "two-displays";
     let (vars, state) = fresh(env, name, "OVMF_VARS_4M.fd")?;
     let esp = make_esp(env, name, &env.efi, &[])?;
-    let data = make_data_disk(env)?;
     let sock = state.join("qmp.sock");
-    let mut vm = Vm::start_ext(
+    let mut vm = Vm::launch(
         env,
         name,
         false,
-        &esp,
-        &data,
+        &[&esp],
         &vars,
         &state,
         Some(&sock),
@@ -1333,7 +1334,7 @@ fn two_displays(env: &Env) -> R<()> {
     let r = (|| {
         vm.expect("on display 0", BOOT_WAIT)?;
         vm.expect("on display 1", 10)?;
-        vm.expect("paguro: screen unlock", 60)?;
+        vm.expect("paguro: screen no-installation", 60)?;
         let a = wait_colour(env, &sock, &format!("{name}-0"), Some("video0"), bg, true)?;
         let b = wait_colour(env, &sock, &format!("{name}-1"), Some("video1"), bg, true)?;
         println!(
@@ -1347,7 +1348,8 @@ fn two_displays(env: &Env) -> R<()> {
 }
 
 /// A USB tablet (`EFI_ABSOLUTE_POINTER_PROTOCOL` under OVMF): a click on
-/// the recovery-key row, sent through QMP `input-send-event`.
+/// the "Start Windows" action of the no-installation screen, sent through
+/// QMP `input-send-event`.
 fn pointer_tablet(env: &Env) -> R<()> {
     let name = "pointer-tablet";
     let Some(shim) = env.tablet_shim.as_deref() else {
@@ -1357,14 +1359,12 @@ fn pointer_tablet(env: &Env) -> R<()> {
     let (vars, state) = fresh(env, name, "OVMF_VARS_4M.fd")?;
     let loader = std::fs::read(&env.efi).map_err(|e| e.to_string())?;
     let esp = make_esp(env, name, shim, &[("/EFI/BOOT/PAGURO.EFI", &loader)])?;
-    let data = make_data_disk(env)?;
     let sock = state.join("qmp.sock");
-    let mut vm = Vm::start_ext(
+    let mut vm = Vm::launch(
         env,
         name,
         false,
-        &esp,
-        &data,
+        &[&esp],
         &vars,
         &state,
         Some(&sock),
@@ -1380,9 +1380,9 @@ fn pointer_tablet(env: &Env) -> R<()> {
         let line = vm.capture("paguro: graphics ", BOOT_WAIT)?;
         let (w, h) = resolution(&line)?;
         vm.expect("1 absolute", 10)?;
-        vm.expect("paguro: screen unlock", 60)?;
-        // Where the row is, from the same layout the loader uses.
-        let screen = recovery_menu();
+        vm.expect("paguro: screen no-installation", 60)?;
+        // Where the action is, from the same layout the loader uses.
+        let screen = paguro_boot::platform::Screen::NoInstallation;
         let mut list = paguro_ui::DrawList::new();
         paguro_ui::layout(
             &screen,
@@ -1396,8 +1396,8 @@ fn pointer_tablet(env: &Env) -> R<()> {
             .hits
             .as_slice()
             .iter()
-            .find(|hit| hit.target == paguro_ui::draw::Target::Row(1))
-            .ok_or("no recovery-key row")?
+            .find(|hit| hit.target == paguro_ui::draw::Target::Key(paguro_boot::ui::Key::Enter))
+            .ok_or("no Start Windows action")?
             .rect;
         let (x, y) = (row.x + row.w / 2, row.y + row.h / 2);
         let (ax, ay) = (
@@ -1423,9 +1423,8 @@ fn pointer_tablet(env: &Env) -> R<()> {
         qmp_run(&sock, &[btn(true)])?;
         std::thread::sleep(Duration::from_millis(300));
         qmp_run(&sock, &[btn(false)])?;
-        vm.expect("paguro: screen secret", 30)?;
-        vm.expect("Enter your recovery key", 10)?;
-        println!("  clicked ({x},{y}) of {w}x{h}: the recovery-key row");
+        vm.expect("no Windows Boot Manager entry", 30)?;
+        println!("  clicked ({x},{y}) of {w}x{h}: the Start Windows action");
         Ok(())
     })();
     vm.stop();
@@ -1460,6 +1459,7 @@ const SCENARIOS: &[Scenario] = &[
     ("s4-bde-clear-key", stage4::bde_clear_key),
     ("s4-bde-disagree", stage4::bde_disagree),
     ("s4-aarch64", stage4::aarch64),
+    ("s4-notice-screens", stage4::notice_screens),
     ("serial-vt100-auto", serial_vt100_auto),
     ("mode-text", mode_text),
     ("mode-graphics", mode_graphics_light),
