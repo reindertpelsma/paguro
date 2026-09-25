@@ -17,6 +17,8 @@
 //! first [`HEAD_LEN`] bytes — which every partitioning tool's default layout
 //! satisfies; anything further out is refused, not chased.
 
+use core::mem::{offset_of, size_of};
+
 use crate::bytes::Reader;
 use crate::gpt::{self, GptError, Header};
 use crate::guid::GPT_ESP;
@@ -27,6 +29,101 @@ pub const SECTOR: u64 = 512;
 /// Bytes of a payload's start [`classify`] can use: LBA 0, the GPT header at
 /// LBA 1, and the largest accepted entry array from LBA 2.
 pub const HEAD_LEN: usize = 2 * SECTOR as usize + gpt::MAX_ENTRY_ARRAY;
+
+/// FAT32 boot sector and BPB (Microsoft FAT32 File System Specification 1.03,
+/// §3.1 "BPB" and §3.3 "FAT32 Structure Starting at Offset 36"). Layout only:
+/// the parser reads the BPB fields in this order with [`Reader`].
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct Fat32BootSector {
+    bs_jmp_boot: [u8; 3],
+    bs_oem_name: [u8; 8],
+    bpb_byts_per_sec: u16,
+    bpb_sec_per_clus: u8,
+    bpb_rsvd_sec_cnt: u16,
+    bpb_num_fats: u8,
+    bpb_root_ent_cnt: u16,
+    bpb_tot_sec16: u16,
+    bpb_media: u8,
+    bpb_fat_sz16: u16,
+    bpb_sec_per_trk: u16,
+    bpb_num_heads: u16,
+    bpb_hidd_sec: u32,
+    bpb_tot_sec32: u32,
+    bpb_fat_sz32: u32,
+    bpb_ext_flags: u16,
+    bpb_fs_ver: u16,
+    bpb_root_clus: u32,
+    bpb_fs_info: u16,
+    bpb_bk_boot_sec: u16,
+    bpb_reserved: [u8; 12],
+    bs_drv_num: u8,
+    bs_reserved1: u8,
+    bs_boot_sig: u8,
+    bs_vol_id: u32,
+    bs_vol_lab: [u8; 11],
+    bs_fil_sys_type: [u8; 8],
+    boot_code: [u8; 420],
+    signature_word: [u8; 2],
+}
+const _: () = assert!(offset_of!(Fat32BootSector, bpb_byts_per_sec) == 11);
+const _: () = assert!(offset_of!(Fat32BootSector, bpb_tot_sec32) == 32);
+const _: () = assert!(offset_of!(Fat32BootSector, bpb_root_clus) == 44);
+const _: () = assert!(offset_of!(Fat32BootSector, bs_boot_sig) == 66);
+const _: () = assert!(offset_of!(Fat32BootSector, bs_fil_sys_type) == 82);
+const _: () = assert!(offset_of!(Fat32BootSector, signature_word) == 510);
+const _: () = assert!(size_of::<Fat32BootSector>() == 512);
+
+/// Boot sector trailer (`Signature_word`, also the MBR's): `55 AA` at 510.
+pub const BOOT_SIGNATURE_OFFSET: usize = offset_of!(Fat32BootSector, signature_word);
+pub const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xAA];
+
+/// FAT32 boot sector field offsets and values, from [`Fat32BootSector`].
+pub mod bpb {
+    use super::Fat32BootSector as B;
+    use core::mem::offset_of;
+
+    /// `BS_jmpBoot`: `EB xx 90` (short jump + NOP) or `E9 xx xx` (near jump).
+    pub const JMP_SHORT: u8 = 0xEB;
+    pub const JMP_NOP: u8 = 0x90;
+    pub const JMP_NEAR: u8 = 0xE9;
+    /// Byte of `BS_jmpBoot` holding the NOP after a short jump.
+    pub const JMP_NOP_OFFSET: usize = offset_of!(B, bs_jmp_boot) + 2;
+    pub const OEM_NAME: usize = offset_of!(B, bs_oem_name);
+    /// `BPB_BytsPerSec` — the first BPB field; the rest are read in order.
+    pub const BYTES_PER_SECTOR: usize = offset_of!(B, bpb_byts_per_sec);
+    pub const SECTORS_PER_CLUSTER: usize = offset_of!(B, bpb_sec_per_clus);
+    pub const RESERVED_SECTORS: usize = offset_of!(B, bpb_rsvd_sec_cnt);
+    pub const NUM_FATS: usize = offset_of!(B, bpb_num_fats);
+    pub const ROOT_ENTRIES: usize = offset_of!(B, bpb_root_ent_cnt);
+    pub const TOTAL_SECTORS_16: usize = offset_of!(B, bpb_tot_sec16);
+    pub const MEDIA: usize = offset_of!(B, bpb_media);
+    pub const FAT_SIZE_16: usize = offset_of!(B, bpb_fat_sz16);
+    /// `BPB_SecPerTrk`, `BPB_NumHeads`, `BPB_HiddSec`: geometry, skipped.
+    pub const GEOMETRY_LEN: usize = offset_of!(B, bpb_tot_sec32) - offset_of!(B, bpb_sec_per_trk);
+    pub const TOTAL_SECTORS_32: usize = offset_of!(B, bpb_tot_sec32);
+    pub const FAT_SIZE_32: usize = offset_of!(B, bpb_fat_sz32);
+    pub const FS_VERSION: usize = offset_of!(B, bpb_fs_ver);
+    pub const ROOT_CLUSTER: usize = offset_of!(B, bpb_root_clus);
+    pub const FS_INFO: usize = offset_of!(B, bpb_fs_info);
+    pub const BACKUP_BOOT_SECTOR: usize = offset_of!(B, bpb_bk_boot_sec);
+    /// `BS_BootSig` and its required value.
+    pub const BOOT_SIG: usize = offset_of!(B, bs_boot_sig);
+    pub const EXTENDED_BOOT_SIG: u8 = 0x29;
+    pub const VOLUME_LABEL: usize = offset_of!(B, bs_vol_lab);
+    /// `BS_FilSysType` and the only value accepted.
+    pub const FS_TYPE: usize = offset_of!(B, bs_fil_sys_type);
+    pub const FS_TYPE_FAT32: &[u8; 8] = b"FAT32   ";
+    /// `BPB_Media`: 0xF0 (removable) or 0xF8..=0xFF.
+    pub const MEDIA_REMOVABLE: u8 = 0xF0;
+    pub const MEDIA_MIN_FIXED: u8 = 0xF8;
+    /// Largest cluster the specification allows (32 KiB; 64 KiB tolerated).
+    pub const MAX_CLUSTER_BYTES: u32 = 64 * 1024;
+    /// First valid data cluster number (clusters 0 and 1 are reserved).
+    pub const FIRST_CLUSTER: u32 = 2;
+    /// Bytes per FAT32 table entry.
+    pub const FAT_ENTRY_LEN: u64 = 4;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -109,17 +206,20 @@ pub enum Fat32Error {
 /// Validate a FAT32 boot sector strictly. `space` is the number of bytes the
 /// file system may occupy (the partition or the whole payload).
 pub fn parse_fat32(sector: &[u8], space: u64) -> Result<Fat32, Fat32Error> {
-    let s = sector.get(..512).ok_or(Fat32Error::Truncated)?;
+    let s = sector.get(..SECTOR as usize).ok_or(Fat32Error::Truncated)?;
     let at = |i: usize| s.get(i).copied().unwrap_or(0);
-    let jump_ok = (at(0) == 0xEB && at(2) == 0x90) || at(0) == 0xE9;
+    let jump_ok = (at(0) == bpb::JMP_SHORT && at(bpb::JMP_NOP_OFFSET) == bpb::JMP_NOP)
+        || at(0) == bpb::JMP_NEAR;
     if !jump_ok {
         return Err(Fat32Error::BadJump);
     }
-    if s.get(510..512) != Some(&[0x55, 0xAA][..]) {
+    if s.get(BOOT_SIGNATURE_OFFSET..BOOT_SIGNATURE_OFFSET + BOOT_SIGNATURE.len())
+        != Some(&BOOT_SIGNATURE[..])
+    {
         return Err(Fat32Error::BadSignature);
     }
     let t = |_| Fat32Error::Truncated;
-    let mut r = Reader::new(s.get(11..).unwrap_or(&[]));
+    let mut r = Reader::new(s.get(bpb::BYTES_PER_SECTOR..).unwrap_or(&[]));
     let bytes_per_sector = r.u16_le().map_err(t)?;
     let sectors_per_cluster = r.u8().map_err(t)?;
     let reserved_sectors = r.u16_le().map_err(t)?;
@@ -128,7 +228,7 @@ pub fn parse_fat32(sector: &[u8], space: u64) -> Result<Fat32, Fat32Error> {
     let total16 = r.u16_le().map_err(t)?;
     let media = r.u8().map_err(t)?;
     let fat16_size = r.u16_le().map_err(t)?;
-    let _geometry = r.take(8).map_err(t)?; // sectors/track, heads, hidden
+    let _geometry = r.take(bpb::GEOMETRY_LEN).map_err(t)?; // sectors/track, heads, hidden
     let total_sectors = r.u32_le().map_err(t)?;
     let fat_sectors = r.u32_le().map_err(t)?;
     let _ext_flags = r.u16_le().map_err(t)?;
@@ -139,7 +239,7 @@ pub fn parse_fat32(sector: &[u8], space: u64) -> Result<Fat32, Fat32Error> {
         return Err(Fat32Error::BytesPerSector);
     }
     let cluster_bytes = u32::from(sectors_per_cluster) * u32::from(bytes_per_sector);
-    if !sectors_per_cluster.is_power_of_two() || cluster_bytes > 64 * 1024 {
+    if !sectors_per_cluster.is_power_of_two() || cluster_bytes > bpb::MAX_CLUSTER_BYTES {
         return Err(Fat32Error::SectorsPerCluster);
     }
     if reserved_sectors == 0 {
@@ -148,7 +248,7 @@ pub fn parse_fat32(sector: &[u8], space: u64) -> Result<Fat32, Fat32Error> {
     if fats != 1 && fats != 2 {
         return Err(Fat32Error::FatCount);
     }
-    if media != 0xF0 && media < 0xF8 {
+    if media != bpb::MEDIA_REMOVABLE && media < bpb::MEDIA_MIN_FIXED {
         return Err(Fat32Error::Media);
     }
     if root_entries != 0 || total16 != 0 || fat16_size != 0 {
@@ -157,10 +257,11 @@ pub fn parse_fat32(sector: &[u8], space: u64) -> Result<Fat32, Fat32Error> {
     if version != 0 {
         return Err(Fat32Error::Version);
     }
-    if at(66) != 0x29 {
+    if at(bpb::BOOT_SIG) != bpb::EXTENDED_BOOT_SIG {
         return Err(Fat32Error::ExtendedSignature);
     }
-    if s.get(82..90) != Some(&b"FAT32   "[..]) {
+    if s.get(bpb::FS_TYPE..bpb::FS_TYPE + bpb::FS_TYPE_FAT32.len()) != Some(&bpb::FS_TYPE_FAT32[..])
+    {
         return Err(Fat32Error::FsType);
     }
     let bytes = u64::from(total_sectors) * u64::from(bytes_per_sector);
@@ -174,11 +275,12 @@ pub fn parse_fat32(sector: &[u8], space: u64) -> Result<Fat32, Fat32Error> {
         .ok_or(Fat32Error::NoData)?;
     // `data` < 2^32, so the cluster count fits.
     let clusters = u32::try_from(data / u64::from(sectors_per_cluster)).unwrap_or(u32::MAX);
-    let fat_entries = u64::from(fat_sectors) * u64::from(bytes_per_sector) / 4;
-    if fat_sectors == 0 || fat_entries < u64::from(clusters) + 2 {
+    let fat_entries = u64::from(fat_sectors) * u64::from(bytes_per_sector) / bpb::FAT_ENTRY_LEN;
+    let cluster_end = u64::from(clusters) + u64::from(bpb::FIRST_CLUSTER);
+    if fat_sectors == 0 || fat_entries < cluster_end {
         return Err(Fat32Error::FatSize);
     }
-    if root_cluster < 2 || u64::from(root_cluster) >= u64::from(clusters) + 2 {
+    if root_cluster < bpb::FIRST_CLUSTER || u64::from(root_cluster) >= cluster_end {
         return Err(Fat32Error::RootCluster);
     }
     Ok(Fat32 {
@@ -242,13 +344,15 @@ pub fn classify(payload_len: u64, head: &[u8]) -> Result<EfiFs, DiskError> {
     let usable = usize::try_from(payload_len).unwrap_or(usize::MAX);
     let head = head.get(..head.len().min(usable)).unwrap_or(&[]);
     let blocks = payload_len / SECTOR;
-    let lba0 = head.get(..512).ok_or(DiskError::TooSmall)?;
-    let lba1 = head.get(512..1024);
-    if let Some(block) = lba1.filter(|b| b.get(..8) == Some(&gpt::SIGNATURE[..])) {
+    let sector = SECTOR as usize;
+    let lba0 = head.get(..sector).ok_or(DiskError::TooSmall)?;
+    let lba1 = head.get(sector..2 * sector);
+    if let Some(block) = lba1.filter(|b| b.get(..gpt::SIGNATURE.len()) == Some(&gpt::SIGNATURE[..]))
+    {
         let hdr = Header::parse(block, blocks).map_err(DiskError::Gpt)?;
         let start = usize::try_from(hdr.entries_lba)
             .ok()
-            .and_then(|l| l.checked_mul(512))
+            .and_then(|l| l.checked_mul(sector))
             .ok_or(DiskError::EntryArrayOutsideHead)?;
         let array = start
             .checked_add(hdr.entries_len())
@@ -281,16 +385,29 @@ pub fn classify(payload_len: u64, head: &[u8]) -> Result<EfiFs, DiskError> {
 /// Test and tooling support: a valid FAT32 boot sector for `total_sectors`
 /// 512-byte sectors, 8 sectors per cluster, 32 reserved sectors, 2 FATs.
 pub mod build {
+    use super::{BOOT_SIGNATURE, BOOT_SIGNATURE_OFFSET, SECTOR, bpb};
+
+    const BYTES_PER_SECTOR: u16 = SECTOR as u16;
+    const SECTORS_PER_CLUSTER: u32 = 8;
+    const RESERVED_SECTORS: u32 = 32;
+    const NUM_FATS: u32 = 2;
+    /// `BPB_FSInfo` and `BPB_BkBootSec` as mkfs.fat writes them.
+    const FS_INFO_SECTOR: u16 = 1;
+    const BACKUP_BOOT_SECTOR: u16 = 6;
+    /// `EB 58 90`: short jump over the FAT32 BPB (to offset 0x5A).
+    const JMP_BOOT: [u8; 3] = [bpb::JMP_SHORT, 0x58, bpb::JMP_NOP];
+
     pub fn fat32_boot_sector(total_sectors: u32) -> [u8; 512] {
         let mut s = [0u8; 512];
-        let spc = 8u32;
-        let reserved = 32u32;
+        let spc = SECTORS_PER_CLUSTER;
+        let reserved = RESERVED_SECTORS;
+        let entry = bpb::FAT_ENTRY_LEN as u32;
         // FAT size: enough 4-byte entries for every cluster plus two.
         let mut fat = 1u32;
         loop {
-            let data = total_sectors.saturating_sub(reserved + 2 * fat);
-            let need = (data / spc + 2) * 4;
-            if fat * 512 >= need {
+            let data = total_sectors.saturating_sub(reserved + NUM_FATS * fat);
+            let need = (data / spc + bpb::FIRST_CLUSTER) * entry;
+            if fat * u32::from(BYTES_PER_SECTOR) >= need {
                 break;
             }
             fat += 1;
@@ -300,22 +417,22 @@ pub mod build {
                 d.copy_from_slice(b);
             }
         };
-        put(0, &[0xEB, 0x58, 0x90]);
-        put(3, b"mkfs.fat");
-        put(11, &512u16.to_le_bytes());
-        put(13, &[spc as u8]);
-        put(14, &(reserved as u16).to_le_bytes());
-        put(16, &[2]);
-        put(21, &[0xF8]);
-        put(32, &total_sectors.to_le_bytes());
-        put(36, &fat.to_le_bytes());
-        put(44, &2u32.to_le_bytes());
-        put(48, &1u16.to_le_bytes());
-        put(50, &6u16.to_le_bytes());
-        put(66, &[0x29]);
-        put(71, b"NO NAME    ");
-        put(82, b"FAT32   ");
-        put(510, &[0x55, 0xAA]);
+        put(0, &JMP_BOOT);
+        put(bpb::OEM_NAME, b"mkfs.fat");
+        put(bpb::BYTES_PER_SECTOR, &BYTES_PER_SECTOR.to_le_bytes());
+        put(bpb::SECTORS_PER_CLUSTER, &[spc as u8]);
+        put(bpb::RESERVED_SECTORS, &(reserved as u16).to_le_bytes());
+        put(bpb::NUM_FATS, &[NUM_FATS as u8]);
+        put(bpb::MEDIA, &[bpb::MEDIA_MIN_FIXED]);
+        put(bpb::TOTAL_SECTORS_32, &total_sectors.to_le_bytes());
+        put(bpb::FAT_SIZE_32, &fat.to_le_bytes());
+        put(bpb::ROOT_CLUSTER, &bpb::FIRST_CLUSTER.to_le_bytes());
+        put(bpb::FS_INFO, &FS_INFO_SECTOR.to_le_bytes());
+        put(bpb::BACKUP_BOOT_SECTOR, &BACKUP_BOOT_SECTOR.to_le_bytes());
+        put(bpb::BOOT_SIG, &[bpb::EXTENDED_BOOT_SIG]);
+        put(bpb::VOLUME_LABEL, b"NO NAME    ");
+        put(bpb::FS_TYPE, bpb::FS_TYPE_FAT32);
+        put(BOOT_SIGNATURE_OFFSET, &BOOT_SIGNATURE);
         s
     }
 }

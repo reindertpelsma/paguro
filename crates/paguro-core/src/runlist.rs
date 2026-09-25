@@ -27,8 +27,18 @@ pub enum RunlistError {
     Unterminated,
 }
 
+/// Mapping-pairs run header (NTFS data runs; libfsntfs documentation, "Data
+/// runs"): low
+/// nibble = bytes of the run length, high nibble = bytes of the LCN delta.
+const HEADER_LEN_MASK: u8 = 0x0f;
+const HEADER_OFF_SHIFT: u32 = 4;
+/// Widest length or offset field accepted: one `u64`.
+const MAX_FIELD_BYTES: usize = 8;
+/// The run header that ends the array.
+const END_MARKER: u8 = 0;
+
 fn read_le(bytes: &[u8], signed: bool) -> Option<i128> {
-    if bytes.is_empty() || bytes.len() > 8 {
+    if bytes.is_empty() || bytes.len() > MAX_FIELD_BYTES {
         return None;
     }
     let mut v: u64 = 0;
@@ -36,7 +46,7 @@ fn read_le(bytes: &[u8], signed: bool) -> Option<i128> {
         v |= u64::from(*b) << (8 * i);
     }
     let bits = 8 * bytes.len() as u32;
-    if signed && bits < 64 && (v >> (bits - 1)) & 1 == 1 {
+    if signed && bits < u64::BITS && (v >> (bits - 1)) & 1 == 1 {
         // sign-extend
         v |= u64::MAX << bits;
         return Some(i128::from(v as i64));
@@ -55,13 +65,13 @@ pub fn decode(input: &[u8], out: &mut [Run]) -> Result<usize, RunlistError> {
     let mut n = 0usize;
     loop {
         let header = *input.get(pos).ok_or(RunlistError::Unterminated)?;
-        if header == 0 {
+        if header == END_MARKER {
             return Ok(n);
         }
         pos += 1;
-        let len_sz = usize::from(header & 0x0f);
-        let off_sz = usize::from(header >> 4);
-        if len_sz == 0 || len_sz > 8 || off_sz > 8 {
+        let len_sz = usize::from(header & HEADER_LEN_MASK);
+        let off_sz = usize::from(header >> HEADER_OFF_SHIFT);
+        if len_sz == 0 || len_sz > MAX_FIELD_BYTES || off_sz > MAX_FIELD_BYTES {
             return Err(RunlistError::FieldTooWide);
         }
         if off_sz == 0 {

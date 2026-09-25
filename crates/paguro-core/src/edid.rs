@@ -8,11 +8,83 @@
 //! first — checks the header and checksum, and returns two 12-bit numbers.
 //! Bounded by construction; fuzzed by `fuzz/fuzz_targets/edid.rs`.
 
+use core::mem::{offset_of, size_of};
+
+use crate::layout::field_size;
+
+/// EDID base block (VESA E-EDID Release A.2, §3, Table 3.1). Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct BaseBlock {
+    header: [u8; 8],
+    manufacturer_id: [u8; 2],
+    product_code: u16,
+    serial_number: u32,
+    week: u8,
+    year: u8,
+    version: u8,
+    revision: u8,
+    video_input: u8,
+    h_size_cm: u8,
+    v_size_cm: u8,
+    gamma: u8,
+    features: u8,
+    chromaticity: [u8; 10],
+    established_timings: [u8; 3],
+    standard_timings: [u8; 16],
+    descriptors: [[u8; 18]; 4],
+    extension_count: u8,
+    checksum: u8,
+}
+const _: () = assert!(offset_of!(BaseBlock, version) == 18);
+const _: () = assert!(offset_of!(BaseBlock, descriptors) == 54);
+const _: () = assert!(offset_of!(BaseBlock, checksum) == 127);
+const _: () = assert!(size_of::<BaseBlock>() == 128);
+
+/// Detailed timing descriptor (E-EDID A.2 §3.10.2, Table 3.21). Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct DetailedTiming {
+    pixel_clock: u16,
+    h_active_lo: u8,
+    h_blank_lo: u8,
+    h_active_blank_hi: u8,
+    v_active_lo: u8,
+    v_blank_lo: u8,
+    v_active_blank_hi: u8,
+    h_sync_offset_lo: u8,
+    h_sync_width_lo: u8,
+    v_sync_lo: u8,
+    sync_hi: u8,
+    h_image_mm_lo: u8,
+    v_image_mm_lo: u8,
+    image_mm_hi: u8,
+    h_border: u8,
+    v_border: u8,
+    flags: u8,
+}
+const _: () = assert!(size_of::<DetailedTiming>() == 18);
+
 /// The base block's size.
-pub const BLOCK: usize = 128;
+pub const BLOCK: usize = size_of::<BaseBlock>();
 const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
+const DTD_LEN: usize = size_of::<DetailedTiming>();
 /// The first detailed timing descriptor: the preferred timing (EDID 1.3+).
-const DTD: core::ops::Range<usize> = 54..72;
+const DTD: core::ops::Range<usize> =
+    offset_of!(BaseBlock, descriptors)..offset_of!(BaseBlock, descriptors) + DTD_LEN;
+const _: () = assert!(field_size(|b: BaseBlock| b.descriptors) == 4 * DTD_LEN);
+
+// Detailed timing descriptor fields used.
+const DTD_PIXEL_CLOCK: usize = offset_of!(DetailedTiming, pixel_clock);
+const DTD_H_ACTIVE_LO: usize = offset_of!(DetailedTiming, h_active_lo);
+const DTD_H_ACTIVE_BLANK_HI: usize = offset_of!(DetailedTiming, h_active_blank_hi);
+const DTD_V_ACTIVE_LO: usize = offset_of!(DetailedTiming, v_active_lo);
+const DTD_V_ACTIVE_BLANK_HI: usize = offset_of!(DetailedTiming, v_active_blank_hi);
+const DTD_FLAGS: usize = offset_of!(DetailedTiming, flags);
+/// The active-size high nibble sits in the upper half of the `*_hi` byte.
+const ACTIVE_HI_SHIFT: u32 = 4;
+/// `flags` bit 7: interlaced.
+const DTD_FLAG_INTERLACED: u8 = 0x80;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdidError {
@@ -38,16 +110,18 @@ pub fn preferred(edid: &[u8]) -> Result<(u32, u32), EdidError> {
     if base.iter().fold(0u8, |a, b| a.wrapping_add(*b)) != 0 {
         return Err(EdidError::BadChecksum);
     }
-    let d: &[u8; 18] = base
+    let d: &[u8; DTD_LEN] = base
         .get(DTD)
         .and_then(|s| s.try_into().ok())
         .ok_or(EdidError::Short)?;
-    if d[0] == 0 && d[1] == 0 {
+    if d[DTD_PIXEL_CLOCK] == 0 && d[DTD_PIXEL_CLOCK + 1] == 0 {
         return Err(EdidError::NoTiming);
     }
-    let w = u32::from(d[2]) | (u32::from(d[4] >> 4) << 8);
-    let mut h = u32::from(d[5]) | (u32::from(d[7] >> 4) << 8);
-    if d[17] & 0x80 != 0 {
+    let w = u32::from(d[DTD_H_ACTIVE_LO])
+        | (u32::from(d[DTD_H_ACTIVE_BLANK_HI] >> ACTIVE_HI_SHIFT) << 8);
+    let mut h = u32::from(d[DTD_V_ACTIVE_LO])
+        | (u32::from(d[DTD_V_ACTIVE_BLANK_HI] >> ACTIVE_HI_SHIFT) << 8);
+    if d[DTD_FLAGS] & DTD_FLAG_INTERLACED != 0 {
         // Interlaced: the descriptor gives one field.
         h *= 2;
     }
@@ -62,9 +136,19 @@ pub fn preferred(edid: &[u8]) -> Result<(u32, u32), EdidError> {
 pub mod build {
     use super::*;
 
+    /// EDID structure version 1.4.
+    const VERSION: u8 = 1;
+    const REVISION: u8 = 4;
+    /// 148.5 MHz in the descriptor's 10 kHz units, little-endian (0x3A02).
+    const PIXEL_CLOCK_148_5_MHZ: [u8; 2] = [0x02, 0x3a];
+    /// `flags` for a progressive timing: digital separate sync.
+    const FLAGS_DIGITAL_SEPARATE_SYNC: u8 = 0x18;
+    const NIBBLE: u32 = 0xf;
+
     pub fn block(w: u32, h: u32, interlaced: bool) -> [u8; BLOCK] {
         let mut e = [0u8; BLOCK];
-        if let Some(hd) = e.get_mut(..8) {
+        let dtd = offset_of!(BaseBlock, descriptors);
+        if let Some(hd) = e.get_mut(..HEADER.len()) {
             hd.copy_from_slice(&HEADER);
         }
         let set = |e: &mut [u8; BLOCK], i: usize, v: u8| {
@@ -73,18 +157,35 @@ pub mod build {
             }
         };
         // EDID 1.4, a 148.5 MHz pixel clock.
-        set(&mut e, 18, 1);
-        set(&mut e, 19, 4);
-        set(&mut e, 54, 0x02);
-        set(&mut e, 55, 0x3a);
-        set(&mut e, 56, w as u8);
-        set(&mut e, 58, ((w >> 8) as u8 & 0xf) << 4);
+        set(&mut e, offset_of!(BaseBlock, version), VERSION);
+        set(&mut e, offset_of!(BaseBlock, revision), REVISION);
+        set(&mut e, dtd + DTD_PIXEL_CLOCK, PIXEL_CLOCK_148_5_MHZ[0]);
+        set(&mut e, dtd + DTD_PIXEL_CLOCK + 1, PIXEL_CLOCK_148_5_MHZ[1]);
+        set(&mut e, dtd + DTD_H_ACTIVE_LO, w as u8);
+        set(
+            &mut e,
+            dtd + DTD_H_ACTIVE_BLANK_HI,
+            (((w >> 8) & NIBBLE) as u8) << ACTIVE_HI_SHIFT,
+        );
         let fh = if interlaced { h / 2 } else { h };
-        set(&mut e, 59, fh as u8);
-        set(&mut e, 61, ((fh >> 8) as u8 & 0xf) << 4);
-        set(&mut e, 71, if interlaced { 0x80 } else { 0x18 });
+        set(&mut e, dtd + DTD_V_ACTIVE_LO, fh as u8);
+        set(
+            &mut e,
+            dtd + DTD_V_ACTIVE_BLANK_HI,
+            (((fh >> 8) & NIBBLE) as u8) << ACTIVE_HI_SHIFT,
+        );
+        let flags = if interlaced {
+            DTD_FLAG_INTERLACED
+        } else {
+            FLAGS_DIGITAL_SEPARATE_SYNC
+        };
+        set(&mut e, dtd + DTD_FLAGS, flags);
         let sum = e.iter().fold(0u8, |a, b| a.wrapping_add(*b));
-        set(&mut e, 127, 0u8.wrapping_sub(sum));
+        set(
+            &mut e,
+            offset_of!(BaseBlock, checksum),
+            0u8.wrapping_sub(sum),
+        );
         e
     }
 }

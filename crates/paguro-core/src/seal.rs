@@ -30,9 +30,11 @@ pub const MAX_FILE: usize = 4096;
 /// Cap on the `sealed` field (both TPM2B values).
 pub const MAX_SEALED: usize = 1024;
 /// `TPM_ALG_SHA256`, the only bank v1 accepts.
-pub const PCR_BANK_SHA256: u16 = 0x000B;
+pub const PCR_BANK_SHA256: u16 = crate::tpm::alg::SHA256;
 /// PCRs 0, 2, 4, 7 and 12 — the only selection v1 accepts.
 pub const PCR_MASK_V1: u32 = 1 << 0 | 1 << 2 | 1 << 4 | 1 << 7 | 1 << 12;
+/// The big-endian UINT16 size prefix of a TPM2B value (TPM 2.0 Part 2 §10.4).
+const TPM2B_SIZE_LEN: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -45,7 +47,7 @@ pub enum Kind {
 impl Kind {
     pub const ALL: [Kind; 4] = [Kind::Tpm, Kind::SetupTpm, Kind::Passphrase, Kind::PinBypass];
 
-    pub const fn magic(self) -> &'static [u8; 8] {
+    pub const fn magic(self) -> &'static [u8; MAGIC_LEN] {
         match self {
             Kind::Tpm => b"PGRTPM\x00\x01",
             Kind::SetupTpm => b"PGRSTP\x00\x01",
@@ -79,7 +81,7 @@ pub struct Sealed<'a> {
 impl<'a> Sealed<'a> {
     /// The `TPMT_PUBLIC` inside `public` (what the object's name hashes).
     pub fn public_area(&self) -> &'a [u8] {
-        self.public.get(2..).unwrap_or(&[])
+        self.public.get(TPM2B_SIZE_LEN..).unwrap_or(&[])
     }
     /// Bytes this occupies after its `len` field.
     pub const fn len(&self) -> usize {
@@ -150,7 +152,9 @@ fn read_sealed<'a>(r: &mut Reader<'a>) -> Result<Sealed<'a>, SealError> {
             return Err(SealError::SealedMalformed);
         }
         f.take(size).map_err(|_| SealError::SealedMalformed)?;
-        whole.get(..size + 2).ok_or(SealError::SealedMalformed)
+        whole
+            .get(..size + TPM2B_SIZE_LEN)
+            .ok_or(SealError::SealedMalformed)
     };
     let public = tpm2b()?;
     let private = tpm2b()?;

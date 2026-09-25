@@ -4,8 +4,21 @@
 
 use core::fmt;
 
+/// Bytes of a stored GUID (`EFI_GUID`, UEFI 2.10 Appendix A).
+pub const GUID_LEN: usize = 16;
+/// Characters of the canonical text form `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
+pub const TEXT_LEN: usize = 36;
+/// Text positions of the four `-` separators.
+const TEXT_HYPHENS: [usize; 4] = [8, 13, 18, 23];
+/// Bytes (in reading order) that a `-` precedes in the text.
+const HYPHEN_BEFORE_BYTE: [usize; 4] = [4, 6, 8, 10];
+const NIBBLE_BITS: u32 = 4;
+const NIBBLE_MASK: u8 = 0xf;
+/// Value of hex digit `a`.
+const HEX_ALPHA_BASE: u8 = 10;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub struct Guid(pub [u8; 16]);
+pub struct Guid(pub [u8; GUID_LEN]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GuidError {
@@ -20,30 +33,30 @@ pub enum GuidError {
 const fn hex_val(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
+        b'a'..=b'f' => Some(c - b'a' + HEX_ALPHA_BASE),
+        b'A'..=b'F' => Some(c - b'A' + HEX_ALPHA_BASE),
         _ => None,
     }
 }
 
 /// Byte order of the 16 stored bytes relative to the text: the text's byte `i`
 /// (in reading order) lands at `ORDER[i]`.
-const ORDER: [usize; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
+const ORDER: [usize; GUID_LEN] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
 
 impl Guid {
-    pub const ZERO: Guid = Guid([0; 16]);
+    pub const ZERO: Guid = Guid([0; GUID_LEN]);
 
     /// Parse `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, either case.
     pub fn parse(s: &str) -> Result<Guid, GuidError> {
         let b = s.as_bytes();
-        if b.len() != 36 {
+        if b.len() != TEXT_LEN {
             return Err(GuidError::BadLength);
         }
-        let mut text = [0u8; 16];
+        let mut text = [0u8; GUID_LEN];
         let mut n = 0usize;
         let mut i = 0usize;
         while let Some(&c) = b.get(i) {
-            if matches!(i, 8 | 13 | 18 | 23) {
+            if TEXT_HYPHENS.contains(&i) {
                 if c != b'-' {
                     return Err(GuidError::BadSeparator);
                 }
@@ -58,7 +71,7 @@ impl Guid {
                     GuidError::BadDigit
                 },
             )?;
-            *text.get_mut(n).ok_or(GuidError::BadLength)? = hi << 4 | lo;
+            *text.get_mut(n).ok_or(GuidError::BadLength)? = hi << NIBBLE_BITS | lo;
             n += 1;
             i += 2;
         }
@@ -66,8 +79,8 @@ impl Guid {
     }
 
     /// From bytes in reading order (as the text shows them).
-    pub fn from_text_order(text: [u8; 16]) -> Guid {
-        let mut out = [0u8; 16];
+    pub fn from_text_order(text: [u8; GUID_LEN]) -> Guid {
+        let mut out = [0u8; GUID_LEN];
         for (t, &pos) in text.iter().zip(ORDER.iter()) {
             if let Some(o) = out.get_mut(pos) {
                 *o = *t;
@@ -76,8 +89,8 @@ impl Guid {
         Guid(out)
     }
 
-    fn text_order(&self) -> [u8; 16] {
-        let mut text = [0u8; 16];
+    fn text_order(&self) -> [u8; GUID_LEN] {
+        let mut text = [0u8; GUID_LEN];
         for (t, &pos) in text.iter_mut().zip(ORDER.iter()) {
             *t = self.0.get(pos).copied().unwrap_or(0);
         }
@@ -85,16 +98,22 @@ impl Guid {
     }
 
     /// Canonical lower-case text, written into a fixed buffer.
-    pub fn to_text(&self) -> [u8; 36] {
+    pub fn to_text(&self) -> [u8; TEXT_LEN] {
         const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut out = [b'-'; 36];
+        let mut out = [b'-'; TEXT_LEN];
         let mut o = 0usize;
         for (i, byte) in self.text_order().iter().enumerate() {
-            if matches!(i, 4 | 6 | 8 | 10) {
+            if HYPHEN_BEFORE_BYTE.contains(&i) {
                 o += 1;
             }
-            let hi = HEX.get(usize::from(byte >> 4)).copied().unwrap_or(b'0');
-            let lo = HEX.get(usize::from(byte & 0xf)).copied().unwrap_or(b'0');
+            let hi = HEX
+                .get(usize::from(byte >> NIBBLE_BITS))
+                .copied()
+                .unwrap_or(b'0');
+            let lo = HEX
+                .get(usize::from(byte & NIBBLE_MASK))
+                .copied()
+                .unwrap_or(b'0');
             if let Some(d) = out.get_mut(o..o + 2) {
                 d.copy_from_slice(&[hi, lo]);
             }

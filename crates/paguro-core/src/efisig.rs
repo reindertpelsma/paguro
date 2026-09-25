@@ -14,8 +14,33 @@
 //! is capped at [`MAX_VAR`], entries at [`MAX_ENTRIES`], and every size must
 //! tile its list exactly.
 
+use core::mem::{offset_of, size_of};
+
 use crate::bytes::{Full, Reader, Writer};
 use crate::guid::Guid;
+
+/// `EFI_SIGNATURE_LIST` header (UEFI 2.10 §32.4.1). Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct SignatureListHeader {
+    signature_type: [u8; 16],
+    signature_list_size: u32,
+    signature_header_size: u32,
+    signature_size: u32,
+}
+const _: () = assert!(offset_of!(SignatureListHeader, signature_size) == 24);
+const _: () = assert!(size_of::<SignatureListHeader>() == 28);
+
+/// `EFI_SIGNATURE_DATA` (UEFI 2.10 §32.4.1): the fixed part before the data.
+/// Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct SignatureDataHeader {
+    signature_owner: [u8; 16],
+}
+/// Bytes of `SignatureOwner` at the start of every signature.
+const OWNER_LEN: usize = size_of::<SignatureDataHeader>();
+const _: () = assert!(OWNER_LEN == 16);
 
 /// Largest signature database the reader accepts. Real `db`/`dbx` values
 /// are tens of KiB.
@@ -23,7 +48,7 @@ pub const MAX_VAR: usize = 256 * 1024;
 /// Most signatures visited across all lists.
 pub const MAX_ENTRIES: usize = 4096;
 /// `sizeof(EFI_SIGNATURE_LIST)`.
-pub const LIST_HEADER_LEN: usize = 28;
+pub const LIST_HEADER_LEN: usize = size_of::<SignatureListHeader>();
 
 /// `605dab50-e046-4300-abb6-3dd810dd8b23`: shim's vendor GUID (`MokNew`,
 /// `MokAuth`, `MokListRT`) and the owner mokutil writes.
@@ -86,7 +111,7 @@ pub fn for_each<'a>(
         let mut b = Reader::new(body);
         b.take(header_size).map_err(|_| SigError::BadListSize)?;
         let entries = b.rest();
-        if sig_size < 16 || entries.len() % sig_size != 0 {
+        if sig_size < OWNER_LEN || entries.len() % sig_size != 0 {
             return Err(SigError::BadSignatureSize);
         }
         for e in entries.chunks_exact(sig_size) {
@@ -94,7 +119,7 @@ pub fn for_each<'a>(
             if count > MAX_ENTRIES {
                 return Err(SigError::TooManyEntries);
             }
-            let (owner, data) = e.split_at(16);
+            let (owner, data) = e.split_at(OWNER_LEN);
             let owner = Guid(owner.try_into().map_err(|_| SigError::Truncated)?);
             visit(Signature { kind, owner, data });
         }
@@ -104,18 +129,18 @@ pub fn for_each<'a>(
 
 /// Length of [`write_x509`]'s output for a certificate of `der_len` bytes.
 pub const fn x509_list_len(der_len: usize) -> usize {
-    LIST_HEADER_LEN + 16 + der_len
+    LIST_HEADER_LEN + OWNER_LEN + der_len
 }
 
 /// One `EFI_SIGNATURE_LIST` holding one X.509 certificate owned by `owner`:
 /// the `MokNew` value for a single key.
 pub fn write_x509(owner: &Guid, der: &[u8], out: &mut [u8]) -> Result<usize, Full> {
     let list = u32::try_from(x509_list_len(der.len())).map_err(|_| Full)?;
-    let sig = u32::try_from(16 + der.len()).map_err(|_| Full)?;
+    let sig = u32::try_from(OWNER_LEN + der.len()).map_err(|_| Full)?;
     let mut w = Writer::new(out);
     w.put(&CERT_X509.0)?;
     w.u32_le(list)?;
-    w.u32_le(0)?;
+    w.u32_le(0)?; // SignatureHeaderSize: none for X.509
     w.u32_le(sig)?;
     w.put(&owner.0)?;
     w.put(der)?;

@@ -29,6 +29,10 @@
 //! `test/fixtures/bde/`.
 
 use crate::bytes::Reader;
+use crate::disk::SECTOR;
+use crate::fve::EntryHeader;
+use crate::layout::field_size;
+use core::mem::{offset_of, size_of};
 
 /// `-FVE-FS-` at offset 3 of a BitLocker volume's first sector (Windows
 /// Vista and later), and at the start of every FVE metadata block.
@@ -46,14 +50,189 @@ pub const GUID_EOW: [u8; 16] = [
     0x3b, 0x4d, 0xa8, 0x92, 0x80, 0xdd, 0x0e, 0x4d, 0x9e, 0x4e, 0xb1, 0xe3, 0x28, 0x4e, 0xae, 0xd8,
 ];
 /// Where the identifier and the three metadata offsets sit.
-pub const HEADER_ID_OFFSET: usize = 160;
-pub const TOGO_ID_OFFSET: usize = 424;
+pub const HEADER_ID_OFFSET: usize = offset_of!(BootSector, identifier);
+pub const TOGO_ID_OFFSET: usize = offset_of!(ToGoBootSector, identifier);
 
 /// Every FVE metadata region is 64 KiB: block, validation, then zeros.
 pub const REGION_SIZE: u64 = 0x1_0000;
-pub const BLOCK_HEADER_LEN: usize = 64;
-pub const METADATA_HEADER_LEN: usize = 48;
-pub const ENTRY_HEADER_LEN: usize = 8;
+pub const BLOCK_HEADER_LEN: usize = size_of::<BlockHeader>();
+pub const METADATA_HEADER_LEN: usize = size_of::<MetadataHeader>();
+pub const ENTRY_HEADER_LEN: usize = crate::fve::ENTRY_HEADER_LEN;
+
+// Layout-only structs (libbde, "BitLocker Drive Encryption (BDE) format"):
+// never instantiated, read through `offset_of!` with the bounds-checked
+// readers below. Unused fields are named for the reader, not read.
+
+/// The volume's first sector, Windows 7+ layout (libbde §2.1 "Volume
+/// header"): `-FVE-FS-` in the OEM field, the identifier after the BPB.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct BootSector {
+    jump: [u8; 3],
+    oem_id: [u8; 8],
+    bytes_per_sector: u16,
+    bpb_rest: [u8; 147],
+    identifier: [u8; 16],
+    metadata_offsets: [u64; 3],
+    boot_code: [u8; 310],
+    boot_signature: [u8; 2],
+}
+const _: () = assert!(size_of::<BootSector>() == 512);
+const _: () = assert!(offset_of!(BootSector, bytes_per_sector) == 11);
+const _: () = assert!(offset_of!(BootSector, identifier) == 160);
+const _: () = assert!(offset_of!(BootSector, metadata_offsets) == 176);
+const _: () = assert!(offset_of!(BootSector, boot_signature) == 510);
+
+/// BitLocker To Go: the FAT32 discovery volume's boot sector (libbde §2.1),
+/// identifier and offsets further in.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct ToGoBootSector {
+    jump: [u8; 3],
+    oem_id: [u8; 8],
+    bpb: [u8; 413],
+    identifier: [u8; 16],
+    metadata_offsets: [u64; 3],
+}
+const _: () = assert!(offset_of!(ToGoBootSector, identifier) == 424);
+
+/// Both layouts: the three metadata offsets follow the identifier.
+const IDENTIFIER_LEN: usize = field_size(|b: BootSector| b.identifier);
+const _: () = assert!(
+    offset_of!(BootSector, metadata_offsets) - HEADER_ID_OFFSET
+        == offset_of!(ToGoBootSector, metadata_offsets) - TOGO_ID_OFFSET
+);
+/// The jump instruction of a Windows Vista BitLocker boot sector
+/// (`jmp short 0x54; nop`), whose layout paguro refuses.
+const VISTA_JUMP: [u8; 3] = [0xeb, 0x52, 0x90];
+/// `55 AA` at the end of the boot sector.
+const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xaa];
+/// The sector sizes BitLocker volumes are made with.
+const SECTOR_SIZES: [u16; 2] = [512, 4096];
+
+/// FVE metadata block header (libbde §3.1, version 2).
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct BlockHeader {
+    signature: [u8; 8],
+    /// Block size in [`BLOCK_SIZE_UNIT`]s.
+    size: u16,
+    version: u16,
+    current_state: u16,
+    next_state: u16,
+    encrypted_size: u64,
+    conversion_size: u32,
+    header_sectors: u32,
+    metadata_offsets: [u64; 3],
+    header_offset: u64,
+}
+const _: () = assert!(size_of::<BlockHeader>() == 64);
+const _: () = assert!(offset_of!(BlockHeader, encrypted_size) == 16);
+const _: () = assert!(offset_of!(BlockHeader, metadata_offsets) == 32);
+const _: () = assert!(offset_of!(BlockHeader, header_offset) == 56);
+/// The block header's `size` counts 16-byte units.
+const BLOCK_SIZE_UNIT: usize = 16;
+/// The only block version read (Windows 7 and later).
+const BLOCK_VERSION: u16 = 2;
+
+/// FVE metadata header (libbde §3.2), after the block header; the same
+/// framing opens a startup-key (`.BEK`) file.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct MetadataHeader {
+    size: u32,
+    version: u32,
+    header_size: u32,
+    size_copy: u32,
+    volume_id: [u8; 16],
+    next_nonce: u32,
+    encryption: u16,
+    unknown: u16,
+    created: u64,
+}
+const _: () = assert!(size_of::<MetadataHeader>() == 48);
+const _: () = assert!(offset_of!(MetadataHeader, encryption) == 36);
+const _: () = assert!(offset_of!(MetadataHeader, created) == 40);
+const METADATA_VERSION: u32 = 1;
+
+/// FVE validation header after the block (libbde §3.4): a CRC-32 of the
+/// block, and in version 2 one AES-CCM entry with its wrapped SHA-256.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct ValidationHeader {
+    size: u16,
+    version: u16,
+    crc32: u32,
+}
+const VALIDATION_HEADER_LEN: usize = size_of::<ValidationHeader>();
+const _: () = assert!(VALIDATION_HEADER_LEN == 8);
+const VALIDATION_VERSION_CRC: u16 = 1;
+const VALIDATION_VERSION_HASH: u16 = 2;
+
+/// A VMK entry's fixed part (libbde §3.5.3 "Volume master key"), before
+/// its nested entries.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct VmkHeader {
+    id: [u8; 16],
+    last_change: u64,
+    unknown: u16,
+    protection: u16,
+}
+const _: () = assert!(size_of::<VmkHeader>() == 28);
+
+/// Key value (libbde §3.5.2 "Key"): `method u32 | key`.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct KeyValue {
+    method: u32,
+}
+
+/// Stretch key value (libbde §3.5.4): `method u32 | salt[16] | nested`.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct StretchKeyValue {
+    method: u32,
+    salt: [u8; 16],
+}
+const _: () = assert!(offset_of!(StretchKeyValue, salt) == 4);
+
+/// AES-CCM encrypted key value (libbde §3.5.5): `nonce | tag | ciphertext`.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct CcmValue {
+    nonce: [u8; 12],
+    tag: [u8; 16],
+}
+const CCM_NONCE_LEN: usize = field_size(|c: CcmValue| c.nonce);
+const CCM_TAG_LEN: usize = field_size(|c: CcmValue| c.tag);
+
+/// Offset and size value (libbde §3.5.7), the volume-header entry's data;
+/// Windows 10+ appends a further structure ([`parse_extra_region`]).
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct OffsetAndSize {
+    offset: u64,
+    size: u64,
+}
+
+/// External key value (libbde §3.5.6), a `.BEK` file's `STARTUP_KEY`
+/// entry: `guid | modified u64 | nested`.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct ExternalKeyValue {
+    id: [u8; 16],
+    modified: u64,
+}
+
+/// AES key sizes in bytes.
+const AES_128_KEY_LEN: usize = 16;
+const AES_256_KEY_LEN: usize = 32;
+
+/// The `.BEK` file size cap (Windows writes a few hundred bytes).
+const MAX_STARTUP_KEY_FILE: usize = 4096;
+/// The clear VMK and the startup key's external key are 256-bit keys.
+const KEY_256_LEN: usize = 32;
 /// Top-level entries per metadata block.
 pub const MAX_ENTRIES: usize = 64;
 /// Children of one entry.
@@ -92,6 +271,16 @@ pub mod value {
     pub const OFFSET_AND_SIZE: u16 = 0x000f;
 }
 
+/// Encryption method codes (libbde §3.2 "Encryption methods").
+pub mod method {
+    pub const AES_128_CBC_DIFFUSER: u16 = 0x8000;
+    pub const AES_256_CBC_DIFFUSER: u16 = 0x8001;
+    pub const AES_128_CBC: u16 = 0x8002;
+    pub const AES_256_CBC: u16 = 0x8003;
+    pub const AES_128_XTS: u16 = 0x8004;
+    pub const AES_256_XTS: u16 = 0x8005;
+}
+
 /// Data-encryption methods (the metadata header's `encryption` field).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cipher {
@@ -110,31 +299,32 @@ pub enum Cipher {
 impl Cipher {
     pub const fn from_u16(v: u16) -> Cipher {
         match v {
-            0x8000 => Cipher::CbcDiffuser128,
-            0x8001 => Cipher::CbcDiffuser256,
-            0x8002 => Cipher::Cbc128,
-            0x8003 => Cipher::Cbc256,
-            0x8004 => Cipher::XtsAes128,
-            0x8005 => Cipher::XtsAes256,
+            method::AES_128_CBC_DIFFUSER => Cipher::CbcDiffuser128,
+            method::AES_256_CBC_DIFFUSER => Cipher::CbcDiffuser256,
+            method::AES_128_CBC => Cipher::Cbc128,
+            method::AES_256_CBC => Cipher::Cbc256,
+            method::AES_128_XTS => Cipher::XtsAes128,
+            method::AES_256_XTS => Cipher::XtsAes256,
             v => Cipher::Unknown(v),
         }
     }
     pub const fn to_u16(self) -> u16 {
         match self {
-            Cipher::CbcDiffuser128 => 0x8000,
-            Cipher::CbcDiffuser256 => 0x8001,
-            Cipher::Cbc128 => 0x8002,
-            Cipher::Cbc256 => 0x8003,
-            Cipher::XtsAes128 => 0x8004,
-            Cipher::XtsAes256 => 0x8005,
+            Cipher::CbcDiffuser128 => method::AES_128_CBC_DIFFUSER,
+            Cipher::CbcDiffuser256 => method::AES_256_CBC_DIFFUSER,
+            Cipher::Cbc128 => method::AES_128_CBC,
+            Cipher::Cbc256 => method::AES_256_CBC,
+            Cipher::XtsAes128 => method::AES_128_XTS,
+            Cipher::XtsAes256 => method::AES_256_XTS,
             Cipher::Unknown(v) => v,
         }
     }
     /// FVEK length for the ciphers paguro reads; `None`: refused.
     pub const fn key_len(self) -> Option<usize> {
         match self {
-            Cipher::XtsAes128 => Some(32),
-            Cipher::XtsAes256 => Some(64),
+            // XTS: two AES keys (data and tweak).
+            Cipher::XtsAes128 => Some(2 * AES_128_KEY_LEN),
+            Cipher::XtsAes256 => Some(2 * AES_256_KEY_LEN),
             _ => None,
         }
     }
@@ -250,6 +440,9 @@ fn arr<const N: usize>(b: &[u8], at: usize) -> Option<[u8; N]> {
     b.get(at..at.checked_add(N)?)?.try_into().ok()
 }
 
+/// The reflected IEEE 802.3 CRC-32 polynomial.
+const CRC32_POLY_REFLECTED: u32 = 0xedb8_8320;
+
 #[allow(clippy::indexing_slicing)] // const context: `i < 256` by the loop bound
 const CRC_TABLE: [u32; 256] = {
     let mut t = [0u32; 256];
@@ -259,7 +452,7 @@ const CRC_TABLE: [u32; 256] = {
         let mut k = 0;
         while k < 8 {
             c = if c & 1 != 0 {
-                0xedb8_8320 ^ (c >> 1)
+                CRC32_POLY_REFLECTED ^ (c >> 1)
             } else {
                 c >> 1
             };
@@ -305,7 +498,10 @@ pub struct VolumeHeader {
 
 /// Parse the volume's first sector (at least 512 bytes of it).
 pub fn parse_volume_header(s: &[u8]) -> Result<VolumeHeader> {
-    let oem = s.get(3..11).ok_or(BdeError::NotBitLocker)?;
+    let oem_at = offset_of!(BootSector, oem_id);
+    let oem = s
+        .get(oem_at..oem_at + SIGNATURE.len())
+        .ok_or(BdeError::NotBitLocker)?;
     let id_at = if oem == SIGNATURE {
         HEADER_ID_OFFSET
     } else if oem == TOGO_SIGNATURE {
@@ -313,12 +509,12 @@ pub fn parse_volume_header(s: &[u8]) -> Result<VolumeHeader> {
     } else {
         return Err(BdeError::NotBitLocker);
     };
-    let id: [u8; 16] = arr(s, id_at).ok_or(BdeError::NotBitLocker)?;
+    let id: [u8; IDENTIFIER_LEN] = arr(s, id_at).ok_or(BdeError::NotBitLocker)?;
     let eow = if id == GUID_NORMAL {
         false
     } else if id == GUID_EOW {
         true
-    } else if oem == SIGNATURE && s.get(..3) == Some(&[0xeb, 0x52, 0x90][..]) {
+    } else if oem == SIGNATURE && s.get(..VISTA_JUMP.len()) == Some(&VISTA_JUMP[..]) {
         return Err(BdeError::Vista);
     } else if oem == TOGO_SIGNATURE {
         // An ordinary FAT32 volume formatted by Windows.
@@ -326,16 +522,18 @@ pub fn parse_volume_header(s: &[u8]) -> Result<VolumeHeader> {
     } else {
         return Err(BdeError::UnknownIdentifier);
     };
-    if s.get(510..512) != Some(&[0x55, 0xaa][..]) {
+    let sig_at = offset_of!(BootSector, boot_signature);
+    if s.get(sig_at..sig_at + BOOT_SIGNATURE.len()) != Some(&BOOT_SIGNATURE[..]) {
         return Err(BdeError::BootSignature);
     }
-    let bps = le16(s, 11).ok_or(BdeError::NotBitLocker)?;
-    if bps != 512 && bps != 4096 {
+    let bps = le16(s, offset_of!(BootSector, bytes_per_sector)).ok_or(BdeError::NotBitLocker)?;
+    if !SECTOR_SIZES.contains(&bps) {
         return Err(BdeError::SectorSize(bps));
     }
     let mut offs = [0u64; 3];
     for (i, o) in offs.iter_mut().enumerate() {
-        *o = le64(s, id_at + 16 + 8 * i).ok_or(BdeError::NotBitLocker)?;
+        *o =
+            le64(s, id_at + IDENTIFIER_LEN + size_of::<u64>() * i).ok_or(BdeError::NotBitLocker)?;
     }
     let a = u64::from(bps);
     let [x, y, z] = offs;
@@ -358,8 +556,8 @@ pub fn parse_volume_header(s: &[u8]) -> Result<VolumeHeader> {
 /// tag, ciphertext.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ccm<'a> {
-    pub nonce: [u8; 12],
-    pub tag: [u8; 16],
+    pub nonce: [u8; CCM_NONCE_LEN],
+    pub tag: [u8; CCM_TAG_LEN],
     pub ciphertext: &'a [u8],
 }
 
@@ -367,8 +565,8 @@ impl<'a> Ccm<'a> {
     /// The data of an `AES_CCM` entry.
     pub fn parse(data: &'a [u8]) -> Result<Ccm<'a>> {
         let mut r = Reader::new(data);
-        let nonce = *r.array::<12>().map_err(|_| BdeError::BadCcm)?;
-        let tag = *r.array::<16>().map_err(|_| BdeError::BadCcm)?;
+        let nonce = *r.array::<CCM_NONCE_LEN>().map_err(|_| BdeError::BadCcm)?;
+        let tag = *r.array::<CCM_TAG_LEN>().map_err(|_| BdeError::BadCcm)?;
         let ciphertext = r.rest();
         if ciphertext.len() < ENTRY_HEADER_LEN || ciphertext.len() > MAX_WRAPPED {
             return Err(BdeError::BadCcm);
@@ -417,7 +615,9 @@ impl<'a> Iterator for Entries<'a> {
             return None;
         }
         let r = (|| {
-            let size = usize::from(le16(self.rest, 0).ok_or(BdeError::EntryOverruns)?);
+            let size = usize::from(
+                le16(self.rest, offset_of!(EntryHeader, size)).ok_or(BdeError::EntryOverruns)?,
+            );
             if size == 0 {
                 if self.rest.iter().any(|&b| b != 0) {
                     return Err(BdeError::TrailingGarbage);
@@ -437,9 +637,12 @@ impl<'a> Iterator for Entries<'a> {
             self.rest = tail;
             self.left -= 1;
             Ok(Some(Entry {
-                entry_type: le16(e, 2).ok_or(BdeError::EntryOverruns)?,
-                value_type: le16(e, 4).ok_or(BdeError::EntryOverruns)?,
-                version: le16(e, 6).ok_or(BdeError::EntryOverruns)?,
+                entry_type: le16(e, offset_of!(EntryHeader, entry_type))
+                    .ok_or(BdeError::EntryOverruns)?,
+                value_type: le16(e, offset_of!(EntryHeader, value_type))
+                    .ok_or(BdeError::EntryOverruns)?,
+                version: le16(e, offset_of!(EntryHeader, version))
+                    .ok_or(BdeError::EntryOverruns)?,
                 data: e.get(ENTRY_HEADER_LEN..).ok_or(BdeError::EntryOverruns)?,
             }))
         })();
@@ -469,7 +672,7 @@ pub struct Key<'a> {
 pub fn parse_key(plain: &[u8]) -> Result<Key<'_>> {
     let mut it = Entries::new(plain, 1);
     let e = it.next().ok_or(BdeError::BadKey)??;
-    let whole = usize::from(le16(plain, 0).ok_or(BdeError::BadKey)?);
+    let whole = usize::from(le16(plain, offset_of!(EntryHeader, size)).ok_or(BdeError::BadKey)?);
     if e.value_type != value::KEY || whole != plain.len() {
         return Err(BdeError::BadKey);
     }
@@ -477,12 +680,23 @@ pub fn parse_key(plain: &[u8]) -> Result<Key<'_>> {
 }
 
 fn key_value(data: &[u8]) -> Result<Key<'_>> {
-    let method = le32(data, 0).ok_or(BdeError::BadKey)?;
-    let key = data.get(4..).ok_or(BdeError::BadKey)?;
+    let method = le32(data, offset_of!(KeyValue, method)).ok_or(BdeError::BadKey)?;
+    let key = data.get(size_of::<KeyValue>()..).ok_or(BdeError::BadKey)?;
     if key.is_empty() {
         return Err(BdeError::BadKey);
     }
     Ok(Key { method, key })
+}
+
+/// VMK protection types (libbde §3.5.3 "Key protection types").
+pub mod protection {
+    pub const CLEAR_KEY: u16 = 0x0000;
+    pub const TPM: u16 = 0x0100;
+    pub const STARTUP_KEY: u16 = 0x0200;
+    pub const TPM_PIN: u16 = 0x0500;
+    pub const RECOVERY_PASSWORD: u16 = 0x0800;
+    pub const SMART_CARD: u16 = 0x1000;
+    pub const PASSWORD: u16 = 0x2000;
 }
 
 /// How a VMK is protected (the VMK entry's `protection` field).
@@ -504,13 +718,13 @@ pub enum ProtectorKind {
 impl ProtectorKind {
     pub const fn from_u16(v: u16) -> ProtectorKind {
         match v {
-            0x0000 => ProtectorKind::ClearKey,
-            0x0100 => ProtectorKind::Tpm,
-            0x0200 => ProtectorKind::StartupKey,
-            0x0500 => ProtectorKind::TpmPin,
-            0x0800 => ProtectorKind::RecoveryPassword,
-            0x1000 => ProtectorKind::SmartCard,
-            0x2000 => ProtectorKind::Password,
+            protection::CLEAR_KEY => ProtectorKind::ClearKey,
+            protection::TPM => ProtectorKind::Tpm,
+            protection::STARTUP_KEY => ProtectorKind::StartupKey,
+            protection::TPM_PIN => ProtectorKind::TpmPin,
+            protection::RECOVERY_PASSWORD => ProtectorKind::RecoveryPassword,
+            protection::SMART_CARD => ProtectorKind::SmartCard,
+            protection::PASSWORD => ProtectorKind::Password,
             v => ProtectorKind::Other(v),
         }
     }
@@ -531,22 +745,26 @@ impl ProtectorKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Protector<'a> {
     /// The protector's GUID, as stored (mixed-endian).
-    pub id: [u8; 16],
+    pub id: [u8; VMK_ID_LEN],
     pub kind: ProtectorKind,
     /// The stretch-key salt (password and recovery-password protectors).
-    pub salt: Option<[u8; 16]>,
+    pub salt: Option<[u8; SALT_LEN]>,
     /// The clear key (clear-key protector).
-    pub clear_key: Option<[u8; 32]>,
+    pub clear_key: Option<[u8; KEY_256_LEN]>,
     /// The VMK wrapped under the protector's key.
     pub wrapped_vmk: Option<Ccm<'a>>,
 }
 
-const VMK_FIXED: usize = 28;
+const VMK_FIXED: usize = size_of::<VmkHeader>();
+const VMK_ID_LEN: usize = field_size(|v: VmkHeader| v.id);
+const SALT_LEN: usize = field_size(|v: StretchKeyValue| v.salt);
 
 impl<'a> Protector<'a> {
     fn parse(data: &'a [u8]) -> Result<Protector<'a>> {
-        let id: [u8; 16] = arr(data, 0).ok_or(BdeError::BadVmk)?;
-        let kind = ProtectorKind::from_u16(le16(data, 26).ok_or(BdeError::BadVmk)?);
+        let id: [u8; VMK_ID_LEN] = arr(data, offset_of!(VmkHeader, id)).ok_or(BdeError::BadVmk)?;
+        let kind = ProtectorKind::from_u16(
+            le16(data, offset_of!(VmkHeader, protection)).ok_or(BdeError::BadVmk)?,
+        );
         let nested = data.get(VMK_FIXED..).ok_or(BdeError::BadVmk)?;
         let mut p = Protector {
             id,
@@ -568,8 +786,12 @@ impl<'a> Protector<'a> {
                 value::STRETCH_KEY => {
                     stretch += 1;
                     // method u32 | salt[16] | nested (ignored)
-                    le32(e.data, 0).ok_or(BdeError::BadStretchKey)?;
-                    p.salt = Some(arr(e.data, 4).ok_or(BdeError::BadStretchKey)?);
+                    le32(e.data, offset_of!(StretchKeyValue, method))
+                        .ok_or(BdeError::BadStretchKey)?;
+                    p.salt = Some(
+                        arr(e.data, offset_of!(StretchKeyValue, salt))
+                            .ok_or(BdeError::BadStretchKey)?,
+                    );
                 }
                 value::KEY => {
                     keys += 1;
@@ -620,7 +842,7 @@ pub struct Block<'a> {
     /// Where the boot sectors were relocated to (bytes).
     pub header_offset: u64,
     /// The volume identifier (as stored).
-    pub volume_id: [u8; 16],
+    pub volume_id: [u8; VOLUME_ID_LEN],
     pub next_nonce: u32,
     pub cipher: Cipher,
     pub created: u64,
@@ -628,6 +850,8 @@ pub struct Block<'a> {
     /// Windows 8+: the block's SHA-256, wrapped under the VMK.
     pub validation: Option<Ccm<'a>>,
 }
+
+const VOLUME_ID_LEN: usize = field_size(|m: MetadataHeader| m.volume_id);
 
 /// Encryption states Windows writes (`current_state` / `next_state`).
 pub mod state {
@@ -643,51 +867,69 @@ pub mod state {
 /// names the copy in errors; `hdr` is the volume header it must agree with.
 pub fn parse_block<'a>(region: &'a [u8], copy: u8, hdr: &VolumeHeader) -> Result<Block<'a>> {
     let region = region.get(..REGION_SIZE as usize).unwrap_or(region);
-    if region.get(..8) != Some(&SIGNATURE[..]) {
+    if region.get(..SIGNATURE.len()) != Some(&SIGNATURE[..]) {
         return Err(BdeError::BlockSignature(copy));
     }
     let f = |at| le16(region, at).ok_or(BdeError::BlockSize);
-    let size = usize::from(f(8)?) * 16;
-    let version = f(10)?;
-    if version != 2 {
+    let size = usize::from(f(offset_of!(BlockHeader, size))?) * BLOCK_SIZE_UNIT;
+    let version = f(offset_of!(BlockHeader, version))?;
+    if version != BLOCK_VERSION {
         return Err(BdeError::BlockVersion(version));
     }
-    if size < BLOCK_HEADER_LEN + METADATA_HEADER_LEN || size.saturating_add(8) > region.len() {
+    if size < BLOCK_HEADER_LEN + METADATA_HEADER_LEN
+        || size.saturating_add(VALIDATION_HEADER_LEN) > region.len()
+    {
         return Err(BdeError::BlockSize);
     }
     let raw = region.get(..size).ok_or(BdeError::BlockSize)?;
     let g64 = |at| le64(raw, at).ok_or(BdeError::BlockSize);
     let g32 = |at| le32(raw, at).ok_or(BdeError::BlockSize);
-    let metadata_offsets = [g64(32)?, g64(40)?, g64(48)?];
+    let offs_at = offset_of!(BlockHeader, metadata_offsets);
+    let metadata_offsets = [
+        g64(offs_at)?,
+        g64(offs_at + size_of::<u64>())?,
+        g64(offs_at + 2 * size_of::<u64>())?,
+    ];
     if metadata_offsets != hdr.metadata_offsets {
         return Err(BdeError::BlockLocation);
     }
 
     // Validation: size u16 | version u16 | crc32 u32 | (v2) one AES-CCM entry.
     let v = region.get(size..).ok_or(BdeError::Validation(copy))?;
-    let vsize = usize::from(le16(v, 0).ok_or(BdeError::Validation(copy))?);
-    let vver = le16(v, 2).ok_or(BdeError::Validation(copy))?;
-    let crc = le32(v, 4).ok_or(BdeError::Validation(copy))?;
+    let vsize =
+        usize::from(le16(v, offset_of!(ValidationHeader, size)).ok_or(BdeError::Validation(copy))?);
+    let vver = le16(v, offset_of!(ValidationHeader, version)).ok_or(BdeError::Validation(copy))?;
+    let crc = le32(v, offset_of!(ValidationHeader, crc32)).ok_or(BdeError::Validation(copy))?;
     // `vsize` runs to the region's end (Windows); only the header and one
     // entry are read, so a caller may hand in less than the whole region.
-    if vsize < 8 || vsize > REGION_SIZE as usize - size || !(1..=2).contains(&vver) {
+    if vsize < VALIDATION_HEADER_LEN
+        || vsize > REGION_SIZE as usize - size
+        || !(VALIDATION_VERSION_CRC..=VALIDATION_VERSION_HASH).contains(&vver)
+    {
         return Err(BdeError::Validation(copy));
     }
     if crc32(raw) != crc {
         // A cipher paguro never reads is the better reason to give: the one
         // Windows 7 sample (AES-CBC, diffuser) fails its own CRC.
-        if let Some(c) = le16(raw, BLOCK_HEADER_LEN + 36).map(Cipher::from_u16) {
+        if let Some(c) = le16(
+            raw,
+            BLOCK_HEADER_LEN + offset_of!(MetadataHeader, encryption),
+        )
+        .map(Cipher::from_u16)
+        {
             if c.key_len().is_none() {
                 return Err(BdeError::UnsupportedCipher(c.to_u16()));
             }
         }
         return Err(BdeError::Checksum(copy));
     }
-    let (validation, vlen) = if vver == 2 {
+    let (validation, vlen) = if vver == VALIDATION_VERSION_HASH {
         let body = v
-            .get(8..vsize.min(v.len()))
+            .get(VALIDATION_HEADER_LEN..vsize.min(v.len()))
             .ok_or(BdeError::Validation(copy))?;
-        let n = usize::from(le16(body, 0).ok_or(BdeError::Validation(copy))?);
+        let n = usize::from(
+            le16(body, offset_of!(EntryHeader, size)).ok_or(BdeError::Validation(copy))?,
+        );
         let e = Entries::new(body.get(..n).ok_or(BdeError::Validation(copy))?, 1)
             .next()
             .ok_or(BdeError::Validation(copy))?
@@ -697,10 +939,10 @@ pub fn parse_block<'a>(region: &'a [u8], copy: u8, hdr: &VolumeHeader) -> Result
         }
         (
             Some(Ccm::parse(e.data).map_err(|_| BdeError::Validation(copy))?),
-            8 + n,
+            VALIDATION_HEADER_LEN + n,
         )
     } else {
-        (None, 8)
+        (None, VALIDATION_HEADER_LEN)
     };
     let agreed = region
         .get(..size + vlen)
@@ -711,10 +953,10 @@ pub fn parse_block<'a>(region: &'a [u8], copy: u8, hdr: &VolumeHeader) -> Result
     let m = raw
         .get(BLOCK_HEADER_LEN..)
         .ok_or(BdeError::MetadataHeader)?;
-    let msize = le32(m, 0).ok_or(BdeError::MetadataHeader)? as usize;
-    if le32(m, 4) != Some(1)
-        || le32(m, 8) != Some(METADATA_HEADER_LEN as u32)
-        || le32(m, 12) != Some(msize as u32)
+    let msize = le32(m, offset_of!(MetadataHeader, size)).ok_or(BdeError::MetadataHeader)? as usize;
+    if le32(m, offset_of!(MetadataHeader, version)) != Some(METADATA_VERSION)
+        || le32(m, offset_of!(MetadataHeader, header_size)) != Some(METADATA_HEADER_LEN as u32)
+        || le32(m, offset_of!(MetadataHeader, size_copy)) != Some(msize as u32)
         || msize < METADATA_HEADER_LEN
         || msize > m.len()
     {
@@ -726,17 +968,20 @@ pub fn parse_block<'a>(region: &'a [u8], copy: u8, hdr: &VolumeHeader) -> Result
     Ok(Block {
         raw,
         agreed,
-        current_state: f(12)?,
-        next_state: f(14)?,
-        encrypted_size: g64(16)?,
-        conversion_size: g32(24)?,
-        header_sectors: g32(28)?,
+        current_state: f(offset_of!(BlockHeader, current_state))?,
+        next_state: f(offset_of!(BlockHeader, next_state))?,
+        encrypted_size: g64(offset_of!(BlockHeader, encrypted_size))?,
+        conversion_size: g32(offset_of!(BlockHeader, conversion_size))?,
+        header_sectors: g32(offset_of!(BlockHeader, header_sectors))?,
         metadata_offsets,
-        header_offset: g64(56)?,
-        volume_id: arr(m, 16).ok_or(BdeError::MetadataHeader)?,
-        next_nonce: le32(m, 32).ok_or(BdeError::MetadataHeader)?,
-        cipher: Cipher::from_u16(le16(m, 36).ok_or(BdeError::MetadataHeader)?),
-        created: le64(m, 40).ok_or(BdeError::MetadataHeader)?,
+        header_offset: g64(offset_of!(BlockHeader, header_offset))?,
+        volume_id: arr(m, offset_of!(MetadataHeader, volume_id)).ok_or(BdeError::MetadataHeader)?,
+        next_nonce: le32(m, offset_of!(MetadataHeader, next_nonce))
+            .ok_or(BdeError::MetadataHeader)?,
+        cipher: Cipher::from_u16(
+            le16(m, offset_of!(MetadataHeader, encryption)).ok_or(BdeError::MetadataHeader)?,
+        ),
+        created: le64(m, offset_of!(MetadataHeader, created)).ok_or(BdeError::MetadataHeader)?,
         entries,
         validation,
     })
@@ -780,8 +1025,8 @@ impl<'a> Metadata<'a> {
         let mut m = Metadata {
             block,
             fvek: Ccm {
-                nonce: [0; 12],
-                tag: [0; 16],
+                nonce: [0; CCM_NONCE_LEN],
+                tag: [0; CCM_TAG_LEN],
                 ciphertext: &[],
             },
             volume_header: (0, 0),
@@ -827,10 +1072,14 @@ impl<'a> Metadata<'a> {
                     }
                     vhb = true;
                     m.volume_header = (
-                        le64(e.data, 0).ok_or(BdeError::Relocation)?,
-                        le64(e.data, 8).ok_or(BdeError::Relocation)?,
+                        le64(e.data, offset_of!(OffsetAndSize, offset))
+                            .ok_or(BdeError::Relocation)?,
+                        le64(e.data, offset_of!(OffsetAndSize, size))
+                            .ok_or(BdeError::Relocation)?,
                     );
-                    m.extra_region = parse_extra_region(e.data.get(16..).unwrap_or(&[]))?;
+                    m.extra_region = parse_extra_region(
+                        e.data.get(size_of::<OffsetAndSize>()..).unwrap_or(&[]),
+                    )?;
                 }
                 entry::DESCRIPTION => {
                     if e.value_type != value::UNICODE {
@@ -862,9 +1111,19 @@ impl<'a> Metadata<'a> {
     }
 }
 
+/// The head of the structure Windows 10+ appends to the volume-header
+/// entry: a u16 tag, then its own length.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct ExtraRegionHead {
+    tag: u16,
+    len: u16,
+}
+
 /// Smallest trailing structure: its u16 tag and length, then at least
 /// one u32 before the region's offset and size.
-const EXTRA_MIN: usize = 4 + 4 + 16;
+const EXTRA_MIN: usize =
+    size_of::<ExtraRegionHead>() + size_of::<u32>() + size_of::<OffsetAndSize>();
 
 /// The structure Windows 10+ writes after the volume-header entry's offset
 /// and size: `u16 (5 in every sample) | u16 length (its own, 76 in every
@@ -876,14 +1135,15 @@ pub fn parse_extra_region(rest: &[u8]) -> Result<Option<(u64, u64)>> {
     if rest.is_empty() {
         return Ok(None);
     }
-    let len = usize::from(le16(rest, 2).ok_or(BdeError::ExtraRegion)?);
+    let len =
+        usize::from(le16(rest, offset_of!(ExtraRegionHead, len)).ok_or(BdeError::ExtraRegion)?);
     if rest.len() < EXTRA_MIN || len != rest.len() {
         return Err(BdeError::ExtraRegion);
     }
-    let at = len - 16;
+    let at = len - size_of::<OffsetAndSize>();
     Ok(Some((
-        le64(rest, at).ok_or(BdeError::ExtraRegion)?,
-        le64(rest, at + 8).ok_or(BdeError::ExtraRegion)?,
+        le64(rest, at + offset_of!(OffsetAndSize, offset)).ok_or(BdeError::ExtraRegion)?,
+        le64(rest, at + offset_of!(OffsetAndSize, size)).ok_or(BdeError::ExtraRegion)?,
     )))
 }
 
@@ -892,18 +1152,18 @@ pub fn parse_extra_region(rest: &[u8]) -> Result<Option<(u64, u64)>> {
 /// entry holding an `EXTERNAL_KEY` value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StartupKey {
-    pub id: [u8; 16],
-    pub key: [u8; 32],
+    pub id: [u8; VMK_ID_LEN],
+    pub key: [u8; KEY_256_LEN],
 }
 
 pub fn parse_startup_key(file: &[u8]) -> Result<StartupKey> {
     let bad = BdeError::BadStartupKey;
-    let size = le32(file, 0).ok_or(bad)? as usize;
+    let size = le32(file, offset_of!(MetadataHeader, size)).ok_or(bad)? as usize;
     if size != file.len()
-        || size > 4096
-        || le32(file, 4) != Some(1)
-        || le32(file, 8) != Some(METADATA_HEADER_LEN as u32)
-        || le32(file, 12) != Some(size as u32)
+        || size > MAX_STARTUP_KEY_FILE
+        || le32(file, offset_of!(MetadataHeader, version)) != Some(METADATA_VERSION)
+        || le32(file, offset_of!(MetadataHeader, header_size)) != Some(METADATA_HEADER_LEN as u32)
+        || le32(file, offset_of!(MetadataHeader, size_copy)) != Some(size as u32)
     {
         return Err(bad);
     }
@@ -918,16 +1178,17 @@ pub fn parse_startup_key(file: &[u8]) -> Result<StartupKey> {
             return Err(bad);
         }
         // guid[16] | modified u64 | nested: one KEY among others
-        let id: [u8; 16] = arr(e.data, 0).ok_or(bad)?;
+        let id: [u8; VMK_ID_LEN] = arr(e.data, offset_of!(ExternalKeyValue, id)).ok_or(bad)?;
         let mut key = None;
-        for n in Entries::new(e.data.get(24..).ok_or(bad)?, MAX_NESTED) {
+        let nested = e.data.get(size_of::<ExternalKeyValue>()..).ok_or(bad)?;
+        for n in Entries::new(nested, MAX_NESTED) {
             let n = n.map_err(|_| bad)?;
             if n.value_type == value::KEY {
                 if key.is_some() {
                     return Err(bad);
                 }
                 let k = key_value(n.data).map_err(|_| bad)?;
-                key = Some(<[u8; 32]>::try_from(k.key).map_err(|_| bad)?);
+                key = Some(<[u8; KEY_256_LEN]>::try_from(k.key).map_err(|_| bad)?);
             }
         }
         found = Some(StartupKey {
@@ -981,7 +1242,7 @@ impl Layout {
         let bps = u64::from(hdr.bytes_per_sector);
         // `VolumeHeader` is a plain struct: re-check what the map relies on
         // rather than trust that it came from `parse_volume_header`.
-        if bps != 512 && bps != 4096 {
+        if !SECTOR_SIZES.iter().any(|&z| u64::from(z) == bps) {
             return Err(BdeError::SectorSize(hdr.bytes_per_sector as u16));
         }
         if hdr.metadata_offsets.iter().any(|&o| o == 0 || o % bps != 0) {
@@ -1133,7 +1394,7 @@ impl Layout {
     /// relocated copy, the three metadata regions, and (Windows 10+) the
     /// further region beside them — five or six ranges, none empty.
     pub fn reserved_ranges(&self) -> impl Iterator<Item = (u64, u64)> + use<> {
-        let s = |o: u64, l: u64| (o / 512, l / 512);
+        let s = |o: u64, l: u64| (o / SECTOR, l / SECTOR);
         [
             Some(s(0, self.reloc_len)),
             Some(s(self.reloc_offset, self.reloc_len)),
@@ -1164,7 +1425,7 @@ impl Layout {
             metadata_offsets: self.metadata_offsets,
             region_size: REGION_SIZE,
             boot_sector_reloc_offset: self.reloc_offset,
-            boot_sector_reloc_sectors: u32::try_from(self.reloc_len / 512).unwrap_or(u32::MAX),
+            boot_sector_reloc_sectors: u32::try_from(self.reloc_len / SECTOR).unwrap_or(u32::MAX),
             encrypted_size: self.encrypted_size,
             sector_size: self.bytes_per_sector,
             extra_region_offset: self.extra_region.unwrap_or(0),

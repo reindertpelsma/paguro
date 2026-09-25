@@ -43,6 +43,7 @@ pub mod guid;
 pub mod handoff;
 pub mod hwid;
 pub mod ini;
+pub mod layout;
 pub mod ntfs;
 pub mod range;
 pub mod recorded;

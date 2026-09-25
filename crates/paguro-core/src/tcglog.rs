@@ -23,6 +23,23 @@ pub const MAX_LOG: usize = 4 * 1024 * 1024;
 pub const MAX_EVENTS: usize = 16 * 1024;
 pub const MAX_ALGS: usize = 8;
 pub const ALG_SHA256: u16 = 0x000B;
+/// `TPM_ALG_SHA1` (TCG Algorithm Registry): the header event's digest and the
+/// filler bank [`write`] emits.
+pub const ALG_SHA1: u16 = 0x0004;
+pub const SHA1_LEN: usize = 20;
+pub const SHA256_LEN: usize = 32;
+/// Largest digest size accepted in the algorithm table (SHA-512).
+pub const MAX_DIGEST_LEN: usize = 64;
+/// The PCR whose Secure Boot configuration prefix the pre-flight predicts.
+pub const PCR_SECURE_BOOT: u32 = 7;
+
+/// `TCG_EfiSpecIDEvent` (PC Client PFP §10.4.5.1): after the signature,
+/// `platformClass` u32, `specVersionMinor`, `specVersionMajor`, `specErrata`,
+/// `uintnSize` (one byte each) precede `numberOfAlgorithms`.
+const SPEC_ID_FIXED_LEN: usize = 8;
+/// `uintnSize` value for UINTN = u64 (2 = 64-bit), and the spec version 2.0.
+const SPEC_ID_VERSION_MAJOR: u8 = 2;
+const SPEC_ID_UINTN_64: u8 = 2;
 
 pub const EV_NO_ACTION: u32 = 0x03;
 pub const EV_SEPARATOR: u32 = 0x04;
@@ -51,7 +68,7 @@ pub enum LogError {
 pub struct Event<'a> {
     pub pcr: u32,
     pub kind: u32,
-    pub sha256: &'a [u8; 32],
+    pub sha256: &'a [u8; SHA256_LEN],
     pub data: &'a [u8],
 }
 
@@ -65,18 +82,22 @@ pub fn walk<'a>(log: &'a [u8], mut visit: impl FnMut(Event<'a>)) -> Result<usize
     // Header event, SHA-1 format.
     r.u32_le().map_err(|_| LogError::Truncated)?;
     let kind = r.u32_le().map_err(|_| LogError::Truncated)?;
-    r.take(20).map_err(|_| LogError::Truncated)?;
+    r.take(SHA1_LEN).map_err(|_| LogError::Truncated)?;
     let size = r.u32_le().map_err(|_| LogError::Truncated)? as usize;
     let spec = r.take(size).map_err(|_| LogError::Truncated)?;
     if kind != EV_NO_ACTION {
         return Err(LogError::NotCryptoAgile);
     }
     let mut s = Reader::new(spec);
-    if s.array::<16>().map_err(|_| LogError::NotCryptoAgile)? != SPEC_ID_SIGNATURE {
+    if s.array::<{ SPEC_ID_SIGNATURE.len() }>()
+        .map_err(|_| LogError::NotCryptoAgile)?
+        != SPEC_ID_SIGNATURE
+    {
         return Err(LogError::NotCryptoAgile);
     }
     // platformClass u32, minor, major, errata, uintnSize.
-    s.take(8).map_err(|_| LogError::NotCryptoAgile)?;
+    s.take(SPEC_ID_FIXED_LEN)
+        .map_err(|_| LogError::NotCryptoAgile)?;
     let n_algs = s.u32_le().map_err(|_| LogError::NotCryptoAgile)? as usize;
     if n_algs == 0 || n_algs > MAX_ALGS {
         return Err(LogError::BadAlgorithms);
@@ -85,13 +106,16 @@ pub fn walk<'a>(log: &'a [u8], mut visit: impl FnMut(Event<'a>)) -> Result<usize
     for slot in algs.iter_mut().take(n_algs) {
         let id = s.u16_le().map_err(|_| LogError::BadAlgorithms)?;
         let len = usize::from(s.u16_le().map_err(|_| LogError::BadAlgorithms)?);
-        if len == 0 || len > 64 {
+        if len == 0 || len > MAX_DIGEST_LEN {
             return Err(LogError::BadAlgorithms);
         }
         *slot = (id, len);
     }
     let algs = algs.get(..n_algs).unwrap_or(&[]);
-    if !algs.iter().any(|&(id, len)| id == ALG_SHA256 && len == 32) {
+    if !algs
+        .iter()
+        .any(|&(id, len)| id == ALG_SHA256 && len == SHA256_LEN)
+    {
         return Err(LogError::NoSha256);
     }
     let mut count = 0usize;
@@ -116,7 +140,8 @@ pub fn walk<'a>(log: &'a [u8], mut visit: impl FnMut(Event<'a>)) -> Result<usize
                 .ok_or(LogError::UnknownAlgorithm)?;
             let d = r.take(len).map_err(|_| LogError::Truncated)?;
             if id == ALG_SHA256 {
-                sha256 = Some(<&[u8; 32]>::try_from(d).map_err(|_| LogError::BadAlgorithms)?);
+                sha256 =
+                    Some(<&[u8; SHA256_LEN]>::try_from(d).map_err(|_| LogError::BadAlgorithms)?);
             }
         }
         let size = r.u32_le().map_err(|_| LogError::Truncated)? as usize;
@@ -137,11 +162,11 @@ pub fn walk<'a>(log: &'a [u8], mut visit: impl FnMut(Event<'a>)) -> Result<usize
 /// path-independent part of PCR 7. Returns how many there were.
 pub fn driver_config_digests<'a>(
     log: &'a [u8],
-    mut visit: impl FnMut(&'a [u8; 32]),
+    mut visit: impl FnMut(&'a [u8; SHA256_LEN]),
 ) -> Result<usize, LogError> {
     let mut n = 0usize;
     walk(log, |e| {
-        if e.pcr == 7 && e.kind == EV_EFI_VARIABLE_DRIVER_CONFIG {
+        if e.pcr == PCR_SECURE_BOOT && e.kind == EV_EFI_VARIABLE_DRIVER_CONFIG {
             n += 1;
             visit(e.sha256);
         }
@@ -152,27 +177,34 @@ pub fn driver_config_digests<'a>(
 /// Write a log (tests, mock platforms): a Spec ID header with SHA-1 and
 /// SHA-256 banks, then `(pcr, type, sha256, data)` events whose SHA-1
 /// digest is a filler.
-pub fn write(events: &[(u32, u32, [u8; 32], &[u8])], out: &mut [u8]) -> Result<usize, Full> {
-    const SPEC_LEN: u32 = 16 + 8 + 4 + 2 * 4 + 1;
+pub fn write(
+    events: &[(u32, u32, [u8; SHA256_LEN], &[u8])],
+    out: &mut [u8],
+) -> Result<usize, Full> {
+    // signature | fixed fields | numberOfAlgorithms | 2 × (algId, digestSize)
+    // | vendorInfoSize.
+    const SPEC_LEN: u32 = (SPEC_ID_SIGNATURE.len() + SPEC_ID_FIXED_LEN + 4 + 2 * 4 + 1) as u32;
+    const N_BANKS: u32 = 2;
     let mut w = Writer::new(out);
     w.u32_le(0)?;
     w.u32_le(EV_NO_ACTION)?;
-    w.put(&[0; 20])?;
+    w.put(&[0; SHA1_LEN])?;
     w.u32_le(SPEC_LEN)?;
     w.put(SPEC_ID_SIGNATURE)?;
-    w.put(&[0, 0, 0, 0, 0, 2, 0, 2])?;
-    w.u32_le(2)?;
-    w.u16_le(0x0004)?;
-    w.u16_le(20)?;
+    // platformClass 0, specVersionMinor 0, major 2, errata 0, uintnSize 2.
+    w.put(&[0, 0, 0, 0, 0, SPEC_ID_VERSION_MAJOR, 0, SPEC_ID_UINTN_64])?;
+    w.u32_le(N_BANKS)?;
+    w.u16_le(ALG_SHA1)?;
+    w.u16_le(SHA1_LEN as u16)?;
     w.u16_le(ALG_SHA256)?;
-    w.u16_le(32)?;
+    w.u16_le(SHA256_LEN as u16)?;
     w.u8(0)?;
     for (pcr, kind, d, data) in events {
         w.u32_le(*pcr)?;
         w.u32_le(*kind)?;
-        w.u32_le(2)?;
-        w.u16_le(0x0004)?;
-        w.put(&[0xaa; 20])?;
+        w.u32_le(N_BANKS)?;
+        w.u16_le(ALG_SHA1)?;
+        w.put(&[0xaa; SHA1_LEN])?;
         w.u16_le(ALG_SHA256)?;
         w.put(d)?;
         w.u32_le(u32::try_from(data.len()).map_err(|_| Full)?)?;

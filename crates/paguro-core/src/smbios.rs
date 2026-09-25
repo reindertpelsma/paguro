@@ -15,7 +15,74 @@
 //! own structure's string set. Serial numbers and UUIDs are never read: the
 //! export identifies a *model* of machine, not a machine.
 
+use core::mem::{offset_of, size_of};
+
 use crate::bytes::Reader;
+
+/// `RawSMBIOSData` header (Win32 `GetSystemFirmwareTable`, "RSMB"). Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct RawSmbiosHeader {
+    used20_calling_method: u8,
+    smbios_major_version: u8,
+    smbios_minor_version: u8,
+    dmi_revision: u8,
+    length: u32,
+}
+const _: () = assert!(size_of::<RawSmbiosHeader>() == 8);
+
+/// Structure header (DMTF DSP0134 3.x §6.1.2). Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct StructureHeader {
+    kind: u8,
+    length: u8,
+    handle: u16,
+}
+const HEADER_LEN: usize = size_of::<StructureHeader>();
+const _: () = assert!(HEADER_LEN == 4);
+
+/// Leading fields of the BIOS Information structure, type 0 (DSP0134 §7.1).
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct BiosInformation {
+    header: StructureHeader,
+    vendor: u8,
+    bios_version: u8,
+}
+const _: () = assert!(offset_of!(BiosInformation, vendor) == 0x04);
+const _: () = assert!(offset_of!(BiosInformation, bios_version) == 0x05);
+
+/// Leading fields of the System Information structure, type 1 (DSP0134 §7.2).
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct SystemInformation {
+    header: StructureHeader,
+    manufacturer: u8,
+    product_name: u8,
+}
+const _: () = assert!(offset_of!(SystemInformation, manufacturer) == 0x04);
+const _: () = assert!(offset_of!(SystemInformation, product_name) == 0x05);
+
+/// Leading fields of the Baseboard Information structure, type 2 (DSP0134 §7.3).
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct BaseboardInformation {
+    header: StructureHeader,
+    manufacturer: u8,
+    product: u8,
+}
+const _: () = assert!(offset_of!(BaseboardInformation, manufacturer) == 0x04);
+const _: () = assert!(offset_of!(BaseboardInformation, product) == 0x05);
+
+/// Structure types (DSP0134 §7).
+const TYPE_BIOS_INFORMATION: u8 = 0;
+const TYPE_SYSTEM_INFORMATION: u8 = 1;
+const TYPE_BASEBOARD_INFORMATION: u8 = 2;
+const TYPE_END_OF_TABLE: u8 = 127;
+
+/// The double NUL that ends a structure's string set (DSP0134 §6.1.3).
+const STRING_SET_END: [u8; 2] = [0, 0];
 
 pub const MAX_BLOB: usize = 1024 * 1024;
 pub const MAX_STRUCTURES: usize = 4096;
@@ -58,7 +125,7 @@ impl<'a> Structure<'a> {
     /// The string whose 1-based index is at `offset` in the structure
     /// (offset counted from the start of the header, as SMBIOS tables are).
     fn string(&self, offset: usize) -> Option<&'a [u8]> {
-        let idx = *self.formatted.get(offset.checked_sub(4)?)?;
+        let idx = *self.formatted.get(offset.checked_sub(HEADER_LEN)?)?;
         if idx == 0 {
             return None;
         }
@@ -75,14 +142,17 @@ fn next<'a>(r: &mut Reader<'a>) -> Result<Structure<'a>, SmbiosError> {
     let len = usize::from(r.u8().map_err(|_| SmbiosError::Truncated)?);
     r.u16_le().map_err(|_| SmbiosError::Truncated)?;
     let formatted = r
-        .take(len.checked_sub(4).ok_or(SmbiosError::BadStructure)?)
+        .take(
+            len.checked_sub(HEADER_LEN)
+                .ok_or(SmbiosError::BadStructure)?,
+        )
         .map_err(|_| SmbiosError::Truncated)?;
     // The string set ends at the first double NUL; an empty set is "\0\0".
     let rest = r.rest();
     let mut end = None;
     let mut i = 0usize;
-    while let Some(pair) = rest.get(i..i + 2) {
-        if pair == [0, 0] {
+    while let Some(pair) = rest.get(i..i + STRING_SET_END.len()) {
+        if pair == STRING_SET_END {
             end = Some(i);
             break;
         }
@@ -90,7 +160,8 @@ fn next<'a>(r: &mut Reader<'a>) -> Result<Structure<'a>, SmbiosError> {
     }
     let end = end.ok_or(SmbiosError::BadStrings)?;
     let strings = r.take(end).map_err(|_| SmbiosError::BadStrings)?;
-    r.take(2).map_err(|_| SmbiosError::BadStrings)?;
+    r.take(STRING_SET_END.len())
+        .map_err(|_| SmbiosError::BadStrings)?;
     if strings.split(|&b| b == 0).any(|s| s.len() > MAX_STRING) {
         return Err(SmbiosError::BadStrings);
     }
@@ -129,23 +200,23 @@ pub fn parse(blob: &[u8]) -> Result<Dmi<'_>, SmbiosError> {
         }
         let s = next(&mut r)?;
         match s.kind {
-            0 if !seen0 => {
+            TYPE_BIOS_INFORMATION if !seen0 => {
                 seen0 = true;
-                dmi.bios_vendor = s.string(0x04);
-                dmi.bios_version = s.string(0x05);
+                dmi.bios_vendor = s.string(offset_of!(BiosInformation, vendor));
+                dmi.bios_version = s.string(offset_of!(BiosInformation, bios_version));
             }
-            1 if !seen1 => {
+            TYPE_SYSTEM_INFORMATION if !seen1 => {
                 seen1 = true;
-                dmi.sys_vendor = s.string(0x04);
-                dmi.product_name = s.string(0x05);
+                dmi.sys_vendor = s.string(offset_of!(SystemInformation, manufacturer));
+                dmi.product_name = s.string(offset_of!(SystemInformation, product_name));
             }
-            2 if !seen2 => {
+            TYPE_BASEBOARD_INFORMATION if !seen2 => {
                 seen2 = true;
-                dmi.board_vendor = s.string(0x04);
-                dmi.board_name = s.string(0x05);
+                dmi.board_vendor = s.string(offset_of!(BaseboardInformation, manufacturer));
+                dmi.board_name = s.string(offset_of!(BaseboardInformation, product));
             }
             // End-of-table; anything after it is padding firmware leaves.
-            127 => break,
+            TYPE_END_OF_TABLE => break,
             _ => {}
         }
     }

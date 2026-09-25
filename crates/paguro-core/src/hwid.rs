@@ -31,6 +31,35 @@ use crate::bytes::{Full, Writer};
 /// Longest hardware ID considered (Windows caps device IDs at 200 chars).
 pub const MAX_ID: usize = 256;
 
+/// Hex digits of each field in a Windows PnP hardware ID ("Identifiers for
+/// PCI Devices", "Identifiers for USB Devices", Windows Driver Kit docs).
+const VEN_DEV_DIGITS: usize = 4;
+const SUBSYS_DIGITS: usize = 8;
+const CC_DIGITS: usize = 6;
+const BYTE_DIGITS: usize = 2;
+/// `SUBSYS_`: subdevice in the high 16 bits, subvendor in the low 16.
+const SUBSYS_DEVICE_SHIFT: u32 = 16;
+
+/// An ACPI/PNP ID (ACPI 6.5 §6.1.5 `_HID`): a 3-character PNP or
+/// 4-character ACPI vendor prefix, then 4 hex digits.
+const PNP_ID_LEN: usize = 7;
+const ACPI_ID_LEN: usize = 8;
+const PNP_VENDOR_LEN: usize = 3;
+const ACPI_VENDOR_LEN: usize = 4;
+
+/// Hex digits of each `modalias` field (`scripts/mod/file2alias.c`).
+const PCI_ID_DIGITS: u32 = 8;
+const USB_ID_DIGITS: u32 = 4;
+const CLASS_BYTE_DIGITS: u32 = 2;
+/// PCI class code: base ‖ sub ‖ prog-if, one byte each.
+const CLASS_BASE_SHIFT: u32 = 16;
+const CLASS_SUB_SHIFT: u32 = 8;
+const BYTE_MASK: u32 = 0xff;
+const NIBBLE_BITS: u32 = 4;
+const NIBBLE_MASK: u32 = 0xf;
+/// ASCII DEL: the first byte past printable ASCII.
+const ASCII_DEL: u8 = 0x7f;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pci {
     pub vendor: u16,
@@ -88,15 +117,15 @@ pub fn pci<'a>(ids: impl IntoIterator<Item = &'a str>) -> Option<Pci> {
             continue;
         }
         if class.is_none() {
-            class = field(f, "CC_").and_then(hex::<6>);
+            class = field(f, "CC_").and_then(hex::<CC_DIGITS>);
         }
         let (Some(v), Some(d)) = (
-            field(f, "VEN_").and_then(hex::<4>),
-            field(f, "DEV_").and_then(hex::<4>),
+            field(f, "VEN_").and_then(hex::<VEN_DEV_DIGITS>),
+            field(f, "DEV_").and_then(hex::<VEN_DEV_DIGITS>),
         ) else {
             continue;
         };
-        let sub = field(f, "SUBSYS_").and_then(hex::<8>);
+        let sub = field(f, "SUBSYS_").and_then(hex::<SUBSYS_DIGITS>);
         let p = out.get_or_insert(Pci {
             vendor: v as u16,
             device: d as u16,
@@ -104,7 +133,7 @@ pub fn pci<'a>(ids: impl IntoIterator<Item = &'a str>) -> Option<Pci> {
         });
         if p.vendor == v as u16 && p.device == d as u16 && p.subvendor.is_none() {
             if let Some(s) = sub {
-                p.subdevice = Some((s >> 16) as u16);
+                p.subdevice = Some((s >> SUBSYS_DEVICE_SHIFT) as u16);
                 p.subvendor = Some(s as u16);
             }
         }
@@ -125,13 +154,19 @@ pub fn usb<'a>(ids: impl IntoIterator<Item = &'a str>) -> Option<Usb> {
             continue;
         }
         if class.is_none() {
-            class = field(f, "Class_").and_then(hex::<2>).map(|c| c as u8);
-            subclass = field(f, "SubClass_").and_then(hex::<2>).map(|c| c as u8);
-            protocol = field(f, "Prot_").and_then(hex::<2>).map(|c| c as u8);
+            class = field(f, "Class_")
+                .and_then(hex::<BYTE_DIGITS>)
+                .map(|c| c as u8);
+            subclass = field(f, "SubClass_")
+                .and_then(hex::<BYTE_DIGITS>)
+                .map(|c| c as u8);
+            protocol = field(f, "Prot_")
+                .and_then(hex::<BYTE_DIGITS>)
+                .map(|c| c as u8);
         }
         let (Some(v), Some(p)) = (
-            field(f, "VID_").and_then(hex::<4>),
-            field(f, "PID_").and_then(hex::<4>),
+            field(f, "VID_").and_then(hex::<VEN_DEV_DIGITS>),
+            field(f, "PID_").and_then(hex::<VEN_DEV_DIGITS>),
         ) else {
             continue;
         };
@@ -141,10 +176,14 @@ pub fn usb<'a>(ids: impl IntoIterator<Item = &'a str>) -> Option<Usb> {
             ..Usb::default()
         });
         if u.rev.is_none() {
-            u.rev = field(f, "REV_").and_then(hex::<4>).map(|r| r as u16);
+            u.rev = field(f, "REV_")
+                .and_then(hex::<VEN_DEV_DIGITS>)
+                .map(|r| r as u16);
         }
         if u.interface.is_none() {
-            u.interface = field(f, "MI_").and_then(hex::<2>).map(|i| i as u8);
+            u.interface = field(f, "MI_")
+                .and_then(hex::<BYTE_DIGITS>)
+                .map(|i| i as u8);
         }
     }
     out.map(|mut u| {
@@ -158,8 +197,8 @@ pub fn usb<'a>(ids: impl IntoIterator<Item = &'a str>) -> Option<Usb> {
 fn acpi_id_ok(s: &str) -> bool {
     let b = s.as_bytes();
     let (vendor, product) = match b.len() {
-        7 => b.split_at(3),
-        8 => b.split_at(4),
+        PNP_ID_LEN => b.split_at(PNP_VENDOR_LEN),
+        ACPI_ID_LEN => b.split_at(ACPI_VENDOR_LEN),
         _ => return false,
     };
     vendor
@@ -169,7 +208,7 @@ fn acpi_id_ok(s: &str) -> bool {
 }
 
 /// The ACPI ID in one hardware ID, written into `out` (at most 8 bytes).
-pub fn acpi<'o>(id: &str, out: &'o mut [u8; 8]) -> Option<&'o str> {
+pub fn acpi<'o>(id: &str, out: &'o mut [u8; ACPI_ID_LEN]) -> Option<&'o str> {
     let body = if let Some(rest) = id.strip_prefix('*') {
         rest
     } else {
@@ -181,7 +220,7 @@ pub fn acpi<'o>(id: &str, out: &'o mut [u8; 8]) -> Option<&'o str> {
     };
     let n = if let (Some(v), Some(d)) = (field(body, "VEN_"), field(body, "DEV_")) {
         let (v, d) = (v.as_bytes(), d.as_bytes());
-        if v.len() + d.len() > 8 {
+        if v.len() + d.len() > ACPI_ID_LEN {
             return None;
         }
         out.get_mut(..v.len())?.copy_from_slice(v);
@@ -189,7 +228,7 @@ pub fn acpi<'o>(id: &str, out: &'o mut [u8; 8]) -> Option<&'o str> {
         v.len() + d.len()
     } else {
         let b = body.as_bytes();
-        if b.len() > 8 {
+        if b.len() > ACPI_ID_LEN {
             return None;
         }
         out.get_mut(..b.len())?.copy_from_slice(b);
@@ -206,7 +245,7 @@ const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
 fn put_hex(w: &mut Writer<'_>, v: u32, digits: u32) -> Result<(), Full> {
     for i in (0..digits).rev() {
-        let nib = ((v >> (i * 4)) & 0xf) as usize;
+        let nib = ((v >> (i * NIBBLE_BITS)) & NIBBLE_MASK) as usize;
         w.u8(*HEX.get(nib).unwrap_or(&b'0'))?;
     }
     Ok(())
@@ -218,19 +257,23 @@ pub fn pci_modalias(p: &Pci, out: &mut [u8]) -> Result<usize, Full> {
     let mut w = Writer::new(out);
     let class = p.class.unwrap_or(0);
     w.put(b"pci:v")?;
-    put_hex(&mut w, u32::from(p.vendor), 8)?;
+    put_hex(&mut w, u32::from(p.vendor), PCI_ID_DIGITS)?;
     w.put(b"d")?;
-    put_hex(&mut w, u32::from(p.device), 8)?;
+    put_hex(&mut w, u32::from(p.device), PCI_ID_DIGITS)?;
     w.put(b"sv")?;
-    put_hex(&mut w, u32::from(p.subvendor.unwrap_or(0)), 8)?;
+    put_hex(&mut w, u32::from(p.subvendor.unwrap_or(0)), PCI_ID_DIGITS)?;
     w.put(b"sd")?;
-    put_hex(&mut w, u32::from(p.subdevice.unwrap_or(0)), 8)?;
+    put_hex(&mut w, u32::from(p.subdevice.unwrap_or(0)), PCI_ID_DIGITS)?;
     w.put(b"bc")?;
-    put_hex(&mut w, class >> 16, 2)?;
+    put_hex(&mut w, class >> CLASS_BASE_SHIFT, CLASS_BYTE_DIGITS)?;
     w.put(b"sc")?;
-    put_hex(&mut w, (class >> 8) & 0xff, 2)?;
+    put_hex(
+        &mut w,
+        (class >> CLASS_SUB_SHIFT) & BYTE_MASK,
+        CLASS_BYTE_DIGITS,
+    )?;
     w.put(b"i")?;
-    put_hex(&mut w, class & 0xff, 2)?;
+    put_hex(&mut w, class & BYTE_MASK, CLASS_BYTE_DIGITS)?;
     Ok(w.len())
 }
 
@@ -246,11 +289,11 @@ pub fn usb_modalias(u: &Usb, out: &mut [u8]) -> Result<usize, Full> {
         ((c(u.class), c(u.subclass), c(u.protocol)), (0, 0, 0))
     };
     w.put(b"usb:v")?;
-    put_hex(&mut w, u32::from(u.vendor), 4)?;
+    put_hex(&mut w, u32::from(u.vendor), USB_ID_DIGITS)?;
     w.put(b"p")?;
-    put_hex(&mut w, u32::from(u.product), 4)?;
+    put_hex(&mut w, u32::from(u.product), USB_ID_DIGITS)?;
     w.put(b"d")?;
-    put_hex(&mut w, u32::from(u.rev.unwrap_or(0)), 4)?;
+    put_hex(&mut w, u32::from(u.rev.unwrap_or(0)), USB_ID_DIGITS)?;
     for (tag, v) in [
         (&b"dc"[..], dev.0),
         (b"dsc", dev.1),
@@ -261,7 +304,7 @@ pub fn usb_modalias(u: &Usb, out: &mut [u8]) -> Result<usize, Full> {
         (b"in", c(u.interface)),
     ] {
         w.put(tag)?;
-        put_hex(&mut w, v, 2)?;
+        put_hex(&mut w, v, CLASS_BYTE_DIGITS)?;
     }
     Ok(w.len())
 }
@@ -290,7 +333,7 @@ pub struct DmiFields<'a> {
 /// characters except space and `:`.
 fn put_filtered(w: &mut Writer<'_>, s: &[u8]) -> Result<(), Full> {
     for &c in s {
-        if c > b' ' && c < 127 && c != b':' {
+        if c > b' ' && c < ASCII_DEL && c != b':' {
             w.u8(c)?;
         }
     }

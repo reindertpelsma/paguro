@@ -39,6 +39,46 @@ pub const DEFAULT_EFI: &str = "\\EFI\\BOOT\\BOOTAA64.EFI";
 pub const HEADER_COMMENT: &str = "# paguro configuration. Not hand-editable: use `paguro config`.";
 /// The section-name prefix of a boot entry.
 pub const ENTRY_PREFIX: &str = "Boot.";
+/// The only schema version (`[Paguro] version`).
+pub const VERSION: &str = "1";
+/// Characters NTFS/Win32 (and FAT long names) forbid in a path component,
+/// besides controls.
+const FORBIDDEN_PATH_CHARS: &str = "/:*?\"<>|";
+/// DEL, refused like the C0 controls below `' '`.
+const DEL: char = '\u{7f}';
+
+/// Section names of schema v1 (INTERFACES.md §3.2); boot entries are
+/// [`ENTRY_PREFIX`]`<name>`.
+pub mod section {
+    pub const PAGURO: &str = "Paguro";
+    pub const TPM: &str = "TPM";
+    pub const SETUP_TPM: &str = "SetupTPM";
+    pub const PASSPHRASE: &str = "Passphrase";
+    pub const UI: &str = "UI";
+}
+
+/// Keys of schema v1 (INTERFACES.md §3.2), by section.
+pub mod key {
+    /// `[Paguro]`
+    pub const VERSION: &str = "version";
+    pub const DEFAULT: &str = "default";
+    /// `[Boot.<name>]`
+    pub const VOLUME: &str = "volume";
+    pub const ROOT: &str = "root";
+    pub const EFI_DISK: &str = "efi_disk";
+    pub const EFI: &str = "efi";
+    pub const EFI_FILE: &str = "efi_file";
+    /// `[TPM]`, `[SetupTPM]`, `[Passphrase]`
+    pub const ENABLED: &str = "enabled";
+    /// `[UI]`
+    pub const THEME: &str = "theme";
+    pub const MODE: &str = "mode";
+    pub const KEYBOARD: &str = "keyboard";
+}
+
+/// Boolean values.
+const FALSE: &str = "0";
+const TRUE: &str = "1";
 
 /// Where an entry's next UEFI image is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -378,7 +418,7 @@ pub fn check_path(s: &str) -> Result<(), PathError> {
         }
         if comp
             .chars()
-            .any(|c| c < ' ' || c == '\u{7f}' || "/:*?\"<>|".contains(c))
+            .any(|c| c < ' ' || c == DEL || FORBIDDEN_PATH_CHARS.contains(c))
         {
             return Err(PathError::BadChar);
         }
@@ -388,8 +428,8 @@ pub fn check_path(s: &str) -> Result<(), PathError> {
 
 fn parse_bool(v: &str, line: usize) -> Result<bool, ConfigError> {
     match v {
-        "0" => Ok(false),
-        "1" => Ok(true),
+        FALSE => Ok(false),
+        TRUE => Ok(true),
         _ => Err(ConfigError::BadBool { line }),
     }
 }
@@ -465,14 +505,14 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
             cur_name = e.section;
             sect = match e.section {
                 "" => Section::None,
-                "Paguro" => {
+                section::PAGURO => {
                     paguro_section = true;
                     Section::Paguro
                 }
-                "TPM" => Section::Tpm,
-                "SetupTPM" => Section::SetupTpm,
-                "Passphrase" => Section::Passphrase,
-                "UI" => Section::Ui,
+                section::TPM => Section::Tpm,
+                section::SETUP_TPM => Section::SetupTpm,
+                section::PASSPHRASE => Section::Passphrase,
+                section::UI => Section::Ui,
                 s => match s.strip_prefix(ENTRY_PREFIX) {
                     Some(name) => {
                         if !check_name(name) {
@@ -503,9 +543,9 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
             Section::None => return Err(ConfigError::KeyOutsideSection { line }),
             Section::Ignored(_) => {}
             Section::Paguro => match e.key {
-                "version" => {
+                key::VERSION => {
                     mark(&mut paguro_seen, K_VERSION, line)?;
-                    if v != "1" {
+                    if v != VERSION {
                         return Err(if !v.is_empty() && v.bytes().all(|c| c.is_ascii_digit()) {
                             ConfigError::UnsupportedVersion { line }
                         } else {
@@ -513,7 +553,7 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
                         });
                     }
                 }
-                "default" => {
+                key::DEFAULT => {
                     mark(&mut paguro_seen, K_DEFAULT, line)?;
                     if !check_name(v) {
                         return Err(ConfigError::BadEntryName { line });
@@ -531,19 +571,19 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
                     .get_mut(idx)
                     .ok_or(ConfigError::TooManyEntries { line })?;
                 match e.key {
-                    "volume" => {
+                    key::VOLUME => {
                         mark(seen, K_VOLUME, line)?;
                         ent.volume =
                             Guid::parse(v).map_err(|err| ConfigError::BadGuid { line, err })?;
                     }
-                    "root" => {
+                    key::ROOT => {
                         mark(seen, K_ROOT, line)?;
                         ent.root = Some(path_value(v, line)?);
                     }
-                    "efi_disk" | "efi" | "efi_file" => {
+                    key::EFI_DISK | key::EFI | key::EFI_FILE => {
                         let (bit, store) = match e.key {
-                            "efi_disk" => (K_EFI_DISK, &mut efi_disk),
-                            "efi" => (K_EFI, &mut efi_path),
+                            key::EFI_DISK => (K_EFI_DISK, &mut efi_disk),
+                            key::EFI => (K_EFI, &mut efi_path),
                             _ => (K_EFI_FILE, &mut efi_file),
                         };
                         mark(seen, bit, line)?;
@@ -564,15 +604,15 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
                 }
             }
             Section::Ui => match e.key {
-                "theme" => {
+                key::THEME => {
                     mark(&mut ui_seen, K_THEME, line)?;
                     cfg.ui.theme = UiTheme::from_name(v).ok_or(ConfigError::BadChoice { line })?;
                 }
-                "mode" => {
+                key::MODE => {
                     mark(&mut ui_seen, K_MODE, line)?;
                     cfg.ui.mode = UiMode::from_name(v).ok_or(ConfigError::BadChoice { line })?;
                 }
-                "keyboard" => {
+                key::KEYBOARD => {
                     mark(&mut ui_seen, K_KEYBOARD, line)?;
                     cfg.ui.keyboard =
                         Keyboard::from_name(v).ok_or(ConfigError::BadChoice { line })?;
@@ -580,7 +620,7 @@ pub fn parse(input: &[u8]) -> Result<Config<'_>, ConfigError> {
                 _ => return Err(ConfigError::UnknownKey { line }),
             },
             Section::Tpm | Section::SetupTpm | Section::Passphrase => {
-                if e.key != "enabled" {
+                if e.key != key::ENABLED {
                     return Err(ConfigError::UnknownKey { line });
                 }
                 let (seen, flag) = match sect {
@@ -662,57 +702,60 @@ pub fn write(cfg: &Config<'_>, out: &mut [u8]) -> Result<usize, WriteError> {
         }
     }
     let mut w = crate::bytes::Writer::new(out);
-    let b = |x: bool| if x { "1" } else { "0" };
+    let b = |x: bool| if x { TRUE } else { FALSE };
+    // `\n[<prefix><name>]` and `\n<key> = <value>`: every line the writer
+    // emits after the header comment; each section ends with a newline, so
+    // sections are separated by a blank line.
+    let header = |w: &mut crate::bytes::Writer<'_>, prefix: &str, name: &[u8]| {
+        w.put(b"\n[")?;
+        w.put(prefix.as_bytes())?;
+        w.put(name)?;
+        w.put(b"]")
+    };
+    let kv = |w: &mut crate::bytes::Writer<'_>, k: &str, v: &[u8]| {
+        w.put(b"\n")?;
+        w.put(k.as_bytes())?;
+        w.put(b" = ")?;
+        w.put(v)
+    };
     w.put(HEADER_COMMENT.as_bytes())?;
-    w.put(b"\n[Paguro]\nversion = 1\ndefault = ")?;
-    w.put(default.name.as_bytes())?;
+    header(&mut w, section::PAGURO, b"")?;
+    kv(&mut w, key::VERSION, VERSION.as_bytes())?;
+    kv(&mut w, key::DEFAULT, default.name.as_bytes())?;
     w.put(b"\n")?;
     for ent in cfg.entries() {
-        w.put(b"\n[")?;
-        w.put(ENTRY_PREFIX.as_bytes())?;
-        w.put(ent.name.as_bytes())?;
-        w.put(b"]\nvolume = ")?;
-        w.put(&ent.volume.to_text())?;
+        header(&mut w, ENTRY_PREFIX, ent.name.as_bytes())?;
+        kv(&mut w, key::VOLUME, &ent.volume.to_text())?;
         if let Some(root) = ent.root {
-            w.put(b"\nroot = ")?;
-            w.put(root.as_bytes())?;
+            kv(&mut w, key::ROOT, root.as_bytes())?;
         }
         match ent.efi {
             Efi::Disk { disk, path } => {
                 if Some(disk) != ent.root {
-                    w.put(b"\nefi_disk = ")?;
-                    w.put(disk.as_bytes())?;
+                    kv(&mut w, key::EFI_DISK, disk.as_bytes())?;
                 }
-                w.put(b"\nefi = ")?;
-                w.put(path.as_bytes())?;
+                kv(&mut w, key::EFI, path.as_bytes())?;
             }
-            Efi::File(f) => {
-                w.put(b"\nefi_file = ")?;
-                w.put(f.as_bytes())?;
-            }
+            Efi::File(f) => kv(&mut w, key::EFI_FILE, f.as_bytes())?,
         }
         w.put(b"\n")?;
     }
     for (name, v) in [
-        ("TPM", cfg.tpm),
-        ("SetupTPM", cfg.setup_tpm),
-        ("Passphrase", cfg.passphrase),
+        (section::TPM, cfg.tpm),
+        (section::SETUP_TPM, cfg.setup_tpm),
+        (section::PASSPHRASE, cfg.passphrase),
     ] {
-        w.put(b"\n[")?;
-        w.put(name.as_bytes())?;
-        w.put(b"]\nenabled = ")?;
-        w.put(b(v).as_bytes())?;
+        header(&mut w, name, b"")?;
+        kv(&mut w, key::ENABLED, b(v).as_bytes())?;
         w.put(b"\n")?;
     }
     // Only when it says something: files written before `[UI]` existed
     // keep their exact bytes (and hash).
     if cfg.ui != Ui::DEFAULT {
-        w.put(b"\n[UI]\ntheme = ")?;
-        w.put(cfg.ui.theme.name().as_bytes())?;
-        w.put(b"\nmode = ")?;
-        w.put(cfg.ui.mode.name().as_bytes())?;
-        w.put(b"\nkeyboard = ")?;
-        w.put(cfg.ui.keyboard.name().as_bytes())?;
+        header(&mut w, section::UI, b"")?;
+        kv(&mut w, key::THEME, cfg.ui.theme.name().as_bytes())?;
+        kv(&mut w, key::MODE, cfg.ui.mode.name().as_bytes())?;
+        kv(&mut w, key::KEYBOARD, cfg.ui.keyboard.name().as_bytes())?;
         w.put(b"\n")?;
     }
     if w.len() > ini::MAX_LEN {

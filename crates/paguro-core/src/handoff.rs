@@ -25,9 +25,78 @@ use crate::bytes::{Full, Reader, Writer};
 use crate::config::check_name;
 use crate::guid::Guid;
 use crate::seal::{self, Kind, Seal, SealError};
+use core::mem::{offset_of, size_of};
 
 pub const MAGIC: &[u8; 8] = b"PGRHOF\x00\x01";
-pub const HEADER_LEN: usize = 16;
+pub const HEADER_LEN: usize = size_of::<Header>();
+
+// Layout-only structs (INTERFACES.md §8): never instantiated, they fix the
+// offsets and sizes the sequential reader and writer below walk through.
+
+/// The blob header.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct Header {
+    magic: [u8; 8],
+    total_len: u32,
+    record_count: u16,
+    reserved: u16,
+}
+const _: () = assert!(size_of::<Header>() == 16);
+const _: () = assert!(offset_of!(Header, total_len) == 8);
+const _: () = assert!(offset_of!(Header, record_count) == 12);
+
+/// `VOLUME` value.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct VolumeValue {
+    partition: [u8; 16],
+    first_lba: u64,
+    sectors: u64,
+}
+const _: () = assert!(size_of::<VolumeValue>() == 32);
+
+/// `FVE_LAYOUT` value.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct FveLayoutValue {
+    metadata_offsets: [u64; 3],
+    region_size: u64,
+    boot_sector_reloc_offset: u64,
+    boot_sector_reloc_sectors: u32,
+    encrypted_size: u64,
+    sector_size: u32,
+    extra_region_offset: u64,
+}
+const _: () = assert!(size_of::<FveLayoutValue>() == 64);
+
+/// `IMAGE` value: `role u8 | name_len u8 | name[name_len] | mft_record u64
+/// | mft_seq u16`; the fixed parts either side of the name.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct ImageHead {
+    role: u8,
+    name_len: u8,
+}
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct ImageTail {
+    mft_record: u64,
+    mft_seq: u16,
+}
+const IMAGE_FIXED_LEN: usize = size_of::<ImageHead>() + size_of::<ImageTail>();
+const _: () = assert!(IMAGE_FIXED_LEN == 12);
+
+/// `VMK` and `B` values: 256-bit keys.
+pub const KEY_LEN: usize = 32;
+/// `PCRS` values: one SHA-256 digest per selected PCR.
+pub const PCR_VALUE_LEN: usize = 32;
+/// `STATE` value: a u32 of [`state`] flags; `RUNG` value: one [`Rung`] byte.
+const STATE_LEN: usize = size_of::<u32>();
+const RUNG_LEN: usize = size_of::<u8>();
+/// `FVE_LAYOUT.sector_size`: the data units BitLocker volumes use.
+const SECTOR_SIZE_512: u32 = 512;
+const SECTOR_SIZE_4096: u32 = 4096;
 /// Hard cap on the whole blob: room for a maximal 64 KiB `paguro.ini` in `CONFIG` plus every other record.
 pub const MAX_LEN: usize = 96 * 1024;
 pub const MAX_FVEK_KEY: usize = 64;
@@ -161,10 +230,10 @@ pub struct ImageId<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handoff<'a> {
     pub volume: Volume,
-    pub vmk: Option<&'a [u8; 32]>,
+    pub vmk: Option<&'a [u8; KEY_LEN]>,
     pub fvek: Option<Fvek<'a>>,
     pub fve_layout: Option<FveLayout>,
-    pub b: &'a [u8; 32],
+    pub b: &'a [u8; KEY_LEN],
     pub pcrs: Pcrs<'a>,
     pub config: Option<&'a [u8]>,
     /// The chosen entry's `root` (role 1); absent for an `efi_file`-only entry.
@@ -211,7 +280,7 @@ fn pcr_value_len(mask: u32) -> Option<usize> {
     if mask == 0 || mask >> PCR_COUNT != 0 {
         return None;
     }
-    Some(mask.count_ones() as usize * 32)
+    Some(mask.count_ones() as usize * PCR_VALUE_LEN)
 }
 
 /// Decode and validate a whole handoff blob.
@@ -220,7 +289,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
         return Err(HandoffError::TooLarge);
     }
     let mut r = Reader::new(blob);
-    if r.array::<8>().map_err(short)? != MAGIC {
+    if r.array::<{ MAGIC.len() }>().map_err(short)? != MAGIC {
         return Err(HandoffError::BadMagic);
     }
     let total = r.u32_le().map_err(short)?;
@@ -271,7 +340,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
         let mut v = Reader::new(value);
         match t {
             rtype::VOLUME => {
-                fixed(32)?;
+                fixed(size_of::<VolumeValue>())?;
                 volume = Some(Volume {
                     partition: Guid(*v.array().map_err(short)?),
                     first_lba: v.u64_le().map_err(short)?,
@@ -279,8 +348,8 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
                 });
             }
             rtype::VMK => {
-                fixed(32)?;
-                vmk = Some(v.array::<32>().map_err(short)?);
+                fixed(KEY_LEN)?;
+                vmk = Some(v.array::<KEY_LEN>().map_err(short)?);
             }
             rtype::FVEK => {
                 let cipher = v.u16_le().map_err(|_| bad_len)?;
@@ -297,7 +366,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
                 });
             }
             rtype::FVE_LAYOUT => {
-                fixed(64)?;
+                fixed(size_of::<FveLayoutValue>())?;
                 fve_layout = Some(FveLayout {
                     metadata_offsets: [
                         v.u64_le().map_err(short)?,
@@ -314,7 +383,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
                 if !matches!(
                     fve_layout,
                     Some(FveLayout {
-                        sector_size: 512 | 4096,
+                        sector_size: SECTOR_SIZE_512 | SECTOR_SIZE_4096,
                         ..
                     })
                 ) {
@@ -322,8 +391,8 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
                 }
             }
             rtype::B => {
-                fixed(32)?;
-                b = Some(v.array::<32>().map_err(short)?);
+                fixed(KEY_LEN)?;
+                b = Some(v.array::<KEY_LEN>().map_err(short)?);
             }
             rtype::PCRS => {
                 let mask = v.u32_le().map_err(|_| bad_len)?;
@@ -340,7 +409,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
             rtype::IMAGE => {
                 let role = v.u8().map_err(|_| bad_len)?;
                 let nl = usize::from(v.u8().map_err(|_| bad_len)?);
-                if len != 2 + nl + 10 {
+                if len != IMAGE_FIXED_LEN + nl {
                     return Err(bad_len);
                 }
                 let role = Role::from_u8(role).ok_or(HandoffError::BadValue(t))?;
@@ -364,7 +433,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
                 });
             }
             rtype::STATE => {
-                fixed(4)?;
+                fixed(STATE_LEN)?;
                 let s = v.u32_le().map_err(short)?;
                 if s & !state::ALL != 0 {
                     return Err(HandoffError::UnknownStateFlags);
@@ -372,7 +441,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
                 st = Some(s);
             }
             rtype::RUNG => {
-                fixed(1)?;
+                fixed(RUNG_LEN)?;
                 rung =
                     Some(Rung::from_u8(v.u8().map_err(short)?).ok_or(HandoffError::BadValue(t))?);
             }
@@ -552,8 +621,8 @@ pub fn encode(h: &Handoff<'_>, out: &mut [u8]) -> Result<usize, EncodeError> {
         count += 1;
     }
     let total = u32::try_from(w.len()).map_err(|_| EncodeError::Full)?;
-    w.patch(8, &total.to_le_bytes())?;
-    w.patch(12, &count.to_le_bytes())?;
+    w.patch(offset_of!(Header, total_len), &total.to_le_bytes())?;
+    w.patch(offset_of!(Header, record_count), &count.to_le_bytes())?;
     Ok(w.len())
 }
 

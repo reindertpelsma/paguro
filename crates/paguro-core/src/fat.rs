@@ -11,7 +11,10 @@
 //! Long names (VFAT) are used only when their sequence and checksum match
 //! the short entry they precede; otherwise the 8.3 name stands.
 
-use crate::disk::{Fat32, Fat32Error, parse_fat32};
+use core::mem::{offset_of, size_of};
+
+use crate::disk::{Fat32, Fat32Error, SECTOR, bpb, parse_fat32};
+use crate::layout::field_size;
 
 /// Entries a FAT directory may hold (FAT specification: 65 536 × 32 bytes).
 pub const MAX_DIR_ENTRIES: u32 = 65_536;
@@ -66,22 +69,145 @@ pub struct Fs {
     pub bpb: Fat32,
 }
 
+/// FAT32 table entries (FAT specification §4): the low 28 bits are the
+/// cluster; values from `END` up mark the end of a chain, `BAD` a bad cluster.
+const FAT32_CLUSTER_MASK: u32 = 0x0FFF_FFFF;
 const END: u32 = 0x0FFF_FFF8;
 const BAD: u32 = 0x0FFF_FFF7;
 
+/// Short directory entry (FAT specification §6, "Directory Structure").
+/// Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct DirEntryRaw {
+    name: [u8; 11],
+    attr: u8,
+    nt_res: u8,
+    crt_time_tenth: u8,
+    crt_time: u16,
+    crt_date: u16,
+    lst_acc_date: u16,
+    fst_clus_hi: u16,
+    wrt_time: u16,
+    wrt_date: u16,
+    fst_clus_lo: u16,
+    file_size: u32,
+}
+const _: () = assert!(offset_of!(DirEntryRaw, attr) == 11);
+const _: () = assert!(offset_of!(DirEntryRaw, fst_clus_hi) == 20);
+const _: () = assert!(offset_of!(DirEntryRaw, fst_clus_lo) == 26);
+const _: () = assert!(offset_of!(DirEntryRaw, file_size) == 28);
+const _: () = assert!(size_of::<DirEntryRaw>() == 32);
+
+/// Long-name directory entry (FAT specification §7, "Long File Name
+/// Implementation"). Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct LfnEntryRaw {
+    ord: u8,
+    name1: [u16; 5],
+    attr: u8,
+    kind: u8,
+    chksum: u8,
+    name2: [u16; 6],
+    fst_clus_lo: u16,
+    name3: [u16; 2],
+}
+const _: () = assert!(offset_of!(LfnEntryRaw, name1) == 1);
+const _: () = assert!(offset_of!(LfnEntryRaw, chksum) == 13);
+const _: () = assert!(offset_of!(LfnEntryRaw, name2) == 14);
+const _: () = assert!(offset_of!(LfnEntryRaw, name3) == 28);
+const _: () = assert!(size_of::<LfnEntryRaw>() == 32);
+
+const DIR_ENTRY_LEN: usize = size_of::<DirEntryRaw>();
+const DIR_NAME_LEN: usize = field_size(|e: DirEntryRaw| e.name);
+/// The 8.3 name: 8 bytes of base, then the extension.
+const DIR_NAME_BASE_LEN: usize = 8;
+const DIR_ATTR: usize = offset_of!(DirEntryRaw, attr);
+const DIR_NT_RES: usize = offset_of!(DirEntryRaw, nt_res);
+const DIR_FST_CLUS_HI: usize = offset_of!(DirEntryRaw, fst_clus_hi);
+const DIR_FST_CLUS_LO: usize = offset_of!(DirEntryRaw, fst_clus_lo);
+const DIR_FILE_SIZE: usize = offset_of!(DirEntryRaw, file_size);
+/// `DIR_Name[0]` values: end of directory, a free (deleted) entry, and the
+/// stand-in for a leading 0xE5 byte.
+const DIR_NAME0_END: u8 = 0x00;
+const DIR_NAME0_FREE: u8 = 0xE5;
+const DIR_NAME0_KANJI_E5: u8 = 0x05;
+
+/// `DIR_Attr` bits (FAT specification §6).
 const ATTR_VOLUME: u8 = 0x08;
 const ATTR_DIR: u8 = 0x10;
 const ATTR_LFN: u8 = 0x0F;
+/// The attribute bits compared against [`ATTR_LFN`] (`ATTR_LONG_NAME_MASK`).
+const ATTR_LFN_MASK: u8 = 0x3F;
+
+/// `DIR_NTRes` bits (Windows NT): lower-case base name / extension.
+const NT_LOWER_BASE: u8 = 0x08;
+const NT_LOWER_EXT: u8 = 0x10;
+
+/// `LDIR_Ord`: sequence number bits, and the flag on the last (first stored) entry.
+const LFN_ORD_MASK: u8 = 0x1F;
+const LFN_LAST: u8 = 0x40;
+const LFN_CHKSUM: usize = offset_of!(LfnEntryRaw, chksum);
+/// Name units per long-name entry (`LDIR_Name1`, `LDIR_Name2`, `LDIR_Name3`).
+const LFN_UNITS: usize = (field_size(|e: LfnEntryRaw| e.name1)
+    + field_size(|e: LfnEntryRaw| e.name2)
+    + field_size(|e: LfnEntryRaw| e.name3))
+    / size_of::<u16>();
+/// Byte offsets of the [`LFN_UNITS`] UTF-16 units within a long-name entry.
+// Evaluated at compile time: an out-of-range index would fail the build.
+#[allow(clippy::indexing_slicing)]
+const LFN_UNIT_OFFSETS: [usize; LFN_UNITS] = {
+    let parts = [
+        (
+            offset_of!(LfnEntryRaw, name1),
+            field_size(|e: LfnEntryRaw| e.name1),
+        ),
+        (
+            offset_of!(LfnEntryRaw, name2),
+            field_size(|e: LfnEntryRaw| e.name2),
+        ),
+        (
+            offset_of!(LfnEntryRaw, name3),
+            field_size(|e: LfnEntryRaw| e.name3),
+        ),
+    ];
+    let mut out = [0usize; LFN_UNITS];
+    let (mut p, mut k) = (0, 0);
+    while p < parts.len() {
+        let (off, len) = parts[p];
+        let mut b = 0;
+        while b < len {
+            out[k] = off + b;
+            k += 1;
+            b += size_of::<u16>();
+        }
+        p += 1;
+    }
+    out
+};
+/// Most long-name entries accepted for one name (20 × 13 ≥ [`MAX_NAME`]).
+const LFN_MAX_ORD: u8 = 20;
+const LFN_BUF_UNITS: usize = LFN_MAX_ORD as usize * LFN_UNITS;
+/// Padding after a long name's NUL terminator.
+const LFN_PAD: u16 = 0xFFFF;
+
+/// Printable ASCII: the bytes an 8.3 name may be shown with.
+const PRINTABLE_ASCII: core::ops::Range<u8> = 0x20..0x7F;
+/// An 8.3 name as text: base, `.`, extension.
+const SHORT_NAME_TEXT: usize = DIR_NAME_LEN + 1;
+/// Bytes of a parent path [`Fs::find`] builds.
+const MAX_PATH_BYTES: usize = 1024;
 
 /// The VFAT checksum of an 8.3 name.
-pub fn short_checksum(short: &[u8; 11]) -> u8 {
+pub fn short_checksum(short: &[u8; DIR_NAME_LEN]) -> u8 {
     short
         .iter()
         .fold(0u8, |s, &b| s.rotate_right(1).wrapping_add(b))
 }
 
 struct Lfn {
-    units: [u16; 260],
+    units: [u16; LFN_BUF_UNITS],
     /// The sequence number the next entry must carry (0: none pending).
     expect: u8,
     count: u8,
@@ -92,7 +218,7 @@ struct Lfn {
 impl Lfn {
     const fn new() -> Self {
         Lfn {
-            units: [0; 260],
+            units: [0; LFN_BUF_UNITS],
             expect: 0,
             count: 0,
             checksum: 0,
@@ -105,25 +231,24 @@ impl Lfn {
     }
     fn feed(&mut self, e: &[u8]) {
         let seq = e.first().copied().unwrap_or(0);
-        let n = seq & 0x1f;
-        let sum = e.get(13).copied().unwrap_or(0);
-        if seq & 0x40 != 0 {
-            if n == 0 || n > 20 {
+        let n = seq & LFN_ORD_MASK;
+        let sum = e.get(LFN_CHKSUM).copied().unwrap_or(0);
+        if seq & LFN_LAST != 0 {
+            if n == 0 || n > LFN_MAX_ORD {
                 self.reset();
                 return;
             }
             self.count = n;
             self.checksum = sum;
-            self.units = [0xffff; 260];
+            self.units = [LFN_PAD; LFN_BUF_UNITS];
             self.ok = true;
         } else if !self.ok || n != self.expect || sum != self.checksum {
             self.reset();
             return;
         }
         // 13 units: 5 at 1, 6 at 14, 2 at 28.
-        let base = usize::from(n - 1) * 13;
-        let at = [1usize, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
-        for (k, off) in at.iter().enumerate() {
+        let base = usize::from(n - 1) * LFN_UNITS;
+        for (k, off) in LFN_UNIT_OFFSETS.iter().enumerate() {
             let u = u16::from_le_bytes([
                 e.get(*off).copied().unwrap_or(0),
                 e.get(off + 1).copied().unwrap_or(0),
@@ -135,16 +260,16 @@ impl Lfn {
         self.expect = n - 1;
     }
     /// The long name, if complete and matching `short`.
-    fn name(&self, short: &[u8; 11]) -> Option<&[u16]> {
+    fn name(&self, short: &[u8; DIR_NAME_LEN]) -> Option<&[u16]> {
         if !self.ok || self.expect != 0 || self.checksum != short_checksum(short) {
             return None;
         }
-        let all = self.units.get(..usize::from(self.count) * 13)?;
+        let all = self.units.get(..usize::from(self.count) * LFN_UNITS)?;
         let len = all.iter().position(|&u| u == 0).unwrap_or(all.len());
         // After the terminator only 0xFFFF padding is allowed.
         if all
             .get(len + 1..)
-            .is_some_and(|rest| rest.iter().any(|&u| u != 0xffff))
+            .is_some_and(|rest| rest.iter().any(|&u| u != LFN_PAD))
         {
             return None;
         }
@@ -156,13 +281,17 @@ impl Lfn {
 /// The 8.3 name as UTF-16 into `out`; `None` for a byte outside printable
 /// ASCII (the OEM code page is unknown, so such a name cannot be shown or
 /// matched reliably).
-fn short_name<'o>(short: &[u8; 11], nt: u8, out: &'o mut [u16; 12]) -> Option<&'o [u16]> {
-    let (base, ext) = short.split_at(8);
+fn short_name<'o>(
+    short: &[u8; DIR_NAME_LEN],
+    nt: u8,
+    out: &'o mut [u16; SHORT_NAME_TEXT],
+) -> Option<&'o [u16]> {
+    let (base, ext) = short.split_at(DIR_NAME_BASE_LEN);
     let trim = |s: &[u8]| s.len() - s.iter().rev().take_while(|&&b| b == b' ').count();
     let (bl, el) = (trim(base), trim(ext));
     let mut n = 0usize;
     let mut put = |b: u8, lower: bool, n: &mut usize| -> Option<()> {
-        if !(0x20..0x7f).contains(&b) {
+        if !PRINTABLE_ASCII.contains(&b) {
             return None;
         }
         let b = if lower { b.to_ascii_lowercase() } else { b };
@@ -172,13 +301,17 @@ fn short_name<'o>(short: &[u8; 11], nt: u8, out: &'o mut [u16; 12]) -> Option<&'
     };
     for (i, &b) in base.iter().take(bl).enumerate() {
         // 0x05 stands for a leading 0xE5 byte (non-ASCII: refused below).
-        let b = if i == 0 && b == 0x05 { 0xe5 } else { b };
-        put(b, nt & 0x08 != 0, &mut n)?;
+        let b = if i == 0 && b == DIR_NAME0_KANJI_E5 {
+            DIR_NAME0_FREE
+        } else {
+            b
+        };
+        put(b, nt & NT_LOWER_BASE != 0, &mut n)?;
     }
     if el > 0 {
         put(b'.', false, &mut n)?;
         for &b in ext.iter().take(el) {
-            put(b, nt & 0x10 != 0, &mut n)?;
+            put(b, nt & NT_LOWER_EXT != 0, &mut n)?;
         }
     }
     (n > 0).then(|| out.get(..n).unwrap_or(&[]))
@@ -208,7 +341,7 @@ impl Fs {
         space: u64,
         scratch: &mut [u8; SCRATCH],
     ) -> Result<Fs, FatError> {
-        let boot = scratch.get_mut(..512).ok_or(FatError::Io)?;
+        let boot = scratch.get_mut(..SECTOR as usize).ok_or(FatError::Io)?;
         src.read(0, boot)?;
         let bpb = parse_fat32(boot, space).map_err(FatError::Boot)?;
         Ok(Fs { bpb })
@@ -219,7 +352,9 @@ impl Fs {
     }
 
     fn check(&self, c: u32) -> Result<u32, FatError> {
-        if c < 2 || u64::from(c) >= u64::from(self.bpb.clusters) + 2 {
+        if c < bpb::FIRST_CLUSTER
+            || u64::from(c) >= u64::from(self.bpb.clusters) + u64::from(bpb::FIRST_CLUSTER)
+        {
             Err(FatError::BadCluster(c))
         } else {
             Ok(c)
@@ -229,7 +364,7 @@ impl Fs {
     fn first_sector(&self, c: u32) -> u64 {
         let data = u64::from(self.bpb.reserved_sectors)
             + u64::from(self.bpb.fats) * u64::from(self.bpb.fat_sectors);
-        data + u64::from(c - 2) * u64::from(self.bpb.sectors_per_cluster)
+        data + u64::from(c - bpb::FIRST_CLUSTER) * u64::from(self.bpb.sectors_per_cluster)
     }
 
     /// The cluster after `c`, or `None` at the end of the chain.
@@ -239,17 +374,17 @@ impl Fs {
         c: u32,
         scratch: &mut [u8; SCRATCH],
     ) -> Result<Option<u32>, FatError> {
-        let off = u64::from(c) * 4;
+        let off = u64::from(c) * bpb::FAT_ENTRY_LEN;
         let bps = self.bps() as u64;
         let sector = u64::from(self.bpb.reserved_sectors) + off / bps;
         let buf = scratch.get_mut(..self.bps()).ok_or(FatError::Io)?;
         src.read(sector, buf)?;
         let i = (off % bps) as usize;
-        let raw: [u8; 4] = buf
-            .get(i..i + 4)
+        let raw: [u8; bpb::FAT_ENTRY_LEN as usize] = buf
+            .get(i..i + bpb::FAT_ENTRY_LEN as usize)
             .and_then(|b| b.try_into().ok())
             .ok_or(FatError::Io)?;
-        let v = u32::from_le_bytes(raw) & 0x0FFF_FFFF;
+        let v = u32::from_le_bytes(raw) & FAT32_CLUSTER_MASK;
         match v {
             v if v >= END => Ok(None),
             BAD => Err(FatError::BadCluster(v)),
@@ -279,46 +414,41 @@ impl Fs {
             for s in 0..spc {
                 let buf = scratch.get_mut(..self.bps()).ok_or(FatError::Io)?;
                 src.read(self.first_sector(c) + s, buf)?;
-                for e in buf.chunks_exact(32) {
+                for e in buf.chunks_exact(DIR_ENTRY_LEN) {
                     entries += 1;
                     if entries > MAX_DIR_ENTRIES {
                         return Err(FatError::TooLarge);
                     }
                     let first = e.first().copied().unwrap_or(0);
-                    let attr = e.get(11).copied().unwrap_or(0);
-                    if first == 0 {
+                    let attr = e.get(DIR_ATTR).copied().unwrap_or(0);
+                    if first == DIR_NAME0_END {
                         return Ok(());
                     }
-                    if first == 0xe5 {
+                    if first == DIR_NAME0_FREE {
                         lfn.reset();
                         continue;
                     }
-                    if attr & 0x3f == ATTR_LFN {
+                    if attr & ATTR_LFN_MASK == ATTR_LFN {
                         lfn.feed(e);
                         continue;
                     }
-                    let mut short = [0u8; 11];
-                    short.copy_from_slice(e.get(..11).unwrap_or(&[0; 11]));
+                    let mut short = [0u8; DIR_NAME_LEN];
+                    short.copy_from_slice(e.get(..DIR_NAME_LEN).unwrap_or(&[0; DIR_NAME_LEN]));
                     if attr & ATTR_VOLUME != 0 {
                         lfn.reset();
                         continue;
                     }
-                    let hi = u16::from_le_bytes([
-                        e.get(20).copied().unwrap_or(0),
-                        e.get(21).copied().unwrap_or(0),
-                    ]);
-                    let lo = u16::from_le_bytes([
-                        e.get(26).copied().unwrap_or(0),
-                        e.get(27).copied().unwrap_or(0),
-                    ]);
+                    let byte = |at: usize| e.get(at).copied().unwrap_or(0);
+                    let hi = u16::from_le_bytes([byte(DIR_FST_CLUS_HI), byte(DIR_FST_CLUS_HI + 1)]);
+                    let lo = u16::from_le_bytes([byte(DIR_FST_CLUS_LO), byte(DIR_FST_CLUS_LO + 1)]);
                     let size = u32::from_le_bytes([
-                        e.get(28).copied().unwrap_or(0),
-                        e.get(29).copied().unwrap_or(0),
-                        e.get(30).copied().unwrap_or(0),
-                        e.get(31).copied().unwrap_or(0),
+                        byte(DIR_FILE_SIZE),
+                        byte(DIR_FILE_SIZE + 1),
+                        byte(DIR_FILE_SIZE + 2),
+                        byte(DIR_FILE_SIZE + 3),
                     ]);
-                    let mut sbuf = [0u16; 12];
-                    let nt = e.get(12).copied().unwrap_or(0);
+                    let mut sbuf = [0u16; SHORT_NAME_TEXT];
+                    let nt = e.get(DIR_NT_RES).copied().unwrap_or(0);
                     let name = match lfn.name(&short) {
                         Some(n) => Some(n),
                         None => short_name(&short, nt, &mut sbuf),
@@ -411,7 +541,7 @@ impl Fs {
         if name.is_empty() || name == "." || name == ".." {
             return Err(FatError::BadPath);
         }
-        let mut parent = [0u8; 1024];
+        let mut parent = [0u8; MAX_PATH_BYTES];
         let plen = 1 + dir.len();
         let pb = parent.get_mut(..plen).ok_or(FatError::TooLarge)?;
         if let Some((first, tail)) = pb.split_first_mut() {

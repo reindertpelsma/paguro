@@ -28,9 +28,26 @@
 
 use crate::bytes::{Full, Reader, Writer};
 use crate::guid::Guid;
+use core::mem::{offset_of, size_of};
 
 pub const MAGIC: &[u8; 8] = b"PGRBST\x00\x01";
-pub const PAYLOAD_LEN: usize = 8 + 16 + 16 + 32;
+pub const PAYLOAD_LEN: usize = size_of::<Payload>();
+
+/// The `PaguroBootstrap` payload (INTERFACES.md §9). Layout only: never
+/// instantiated.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct Payload {
+    magic: [u8; 8],
+    volume: [u8; 16],
+    salt: [u8; 16],
+    wrapped_vmk: [u8; 32],
+}
+const _: () = assert!(size_of::<Payload>() == 72);
+const _: () = assert!(offset_of!(Payload, volume) == 8);
+const GUID_LEN: usize = crate::layout::field_size(|p: Payload| p.volume);
+const SALT_LEN: usize = crate::layout::field_size(|p: Payload| p.salt);
+const WRAPPED_VMK_LEN: usize = crate::layout::field_size(|p: Payload| p.wrapped_vmk);
 /// The payload's firmware variable (INTERFACES.md §5, §9), under the paguro
 /// vendor GUID.
 pub const VAR_NAME: &str = "PaguroBootstrap";
@@ -40,6 +57,9 @@ pub const MAX_VAR: usize = 128;
 pub const MAX_LOAD_OPTION: usize = 8192;
 /// `LOAD_OPTION_ACTIVE`.
 pub const LOAD_OPTION_ACTIVE: u32 = 1;
+/// A UTF-16LE NUL: the terminator of a load option's description and of a
+/// File Path node's path name.
+const UTF16_NUL: [u8; 2] = [0, 0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BootstrapError {
@@ -76,8 +96,8 @@ pub struct LoadOption<'a> {
 pub struct Bootstrap<'a> {
     /// GPT partition GUID of the NTFS volume this entry unlocks.
     pub volume: Guid,
-    pub salt: &'a [u8; 16],
-    pub wrapped_vmk: &'a [u8; 32],
+    pub salt: &'a [u8; SALT_LEN],
+    pub wrapped_vmk: &'a [u8; WRAPPED_VMK_LEN],
 }
 
 /// One device-path node.
@@ -88,6 +108,21 @@ pub struct Node<'a> {
     pub data: &'a [u8],
 }
 
+/// `EFI_DEVICE_PATH_PROTOCOL` node header (UEFI 2.10 §10.2): type,
+/// sub-type, and the node's whole length including this header.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct DevicePathHeader {
+    kind: u8,
+    sub: u8,
+    length: u16,
+}
+const DP_HEADER_LEN: usize = size_of::<DevicePathHeader>();
+const _: () = assert!(DP_HEADER_LEN == 4);
+/// The End-Entire node: a bare header (UEFI 2.10 §10.3.1).
+const DP_END_ENTIRE_NODE: [u8; DP_HEADER_LEN] = [DP_END, DP_END_ENTIRE, DP_HEADER_LEN as u8, 0];
+
+/// Device-path node types and sub-types (UEFI 2.10 §10.3).
 pub const DP_MEDIA: u8 = 0x04;
 pub const DP_MEDIA_HARD_DRIVE: u8 = 0x01;
 pub const DP_MEDIA_FILE_PATH: u8 = 0x04;
@@ -107,7 +142,7 @@ pub fn walk_device_path<'a>(
         let sub = r.u8().map_err(|_| BootstrapError::BadDevicePathNode)?;
         let len = usize::from(r.u16_le().map_err(|_| BootstrapError::BadDevicePathNode)?);
         let data_len = len
-            .checked_sub(4)
+            .checked_sub(DP_HEADER_LEN)
             .ok_or(BootstrapError::BadDevicePathNode)?;
         let data = r
             .take(data_len)
@@ -135,16 +170,17 @@ pub fn parse_load_option(var: &[u8]) -> Result<LoadOption<'_>, BootstrapError> {
     let rest = r.rest();
     let mut desc_len = None;
     let mut i = 0usize;
-    while let Some(pair) = rest.get(i..i + 2) {
-        if pair == [0, 0] {
+    while let Some(pair) = rest.get(i..i + UTF16_NUL.len()) {
+        if pair == UTF16_NUL {
             desc_len = Some(i);
             break;
         }
-        i += 2;
+        i += UTF16_NUL.len();
     }
     let desc_len = desc_len.ok_or(BootstrapError::UnterminatedDescription)?;
     let description = r.take(desc_len).map_err(|_| BootstrapError::Truncated)?;
-    r.take(2).map_err(|_| BootstrapError::Truncated)?;
+    r.take(UTF16_NUL.len())
+        .map_err(|_| BootstrapError::Truncated)?;
     if fpl == 0 {
         return Err(BootstrapError::BadFilePathLength);
     }
@@ -163,22 +199,32 @@ pub fn parse_payload(data: &[u8]) -> Result<Bootstrap<'_>, BootstrapError> {
     if data.len() > MAX_VAR {
         return Err(BootstrapError::TooLarge);
     }
-    if data.get(..8) != Some(&MAGIC[..]) {
+    if data.get(..MAGIC.len()) != Some(&MAGIC[..]) {
         return Err(BootstrapError::NotBootstrap);
     }
     if data.len() != PAYLOAD_LEN {
         return Err(BootstrapError::BadLength);
     }
-    let mut r = Reader::new(data.get(8..).unwrap_or(&[]));
-    let volume = Guid(*r.array::<16>().map_err(|_| BootstrapError::BadLength)?);
-    let salt = r.array::<16>().map_err(|_| BootstrapError::BadLength)?;
-    let wrapped_vmk = r.array::<32>().map_err(|_| BootstrapError::BadLength)?;
+    let mut r = Reader::new(data.get(offset_of!(Payload, volume)..).unwrap_or(&[]));
+    let volume = Guid(
+        *r.array::<GUID_LEN>()
+            .map_err(|_| BootstrapError::BadLength)?,
+    );
+    let salt = r
+        .array::<SALT_LEN>()
+        .map_err(|_| BootstrapError::BadLength)?;
+    let wrapped_vmk = r
+        .array::<WRAPPED_VMK_LEN>()
+        .map_err(|_| BootstrapError::BadLength)?;
     Ok(Bootstrap {
         volume,
         salt,
         wrapped_vmk,
     })
 }
+
+/// UTF-16 units below this are ASCII.
+const ASCII_END: u16 = 0x80;
 
 fn eq_ignore_case_utf16(a: &[u8], ascii: &str) -> bool {
     a.len() == ascii.len() * 2
@@ -187,7 +233,7 @@ fn eq_ignore_case_utf16(a: &[u8], ascii: &str) -> bool {
                 u.first().copied().unwrap_or(0),
                 u.get(1).copied().unwrap_or(0),
             ]);
-            u < 0x80 && (u as u8).eq_ignore_ascii_case(&c)
+            u < ASCII_END && (u as u8).eq_ignore_ascii_case(&c)
         })
 }
 
@@ -198,8 +244,8 @@ fn file_path_text<'a>(n: &Node<'a>) -> Option<&'a [u8]> {
         return None;
     }
     let d = n.data;
-    Some(match d.len().checked_sub(2) {
-        Some(end) if d.get(end..) == Some(&[0, 0][..]) => d.get(..end).unwrap_or(&[]),
+    Some(match d.len().checked_sub(UTF16_NUL.len()) {
+        Some(end) if d.get(end..) == Some(&UTF16_NUL[..]) => d.get(..end).unwrap_or(&[]),
         _ => d,
     })
 }
@@ -257,7 +303,8 @@ pub fn write_load_option(
     let mut w = Writer::new(out);
     w.u32_le(attributes)?;
     let path_units = path.encode_utf16().count() + 1;
-    let fpl = 4 + path_units * 2 + 4;
+    // File Path node (2 bytes per UTF-16 unit, NUL included), End node.
+    let fpl = DP_HEADER_LEN + path_units * 2 + DP_HEADER_LEN;
     w.u16_le(u16::try_from(fpl).map_err(|_| Full)?)?;
     for u in description.encode_utf16() {
         w.u16_le(u)?;
@@ -265,18 +312,22 @@ pub fn write_load_option(
     w.u16_le(0)?;
     w.u8(DP_MEDIA)?;
     w.u8(DP_MEDIA_FILE_PATH)?;
-    w.u16_le(u16::try_from(4 + path_units * 2).map_err(|_| Full)?)?;
+    w.u16_le(u16::try_from(DP_HEADER_LEN + path_units * 2).map_err(|_| Full)?)?;
     for u in path.encode_utf16() {
         w.u16_le(u)?;
     }
     w.u16_le(0)?;
-    w.put(&[DP_END, DP_END_ENTIRE, 4, 0])?;
+    w.put(&DP_END_ENTIRE_NODE)?;
     w.put(optional)?;
     Ok(w.len())
 }
 
 /// Serialise the `PaguroBootstrap` payload.
-pub fn write_payload(volume: &Guid, salt: &[u8; 16], wrapped_vmk: &[u8; 32]) -> [u8; PAYLOAD_LEN] {
+pub fn write_payload(
+    volume: &Guid,
+    salt: &[u8; SALT_LEN],
+    wrapped_vmk: &[u8; WRAPPED_VMK_LEN],
+) -> [u8; PAYLOAD_LEN] {
     let mut out = [0u8; PAYLOAD_LEN];
     let mut w = Writer::new(&mut out);
     // 72 bytes into a 72-byte buffer cannot fail.
@@ -299,10 +350,26 @@ pub struct HardDrive {
     pub partition_guid: Guid,
 }
 
+/// A Hard Drive media node's data after its header (UEFI 2.10 §10.3.5.1).
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct HardDriveData {
+    partition_number: u32,
+    partition_start: u64,
+    partition_size: u64,
+    partition_signature: [u8; 16],
+    mbr_type: u8,
+    signature_type: u8,
+}
 /// Length of a Hard Drive node's data (42-byte node minus its 4-byte header).
-const HD_DATA_LEN: usize = 38;
-/// `MBRType` 2 = GPT, `SignatureType` 2 = GUID.
-const HD_GPT: [u8; 2] = [2, 2];
+const HD_DATA_LEN: usize = size_of::<HardDriveData>();
+const _: () = assert!(HD_DATA_LEN + DP_HEADER_LEN == 42);
+const _: () = assert!(offset_of!(HardDriveData, mbr_type) == 36);
+/// `MBRType`: GUID partition table.
+const HD_MBR_TYPE_GPT: u8 = 2;
+/// `SignatureType`: the signature is a GUID.
+const HD_SIGNATURE_TYPE_GUID: u8 = 2;
+const HD_GPT: [u8; 2] = [HD_MBR_TYPE_GPT, HD_SIGNATURE_TYPE_GUID];
 
 /// The GPT Hard Drive node in `node`, if it is one. Only the GPT form is
 /// accepted: paguro's ESP is always on a GPT disk.
@@ -314,7 +381,7 @@ pub fn parse_hard_drive(node: &Node<'_>) -> Option<HardDrive> {
     let partition_number = r.u32_le().ok()?;
     let start_lba = r.u64_le().ok()?;
     let size_lba = r.u64_le().ok()?;
-    let partition_guid = Guid(*r.array::<16>().ok()?);
+    let partition_guid = Guid(*r.array::<GUID_LEN>().ok()?);
     (r.rest() == HD_GPT).then_some(HardDrive {
         partition_number,
         start_lba,
@@ -337,8 +404,9 @@ pub fn write_load_option_hd(
     let mut w = Writer::new(out);
     w.u32_le(attributes)?;
     let path_units = path.encode_utf16().count() + 1;
-    let fp_node = 4 + path_units * 2;
-    let fpl = (4 + HD_DATA_LEN) + fp_node + 4;
+    // 2 bytes per UTF-16 unit, NUL included.
+    let fp_node = DP_HEADER_LEN + path_units * 2;
+    let fpl = (DP_HEADER_LEN + HD_DATA_LEN) + fp_node + DP_HEADER_LEN;
     w.u16_le(u16::try_from(fpl).map_err(|_| Full)?)?;
     for u in description.encode_utf16() {
         w.u16_le(u)?;
@@ -346,7 +414,7 @@ pub fn write_load_option_hd(
     w.u16_le(0)?;
     w.u8(DP_MEDIA)?;
     w.u8(DP_MEDIA_HARD_DRIVE)?;
-    w.u16_le(4 + HD_DATA_LEN as u16)?;
+    w.u16_le((DP_HEADER_LEN + HD_DATA_LEN) as u16)?;
     w.u32_le(hd.partition_number)?;
     w.u64_le(hd.start_lba)?;
     w.u64_le(hd.size_lba)?;
@@ -359,7 +427,7 @@ pub fn write_load_option_hd(
         w.u16_le(u)?;
     }
     w.u16_le(0)?;
-    w.put(&[DP_END, DP_END_ENTIRE, 4, 0])?;
+    w.put(&DP_END_ENTIRE_NODE)?;
     w.put(optional)?;
     Ok(w.len())
 }

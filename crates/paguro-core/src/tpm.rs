@@ -25,6 +25,38 @@ pub const MAX_NONCE: usize = 64;
 pub const MAX_SENSITIVE_DATA: usize = 128;
 pub const MAX_SESSIONS: usize = 3;
 pub const MAX_PROPERTIES: usize = 64;
+/// Largest digest any bank can hold (`sizeof(TPMU_HA)`, SHA-512), TPM 2.0
+/// Part 2 §10.3.1: the cap on digest-carrying TPM2B fields.
+pub const MAX_DIGEST: usize = 64;
+/// `TPM2B_NAME` cap: a `TPM_ALG_ID` followed by the largest digest (Part 2
+/// §10.5.3).
+pub const MAX_NAME: usize = 2 + MAX_DIGEST;
+/// Cap on the opaque TPM2B blobs the loader passes through (`outPublic`,
+/// `outPrivate`, `creationData`): far above what the SRK and sealed-object
+/// templates produce.
+pub const MAX_OPAQUE_TPM2B: usize = 1024;
+/// Shortest `nonceTPM` accepted from `TPM2_StartAuthSession` (Part 1 §19.6.2:
+/// at least 16 octets).
+pub const MIN_NONCE_TPM: usize = 16;
+
+/// Command/response header (`TPM_ST tag | UINT32 size | TPM_CC/TPM_RC code`),
+/// TPM 2.0 Part 1 §18.
+pub const HEADER_SIZE_OFFSET: usize = 2;
+/// Size of an `authorizationSize` / `parameterSize` field (UINT32).
+const AREA_SIZE_LEN: usize = 4;
+/// Size of a TPM2B size prefix (UINT16).
+const TPM2B_SIZE_LEN: usize = 2;
+
+/// `TPMS_PCR_SELECTION` (Part 2 §10.6.2): PCRs a PC Client TPM implements
+/// (`IMPLEMENTATION_PCR`), the select size that covers them, and the largest
+/// `sizeofSelect` accepted in a response (`PCR_SELECT_MAX`).
+pub const PCR_COUNT: u32 = 24;
+pub const PCR_SELECT_SIZE: u8 = 3;
+pub const PCR_SELECT_MAX: usize = 4;
+
+/// AES key size of the SRK template and of parameter encryption
+/// (`TPMT_SYM_DEF(_OBJECT).keyBits`).
+pub const AES_KEY_BITS: u16 = 128;
 
 pub const ST_NO_SESSIONS: u16 = 0x8001;
 pub const ST_SESSIONS: u16 = 0x8002;
@@ -111,6 +143,8 @@ pub const PERMANENT_IN_LOCKOUT: u32 = 1 << 9;
 pub mod rc {
     pub const SUCCESS: u32 = 0;
     pub const FMT1: u32 = 0x080;
+    /// The error-number field of a format-one code (Part 2 §6.6.3, bits 5:0).
+    pub const FMT1_ERROR_MASK: u32 = 0x3F;
     pub const AUTH_FAIL: u32 = FMT1 + 0x00E;
     pub const POLICY_FAIL: u32 = FMT1 + 0x01D;
     pub const BAD_AUTH: u32 = FMT1 + 0x022;
@@ -134,7 +168,7 @@ pub mod rc {
 /// The error number of `code` with its handle/parameter/session index removed.
 pub const fn rc_base(code: u32) -> u32 {
     if code & rc::FMT1 != 0 {
-        code & (rc::FMT1 | 0x3F)
+        code & (rc::FMT1 | rc::FMT1_ERROR_MASK)
     } else {
         code
     }
@@ -247,12 +281,12 @@ pub fn command(
             w.u8(s.attributes)?;
             tpm2b(&mut w, s.hmac)?;
         }
-        let size = u32::try_from(w.len() - at - 4).map_err(|_| Full)?;
+        let size = u32::try_from(w.len() - at - AREA_SIZE_LEN).map_err(|_| Full)?;
         w.patch(at, &size.to_be_bytes())?;
     }
     w.put(params)?;
     let size = u32::try_from(w.len()).map_err(|_| Full)?;
-    w.patch(2, &size.to_be_bytes())?;
+    w.patch(HEADER_SIZE_OFFSET, &size.to_be_bytes())?;
     Ok(w.len())
 }
 
@@ -260,7 +294,7 @@ pub fn command(
 pub fn write_pcr_selection(w: &mut Writer<'_>, bank: u16, mask: u32) -> Result<(), Full> {
     w.u32_be(1)?;
     w.u16_be(bank)?;
-    w.u8(3)?;
+    w.u8(PCR_SELECT_SIZE)?;
     w.put(&[mask as u8, (mask >> 8) as u8, (mask >> 16) as u8])
 }
 
@@ -280,7 +314,7 @@ pub fn write_srk_public(w: &mut Writer<'_>) -> Result<(), Full> {
     w.u32_be(attr::SRK)?;
     tpm2b(w, &[])?; // authPolicy
     w.u16_be(alg::AES)?;
-    w.u16_be(128)?;
+    w.u16_be(AES_KEY_BITS)?;
     w.u16_be(alg::CFB)?;
     w.u16_be(alg::NULL)?; // scheme
     w.u16_be(alg::ECC_NIST_P256)?;
@@ -291,7 +325,7 @@ pub fn write_srk_public(w: &mut Writer<'_>) -> Result<(), Full> {
 }
 
 /// `TPMT_PUBLIC` of a sealed data object with `auth_policy`.
-pub fn write_sealed_public(w: &mut Writer<'_>, auth_policy: &[u8; 32]) -> Result<(), Full> {
+pub fn write_sealed_public(w: &mut Writer<'_>, auth_policy: &[u8; SHA256_LEN]) -> Result<(), Full> {
     w.u16_be(alg::KEYEDHASH)?;
     w.u16_be(alg::SHA256)?;
     w.u32_be(attr::SEALED)?;
@@ -308,7 +342,7 @@ fn write_tpm2b_with(
     let at = w.len();
     w.u16_be(0)?;
     body(w)?;
-    let size = u16::try_from(w.len() - at - 2).map_err(|_| Full)?;
+    let size = u16::try_from(w.len() - at - TPM2B_SIZE_LEN).map_err(|_| Full)?;
     w.patch(at, &size.to_be_bytes())
 }
 
@@ -331,7 +365,7 @@ pub fn params_create_sealed(
     out: &mut [u8],
     auth: &[u8],
     data: &[u8],
-    auth_policy: &[u8; 32],
+    auth_policy: &[u8; SHA256_LEN],
 ) -> Result<usize, Full> {
     let mut w = Writer::new(out);
     write_tpm2b_with(&mut w, |w| {
@@ -386,7 +420,7 @@ pub fn params_start_session(
     w.u8(session_type)?;
     if salt.is_some() {
         w.u16_be(alg::AES)?;
-        w.u16_be(128)?;
+        w.u16_be(AES_KEY_BITS)?;
         w.u16_be(alg::CFB)?;
     } else {
         w.u16_be(alg::NULL)?;
@@ -551,7 +585,7 @@ pub struct PcrValues {
 impl PcrValues {
     /// The value of PCR `index`, if it was returned.
     pub fn get(&self, index: u32) -> Option<&[u8; SHA256_LEN]> {
-        if index >= 24 || self.mask & (1 << index) == 0 {
+        if index >= PCR_COUNT || self.mask & (1 << index) == 0 {
             return None;
         }
         let pos = (self.mask & ((1u32 << index) - 1)).count_ones() as usize;
@@ -573,13 +607,13 @@ pub fn parse_pcr_read(params: &[u8]) -> Result<PcrValues, TpmError> {
             return Err(TpmError::BadValue);
         }
         let n = usize::from(r.u8()?);
-        if n > 4 {
+        if n > PCR_SELECT_MAX {
             return Err(TpmError::Oversized);
         }
         for (i, b) in r.take(n)?.iter().enumerate() {
             mask |= u32::from(*b) << (8 * i);
         }
-        if mask >> 24 != 0 {
+        if mask >> PCR_COUNT != 0 {
             return Err(TpmError::BadValue);
         }
     }
@@ -592,7 +626,7 @@ pub fn parse_pcr_read(params: &[u8]) -> Result<PcrValues, TpmError> {
     }
     let mut digests = [[0u8; SHA256_LEN]; MAX_PCR_DIGESTS];
     for d in digests.iter_mut().take(count) {
-        let v = read_tpm2b(&mut r, 64)?;
+        let v = read_tpm2b(&mut r, MAX_DIGEST)?;
         if v.len() != SHA256_LEN {
             return Err(TpmError::BadValue);
         }
@@ -608,13 +642,13 @@ pub fn parse_pcr_read(params: &[u8]) -> Result<PcrValues, TpmError> {
 }
 
 fn skip_creation(r: &mut Reader<'_>) -> Result<(), TpmError> {
-    read_tpm2b(r, 1024)?; // creationData
-    read_tpm2b(r, 64)?; // creationHash
+    read_tpm2b(r, MAX_OPAQUE_TPM2B)?; // creationData
+    read_tpm2b(r, MAX_DIGEST)?; // creationHash
     if r.u16_be()? != ST_CREATION {
         return Err(TpmError::BadValue);
     }
     r.u32_be()?; // hierarchy
-    read_tpm2b(r, 64)?; // ticket digest
+    read_tpm2b(r, MAX_DIGEST)?; // ticket digest
     Ok(())
 }
 
@@ -653,7 +687,7 @@ pub fn parse_ecc_public(area: &[u8]) -> Result<EccPoint, TpmError> {
     }
     r.u16_be()?; // nameAlg
     r.u32_be()?; // objectAttributes
-    read_tpm2b(&mut r, 64)?; // authPolicy
+    read_tpm2b(&mut r, MAX_DIGEST)?; // authPolicy
     skip_alg(&mut r, 2)?; // symmetric: keyBits, mode
     skip_alg(&mut r, 1)?; // scheme: hashAlg
     if r.u16_be()? != alg::ECC_NIST_P256 {
@@ -673,9 +707,9 @@ pub fn parse_ecc_public(area: &[u8]) -> Result<EccPoint, TpmError> {
 /// `TPM2_CreatePrimary` parameters of the ECC storage parent.
 pub fn parse_create_primary(params: &[u8]) -> Result<Primary<'_>, TpmError> {
     let mut r = Reader::new(params);
-    let public_area = read_tpm2b(&mut r, 1024)?; // outPublic
+    let public_area = read_tpm2b(&mut r, MAX_OPAQUE_TPM2B)?; // outPublic
     skip_creation(&mut r)?;
-    let name = read_tpm2b(&mut r, 2 + 64)?;
+    let name = read_tpm2b(&mut r, MAX_NAME)?;
     done(&r)?;
     Ok(Primary {
         public_area,
@@ -703,8 +737,8 @@ pub fn parse_create(params: &[u8]) -> Result<Created<'_>, TpmError> {
         Ok(before - r.remaining())
     };
     let start = params;
-    let priv_len = whole(&mut r, 1024)?;
-    let pub_len = whole(&mut r, 1024)?;
+    let priv_len = whole(&mut r, MAX_OPAQUE_TPM2B)?;
+    let pub_len = whole(&mut r, MAX_OPAQUE_TPM2B)?;
     skip_creation(&mut r)?;
     done(&r)?;
     let private = start.get(..priv_len).ok_or(TpmError::Truncated)?;
@@ -717,7 +751,7 @@ pub fn parse_create(params: &[u8]) -> Result<Created<'_>, TpmError> {
 /// `TPM2_Load` parameters: the loaded object's name.
 pub fn parse_load(params: &[u8]) -> Result<&[u8], TpmError> {
     let mut r = Reader::new(params);
-    let name = read_tpm2b(&mut r, 2 + 64)?;
+    let name = read_tpm2b(&mut r, MAX_NAME)?;
     done(&r)?;
     Ok(name)
 }
@@ -726,7 +760,7 @@ pub fn parse_load(params: &[u8]) -> Result<&[u8], TpmError> {
 pub fn parse_start_auth_session(params: &[u8]) -> Result<&[u8], TpmError> {
     let mut r = Reader::new(params);
     let nonce = read_tpm2b(&mut r, MAX_NONCE)?;
-    if nonce.len() < 16 {
+    if nonce.len() < MIN_NONCE_TPM {
         return Err(TpmError::BadValue);
     }
     done(&r)?;

@@ -5,9 +5,47 @@
 //! Dynamic VHD/VHDX is refused: its block allocation table cannot be followed by
 //! a raw sector map.
 
-pub const FOOTER_LEN: u64 = 512;
+use core::mem::{offset_of, size_of};
+
+use crate::layout::field_size;
+
+/// Hard disk footer, all fields big-endian (Microsoft Virtual Hard Disk Image
+/// Format Specification, "Hard Disk Footer Format"). Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct Footer {
+    cookie: [u8; 8],
+    features: u32,
+    file_format_version: u32,
+    data_offset: u64,
+    time_stamp: u32,
+    creator_application: [u8; 4],
+    creator_version: u32,
+    creator_host_os: u32,
+    original_size: u64,
+    current_size: u64,
+    disk_geometry: u32,
+    disk_type: u32,
+    checksum: u32,
+    unique_id: [u8; 16],
+    saved_state: u8,
+    reserved: [u8; 427],
+}
+const _: () = assert!(offset_of!(Footer, current_size) == 48);
+const _: () = assert!(offset_of!(Footer, disk_type) == 60);
+const _: () = assert!(offset_of!(Footer, checksum) == 64);
+const _: () = assert!(size_of::<Footer>() == 512);
+
+pub const FOOTER_LEN: u64 = size_of::<Footer>() as u64;
 const COOKIE: &[u8; 8] = b"conectix";
+/// `Disk Type` values: 2 fixed, 3 dynamic, 4 differencing.
 const DISK_TYPE_FIXED: u32 = 2;
+
+const FOOTER_COOKIE: usize = offset_of!(Footer, cookie);
+const FOOTER_CURRENT_SIZE: usize = offset_of!(Footer, current_size);
+const FOOTER_DISK_TYPE: usize = offset_of!(Footer, disk_type);
+const FOOTER_CHECKSUM: usize = offset_of!(Footer, checksum);
+const FOOTER_CHECKSUM_END: usize = FOOTER_CHECKSUM + field_size(|f: Footer| f.checksum);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VhdError {
@@ -32,24 +70,24 @@ fn be64(b: &[u8; 512], at: usize) -> u64 {
 /// Validate the footer of a file of `file_len` bytes and return the payload
 /// length — the bytes that form the virtual disk, starting at offset 0.
 pub fn fixed_payload_len(footer: &[u8; 512], file_len: u64) -> Result<u64, VhdError> {
-    if footer.get(0..8) != Some(&COOKIE[..]) {
+    if footer.get(FOOTER_COOKIE..FOOTER_COOKIE + COOKIE.len()) != Some(&COOKIE[..]) {
         return Err(VhdError::BadCookie);
     }
-    let disk_type = be32(footer, 60);
+    let disk_type = be32(footer, FOOTER_DISK_TYPE);
     if disk_type != DISK_TYPE_FIXED {
         return Err(VhdError::NotFixed(disk_type));
     }
-    let stored = be32(footer, 64);
+    let stored = be32(footer, FOOTER_CHECKSUM);
     let mut sum: u32 = 0;
     for (i, b) in footer.iter().enumerate() {
-        if !(64..68).contains(&i) {
+        if !(FOOTER_CHECKSUM..FOOTER_CHECKSUM_END).contains(&i) {
             sum = sum.wrapping_add(u32::from(*b));
         }
     }
     if !sum != stored {
         return Err(VhdError::BadChecksum);
     }
-    let current_size = be64(footer, 48);
+    let current_size = be64(footer, FOOTER_CURRENT_SIZE);
     let payload = file_len
         .checked_sub(FOOTER_LEN)
         .ok_or(VhdError::SizeMismatch)?;

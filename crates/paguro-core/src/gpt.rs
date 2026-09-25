@@ -13,17 +13,81 @@
 //! repaired from the backup: the loader never writes, and guessing between two
 //! disagreeing copies is how a parser gets steered.
 
+use core::mem::{offset_of, size_of};
+
 use crate::bytes::Reader;
 use crate::guid::Guid;
+use crate::layout::field_size;
+
+/// GPT header (UEFI 2.10 §5.3.2, Table 5.5). Layout only: never cast onto a
+/// buffer; the parser reads the fields in this order with [`Reader`].
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct GptHeader {
+    signature: [u8; 8],
+    revision: u32,
+    header_size: u32,
+    header_crc32: u32,
+    reserved: u32,
+    my_lba: u64,
+    alternate_lba: u64,
+    first_usable_lba: u64,
+    last_usable_lba: u64,
+    disk_guid: [u8; 16],
+    partition_entry_lba: u64,
+    number_of_partition_entries: u32,
+    size_of_partition_entry: u32,
+    partition_entry_array_crc32: u32,
+}
+const _: () = assert!(offset_of!(GptHeader, header_crc32) == 16);
+const _: () = assert!(offset_of!(GptHeader, my_lba) == 24);
+const _: () = assert!(offset_of!(GptHeader, partition_entry_lba) == 72);
+const _: () = assert!(size_of::<GptHeader>() == 92);
+
+/// GPT partition entry (UEFI 2.10 §5.3.3, Table 5.6). Layout only.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct GptEntry {
+    partition_type_guid: [u8; 16],
+    unique_partition_guid: [u8; 16],
+    starting_lba: u64,
+    ending_lba: u64,
+    attributes: u64,
+    partition_name: [u16; 36],
+}
+const _: () = assert!(offset_of!(GptEntry, attributes) == 48);
+const _: () = assert!(offset_of!(GptEntry, partition_name) == 56);
+const _: () = assert!(size_of::<GptEntry>() == 128);
 
 pub const SIGNATURE: &[u8; 8] = b"EFI PART";
 pub const REVISION_1_0: u32 = 0x0001_0000;
-pub const HEADER_MIN: u32 = 92;
+/// Smallest `HeaderSize`: the defined header fields.
+pub const HEADER_MIN: u32 = size_of::<GptHeader>() as u32;
 /// Largest entry array the loader reads (128 × 128 bytes, the universal
 /// default). Bigger arrays are refused, not truncated.
 pub const MAX_ENTRY_ARRAY: usize = 16 * 1024;
 pub const MIN_ENTRY_SIZE: u32 = 128;
 pub const MAX_ENTRY_SIZE: u32 = 1024;
+/// Entry sizes must be a multiple of this (UEFI 2.10 §5.3.2, `SizeOfPartitionEntry`).
+pub const ENTRY_SIZE_ALIGN: u32 = 8;
+/// Entry size the builder writes: the defined entry, the universal default.
+pub const DEFAULT_ENTRY_SIZE: u32 = size_of::<GptEntry>() as u32;
+/// Logical block sizes the parser accepts.
+pub const BLOCK_SIZE_512: u32 = 512;
+pub const BLOCK_SIZE_4K: u32 = 4096;
+
+/// Byte range of the header's `HeaderCRC32`, zeroed while the CRC is computed.
+pub const HEADER_CRC_OFFSET: usize = offset_of!(GptHeader, header_crc32);
+pub const HEADER_CRC_END: usize = HEADER_CRC_OFFSET + field_size(|h: GptHeader| h.header_crc32);
+/// LBA of the primary header (`MyLBA`) and of the array that follows it.
+pub const PRIMARY_HEADER_LBA: u64 = 1;
+pub const PRIMARY_ENTRIES_LBA: u64 = 2;
+
+/// `PartitionName` length in UTF-16 code units.
+pub const ENTRY_NAME_UNITS: usize = field_size(|e: GptEntry| e.partition_name) / size_of::<u16>();
+
+/// IEEE 802.3 CRC-32 polynomial, bit-reflected.
+const CRC32_POLY_REFLECTED: u32 = 0xEDB8_8320;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GptError {
@@ -69,7 +133,7 @@ pub fn crc32_update(crc: u32, data: &[u8]) -> u32 {
             let mut k = 0;
             while k < 8 {
                 c = if c & 1 != 0 {
-                    0xEDB8_8320 ^ (c >> 1)
+                    CRC32_POLY_REFLECTED ^ (c >> 1)
                 } else {
                     c >> 1
                 };
@@ -108,8 +172,8 @@ pub struct Entry {
     pub first_lba: u64,
     pub last_lba: u64,
     pub attributes: u64,
-    /// UTF-16LE name, 36 code units, NUL padded; display only.
-    pub name: [u16; 36],
+    /// UTF-16LE name, [`ENTRY_NAME_UNITS`] code units, NUL padded; display only.
+    pub name: [u16; ENTRY_NAME_UNITS],
 }
 
 impl Entry {
@@ -129,7 +193,7 @@ impl Header {
     /// `disk_blocks` is the medium's size in blocks, for range checks.
     pub fn parse(block: &[u8], disk_blocks: u64) -> Result<Header, GptError> {
         let block_size = u32::try_from(block.len()).map_err(|_| GptError::BadBlockSize)?;
-        if block_size != 512 && block_size != 4096 {
+        if block_size != BLOCK_SIZE_512 && block_size != BLOCK_SIZE_4K {
             return Err(GptError::BadBlockSize);
         }
         let short = |_| GptError::BadHeaderSize;
@@ -148,10 +212,10 @@ impl Header {
         let _reserved = r.u32_le().map_err(short)?;
         let hs = header_size as usize;
         let hdr = block.get(..hs).ok_or(GptError::BadHeaderSize)?;
-        // CRC over the header with its CRC field (bytes 16..20) zeroed.
-        let mut crc = crc32_update(0, hdr.get(..16).unwrap_or(&[]));
-        crc = crc32_update(crc, &[0; 4]);
-        crc = crc32_update(crc, hdr.get(20..).unwrap_or(&[]));
+        // CRC over the header with its CRC field zeroed.
+        let mut crc = crc32_update(0, hdr.get(..HEADER_CRC_OFFSET).unwrap_or(&[]));
+        crc = crc32_update(crc, &[0; HEADER_CRC_END - HEADER_CRC_OFFSET]);
+        crc = crc32_update(crc, hdr.get(HEADER_CRC_END..).unwrap_or(&[]));
         if crc != stored_crc {
             return Err(GptError::HeaderCrc);
         }
@@ -164,13 +228,18 @@ impl Header {
         let entry_count = r.u32_le().map_err(short)?;
         let entry_size = r.u32_le().map_err(short)?;
         let entries_crc = r.u32_le().map_err(short)?;
-        if my_lba != 1 {
+        if my_lba != PRIMARY_HEADER_LBA {
             return Err(GptError::NotPrimary);
         }
-        if first_usable < 2 || first_usable > last_usable || last_usable >= disk_blocks {
+        if first_usable < PRIMARY_ENTRIES_LBA
+            || first_usable > last_usable
+            || last_usable >= disk_blocks
+        {
             return Err(GptError::BadUsableRange);
         }
-        if !(MIN_ENTRY_SIZE..=MAX_ENTRY_SIZE).contains(&entry_size) || entry_size % 8 != 0 {
+        if !(MIN_ENTRY_SIZE..=MAX_ENTRY_SIZE).contains(&entry_size)
+            || entry_size % ENTRY_SIZE_ALIGN != 0
+        {
             return Err(GptError::BadEntrySize);
         }
         let array_len = u64::from(entry_count) * u64::from(entry_size);
@@ -183,7 +252,8 @@ impl Header {
             .ok_or(GptError::BadEntryLocation)?;
         // The array must sit between the header and the usable range (primary),
         // entirely on the disk.
-        if entries_lba < 2 || array_end > first_usable || array_end > disk_blocks {
+        if entries_lba < PRIMARY_ENTRIES_LBA || array_end > first_usable || array_end > disk_blocks
+        {
             return Err(GptError::BadEntryLocation);
         }
         Ok(Header {
@@ -257,7 +327,7 @@ impl Entries<'_> {
         let first_lba = r.u64_le().map_err(short)?;
         let last_lba = r.u64_le().map_err(short)?;
         let attributes = r.u64_le().map_err(short)?;
-        let mut name = [0u16; 36];
+        let mut name = [0u16; ENTRY_NAME_UNITS];
         for n in name.iter_mut() {
             *n = r.u16_le().map_err(short)?;
         }
@@ -309,7 +379,7 @@ pub mod build {
         header_out: &mut [u8],
         array_out: &mut [u8],
     ) -> Result<(), Full> {
-        let esz: u32 = 128;
+        let esz: u32 = DEFAULT_ENTRY_SIZE;
         let array_len = (count as usize) * (esz as usize);
         let array_blocks = (array_len as u64).div_ceil(u64::from(block_size));
         {
@@ -324,7 +394,7 @@ pub mod build {
                     first_lba: 0,
                     last_lba: 0,
                     attributes: 0,
-                    name: [0; 36],
+                    name: [0; ENTRY_NAME_UNITS],
                 };
                 let e = e.unwrap_or(&blank);
                 w.put(&e.type_guid.0)?;
@@ -346,17 +416,17 @@ pub mod build {
         w.u32_le(HEADER_MIN)?;
         w.u32_le(0)?; // CRC, patched below
         w.u32_le(0)?;
-        w.u64_le(1)?;
+        w.u64_le(PRIMARY_HEADER_LBA)?;
         w.u64_le(disk_blocks.saturating_sub(1))?;
-        w.u64_le(2 + array_blocks)?;
-        w.u64_le(disk_blocks.saturating_sub(2 + array_blocks))?;
+        w.u64_le(PRIMARY_ENTRIES_LBA + array_blocks)?;
+        w.u64_le(disk_blocks.saturating_sub(PRIMARY_ENTRIES_LBA + array_blocks))?;
         w.put(&disk_guid.0)?;
-        w.u64_le(2)?;
+        w.u64_le(PRIMARY_ENTRIES_LBA)?;
         w.u32_le(count)?;
         w.u32_le(esz)?;
         w.u32_le(array_crc)?;
         let crc = crc32(w.written());
-        w.patch(16, &crc.to_le_bytes())?;
+        w.patch(HEADER_CRC_OFFSET, &crc.to_le_bytes())?;
         Ok(())
     }
 }

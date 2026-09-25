@@ -15,9 +15,25 @@
 //! Offsets are validated against the libbde/dislocker CI oracle (§11 Q10), not
 //! trusted from this comment.
 
+use core::mem::{offset_of, size_of};
+
 pub const SIGNATURE: &[u8; 8] = b"-FVE-FS-";
+
+/// FVE metadata entry header (libbde, "FVE metadata entry"). Layout only:
+/// never instantiated, read through `offset_of!`.
+#[allow(dead_code)]
+#[repr(C, packed)]
+pub(crate) struct EntryHeader {
+    pub(crate) size: u16,
+    pub(crate) entry_type: u16,
+    pub(crate) value_type: u16,
+    pub(crate) version: u16,
+}
+const _: () = assert!(size_of::<EntryHeader>() == 8);
+const _: () = assert!(offset_of!(EntryHeader, value_type) == 4);
+
 /// Minimum entry: size, entry type, value type, version (4 x u16).
-pub const ENTRY_HEADER_LEN: usize = 8;
+pub const ENTRY_HEADER_LEN: usize = size_of::<EntryHeader>();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry<'a> {
@@ -36,7 +52,7 @@ pub enum FveError {
 }
 
 pub fn check_signature(block: &[u8]) -> Result<(), FveError> {
-    if block.get(..8) == Some(&SIGNATURE[..]) {
+    if block.get(..SIGNATURE.len()) == Some(&SIGNATURE[..]) {
         Ok(())
     } else {
         Err(FveError::BadSignature)
@@ -54,7 +70,9 @@ pub fn walk<'a>(entries: &'a [u8], out: &mut [Entry<'a>]) -> Result<usize, FveEr
     let mut pos = 0usize;
     let mut n = 0usize;
     while pos < entries.len() {
-        let size = usize::from(u16_at(entries, pos).ok_or(FveError::EntryOverruns)?);
+        let size = usize::from(
+            u16_at(entries, pos + offset_of!(EntryHeader, size)).ok_or(FveError::EntryOverruns)?,
+        );
         if size == 0 {
             break;
         }
@@ -65,9 +83,12 @@ pub fn walk<'a>(entries: &'a [u8], out: &mut [Entry<'a>]) -> Result<usize, FveEr
             .get(pos..pos + size)
             .ok_or(FveError::EntryOverruns)?;
         let e = Entry {
-            entry_type: u16_at(entry, 2).ok_or(FveError::EntryOverruns)?,
-            value_type: u16_at(entry, 4).ok_or(FveError::EntryOverruns)?,
-            version: u16_at(entry, 6).ok_or(FveError::EntryOverruns)?,
+            entry_type: u16_at(entry, offset_of!(EntryHeader, entry_type))
+                .ok_or(FveError::EntryOverruns)?,
+            value_type: u16_at(entry, offset_of!(EntryHeader, value_type))
+                .ok_or(FveError::EntryOverruns)?,
+            version: u16_at(entry, offset_of!(EntryHeader, version))
+                .ok_or(FveError::EntryOverruns)?,
             data: entry
                 .get(ENTRY_HEADER_LEN..)
                 .ok_or(FveError::EntryOverruns)?,

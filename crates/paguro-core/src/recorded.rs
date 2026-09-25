@@ -19,12 +19,30 @@
 //! still needs the passphrase.
 
 use crate::bytes::{Full, Reader, Writer};
+use core::mem::{offset_of, size_of};
 
 pub const MAGIC: &[u8; 8] = b"PGRREC\x00\x01";
 pub const FILE_NAME: &str = "recorded.bin";
 /// PCRs 0, 2, 4, 7 — the handoff's `PCRS` selection.
 pub const PCR_MASK: u32 = 1 << 0 | 1 << 2 | 1 << 4 | 1 << 7;
-pub const LEN: usize = 8 + 4 + 4 * 32 + 3 * 32;
+/// Recorded PCRs, in file order (the set bits of [`PCR_MASK`], ascending).
+const PCRS: [u32; 4] = [0, 2, 4, 7];
+pub const SHA256_LEN: usize = 32;
+pub const LEN: usize = size_of::<RecordedFile>();
+
+/// `recorded.bin` (PROPOSED layout above). Layout only: never instantiated.
+#[allow(dead_code)]
+#[repr(C, packed)]
+struct RecordedFile {
+    magic: [u8; 8],
+    pcr_mask: u32,
+    pcrs: [[u8; SHA256_LEN]; PCRS.len()],
+    secure_boot_config: [u8; SHA256_LEN],
+    shim_sha256: [u8; SHA256_LEN],
+    loader_sha256: [u8; SHA256_LEN],
+}
+const _: () = assert!(size_of::<RecordedFile>() == 8 + 4 + 4 * 32 + 3 * 32);
+const _: () = assert!(PCRS.len() == PCR_MASK.count_ones() as usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecordedError {
@@ -37,44 +55,41 @@ pub enum RecordedError {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Recorded {
     /// PCR 0, 2, 4, 7, in that order.
-    pub pcrs: [[u8; 32]; 4],
-    pub secure_boot_config: [u8; 32],
-    pub shim_sha256: [u8; 32],
-    pub loader_sha256: [u8; 32],
+    pub pcrs: [[u8; SHA256_LEN]; PCRS.len()],
+    pub secure_boot_config: [u8; SHA256_LEN],
+    pub shim_sha256: [u8; SHA256_LEN],
+    pub loader_sha256: [u8; SHA256_LEN],
 }
 
 impl Recorded {
-    pub fn pcr(&self, index: u32) -> Option<&[u8; 32]> {
-        let slot = match index {
-            0 => 0,
-            2 => 1,
-            4 => 2,
-            7 => 3,
-            _ => return None,
-        };
+    pub fn pcr(&self, index: u32) -> Option<&[u8; SHA256_LEN]> {
+        let slot = PCRS.iter().position(|&p| p == index)?;
         self.pcrs.get(slot)
     }
 }
 
 pub fn parse(file: &[u8]) -> Result<Recorded, RecordedError> {
-    if file.get(..8) != Some(&MAGIC[..]) {
+    if file.get(..MAGIC.len()) != Some(&MAGIC[..]) {
         return Err(RecordedError::BadMagic);
     }
     if file.len() != LEN {
         return Err(RecordedError::BadLength);
     }
-    let mut r = Reader::new(file.get(8..).unwrap_or(&[]));
+    let mut r = Reader::new(
+        file.get(offset_of!(RecordedFile, pcr_mask)..)
+            .unwrap_or(&[]),
+    );
     let short = |_| RecordedError::BadLength;
     if r.u32_le().map_err(short)? != PCR_MASK {
         return Err(RecordedError::BadMask);
     }
     let mut out = Recorded::default();
     for p in out.pcrs.iter_mut() {
-        *p = *r.array::<32>().map_err(short)?;
+        *p = *r.array::<SHA256_LEN>().map_err(short)?;
     }
-    out.secure_boot_config = *r.array::<32>().map_err(short)?;
-    out.shim_sha256 = *r.array::<32>().map_err(short)?;
-    out.loader_sha256 = *r.array::<32>().map_err(short)?;
+    out.secure_boot_config = *r.array::<SHA256_LEN>().map_err(short)?;
+    out.shim_sha256 = *r.array::<SHA256_LEN>().map_err(short)?;
+    out.loader_sha256 = *r.array::<SHA256_LEN>().map_err(short)?;
     Ok(out)
 }
 
