@@ -19,6 +19,14 @@ info() { echo "INFO: $*"; }
 ops() { echo $(($1 * SCALE)); }
 
 dmesg -c > /tmp/boot.dmesg
+# Every 4 minutes, what is waiting where (a hung run then explains itself).
+( while :; do sleep 240
+    echo "DEBUG: $(grep -E 'MemFree|MemAvail' /proc/meminfo | tr -s ' \n' ' ')"
+    for d in /proc/[0-9]*; do
+        c=$(tr '\0' ' ' < $d/cmdline 2>/dev/null | cut -c1-90)
+        [ -n "$c" ] && echo "DEBUG: ${d#/proc/} $(cut -d' ' -f3 $d/stat) $(cat $d/wchan) $c"
+    done | grep -v "sleep 240\| tr \| cut \| cat /proc" | head -30
+  done ) &
 insmod /dm-paguro.ko && ok "insmod" || bad "insmod"
 
 # ---- building a volume ---------------------------------------------------------
@@ -54,9 +62,9 @@ populate() {
 
 # ---- stress ---------------------------------------------------------------
 # Every job appends its exit status to /tmp/jobs; stress_wait checks them.
-job() { name=$1; shift; ( "$@" > "/tmp/job.$name" 2>&1; echo "$name $?" >> /tmp/jobs ) & }
+job() { name=$1; shift; ( "$@" > "/tmp/job.$name" 2>&1; echo "$name $?" >> /tmp/jobs ) & echo $! >> /tmp/jobpids; }
 stress_wait() {
-    wait
+    for p in $(cat /tmp/jobpids); do wait $p; done; : > /tmp/jobpids
     while read -r n s; do
         [ "$s" = 0 ] && ok "$1: $n" || { bad "$1: $n exited $s"; tail -5 "/tmp/job.$n"; }
     done < /tmp/jobs

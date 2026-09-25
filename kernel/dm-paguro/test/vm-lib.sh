@@ -85,6 +85,6 @@ vm_boot() {
         -append "console=ttyS0 quiet panic=-1 $append" "$@" 2>&1 | tr -d '\r' > "$log" &
     qpid=$!
     tail -f "$log" --pid=$qpid 2>/dev/null |
-        grep --line-buffered -E "PASS|FAIL|SKIP|RESULT|status:|BUG|Oops|WARNING|paguro|INFO|pgstress:|CORRUPT" || true
+        grep --line-buffered -E "PASS|FAIL|SKIP|RESULT|status:|BUG|Oops|WARNING|paguro|INFO|pgstress:|CORRUPT|DEBUG" || true
     wait $qpid
 }
