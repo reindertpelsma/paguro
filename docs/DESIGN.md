@@ -2192,6 +2192,18 @@ quality-of-experience property, since §4.3 holds with or without it.
   the substituted FVE metadata through view B (§6 The VM boot)
 - presents a **virtio device** as the driver's confirmation channel
 - presents **no TPM** (§6)
+- presents **the host's identity, so Windows stays activated without a
+  watermark** (§1b, §11 Q32), by default:
+  - the host's **whole SMBIOS table** (`/sys/firmware/dmi/tables/DMI` →
+    `-smbios file=…`), with paguro's type-11 marker appended — the same
+    manufacturer, model, board, serial and system UUID the native boot sees;
+  - the firmware's licence tables: **MSDM** (the OEM key, `-acpitable
+    file=/sys/firmware/acpi/tables/MSDM`) and **SLIC** where present;
+  - **`-cpu host`**, the real CPU model and features;
+  - the system disk's **serial number** on the virtual disk, and the host
+    network adapter's **MAC address** on the VM's NAT adapter (never a bridged
+    one, where the duplicate MAC would clash on the LAN).
+  The hypervisor CPUID bit stays set (§11 Q32).
 - configures `werror=report,rerror=report`, so `EIO` reaches the guest as an
   error rather than pausing the VM (§11 Q8)
 - **stops the VM** if no driver has reported within ~60 s (§4.4) — a
