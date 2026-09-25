@@ -165,3 +165,12 @@ path = "fuzz_targets/ntfs_lookup.rs"
 test = false
 doc = false
 bench = false
+
+# ---- The Windows tool's inputs (INTERFACES §11.5, §11.6; DESIGN §4.6) -------
+
+[[bin]]
+name = "win_formats"
+path = "fuzz_targets/win_formats.rs"
+test = false
+doc = false
+bench = false

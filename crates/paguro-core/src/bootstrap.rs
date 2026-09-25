@@ -255,14 +255,128 @@ pub fn write_optional_data(
     out
 }
 
+/// A GPT Hard Drive media node (UEFI 2.10 §10.3.5.1): the partition a
+/// `Boot####` entry's file lives on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HardDrive {
+    /// 1-based GPT partition number.
+    pub partition_number: u32,
+    pub start_lba: u64,
+    pub size_lba: u64,
+    /// The partition's unique GUID (GPT on-disk byte order).
+    pub partition_guid: Guid,
+}
+
+/// Length of a Hard Drive node's data (42-byte node minus its 4-byte header).
+const HD_DATA_LEN: usize = 38;
+/// `MBRType` 2 = GPT, `SignatureType` 2 = GUID.
+const HD_GPT: [u8; 2] = [2, 2];
+
+/// The GPT Hard Drive node in `node`, if it is one. Only the GPT form is
+/// accepted: paguro's ESP is always on a GPT disk.
+pub fn parse_hard_drive(node: &Node<'_>) -> Option<HardDrive> {
+    if node.kind != DP_MEDIA || node.sub != DP_MEDIA_HARD_DRIVE || node.data.len() != HD_DATA_LEN {
+        return None;
+    }
+    let mut r = Reader::new(node.data);
+    let partition_number = r.u32_le().ok()?;
+    let start_lba = r.u64_le().ok()?;
+    let size_lba = r.u64_le().ok()?;
+    let partition_guid = Guid(*r.array::<16>().ok()?);
+    (r.rest() == HD_GPT).then_some(HardDrive {
+        partition_number,
+        start_lba,
+        size_lba,
+        partition_guid,
+    })
+}
+
+/// Serialise an `EFI_LOAD_OPTION` whose device path is a GPT Hard Drive node
+/// followed by a File Path node: the shape firmware and `bcdboot` write for
+/// an entry on the ESP, and what `paguro efi boot-entry create` writes.
+pub fn write_load_option_hd(
+    attributes: u32,
+    description: &str,
+    hd: &HardDrive,
+    path: &str,
+    optional: &[u8],
+    out: &mut [u8],
+) -> Result<usize, Full> {
+    let mut w = Writer::new(out);
+    w.u32_le(attributes)?;
+    let path_units = path.encode_utf16().count() + 1;
+    let fp_node = 4 + path_units * 2;
+    let fpl = (4 + HD_DATA_LEN) + fp_node + 4;
+    w.u16_le(u16::try_from(fpl).map_err(|_| Full)?)?;
+    for u in description.encode_utf16() {
+        w.u16_le(u)?;
+    }
+    w.u16_le(0)?;
+    w.u8(DP_MEDIA)?;
+    w.u8(DP_MEDIA_HARD_DRIVE)?;
+    w.u16_le(4 + HD_DATA_LEN as u16)?;
+    w.u32_le(hd.partition_number)?;
+    w.u64_le(hd.start_lba)?;
+    w.u64_le(hd.size_lba)?;
+    w.put(&hd.partition_guid.0)?;
+    w.put(&HD_GPT)?;
+    w.u8(DP_MEDIA)?;
+    w.u8(DP_MEDIA_FILE_PATH)?;
+    w.u16_le(u16::try_from(fp_node).map_err(|_| Full)?)?;
+    for u in path.encode_utf16() {
+        w.u16_le(u)?;
+    }
+    w.u16_le(0)?;
+    w.put(&[DP_END, DP_END_ENTIRE, 4, 0])?;
+    w.put(optional)?;
+    Ok(w.len())
+}
+
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
 
     fn option(desc: &str, path: &str, opt: &[u8]) -> ([u8; 512], usize) {
         let mut b = [0u8; 512];
         let n = write_load_option(LOAD_OPTION_ACTIVE, desc, path, opt, &mut b).unwrap();
         (b, n)
+    }
+
+    #[test]
+    fn hard_drive_option_roundtrips() {
+        let hd = HardDrive {
+            partition_number: 1,
+            start_lba: 2048,
+            size_lba: 204_800,
+            partition_guid: Guid([0x5a; 16]),
+        };
+        let od = write_optional_data(&Guid([9; 16]), &[1; 16], &[2; 32]);
+        let mut b = [0u8; 512];
+        let n = write_load_option_hd(
+            LOAD_OPTION_ACTIVE,
+            "paguro",
+            &hd,
+            "\\EFI\\paguro\\shimx64.efi",
+            &od,
+            &mut b,
+        )
+        .unwrap();
+        let lo = parse_load_option(&b[..n]).unwrap();
+        let mut nodes = std::vec::Vec::new();
+        assert_eq!(walk_device_path(lo.file_path, |nd| nodes.push(nd)), Ok(2));
+        assert_eq!(parse_hard_drive(&nodes[0]), Some(hd));
+        assert_eq!(parse_hard_drive(&nodes[1]), None);
+        assert_eq!(parse(&b[..n]).unwrap().volume, Guid([9; 16]));
+        // An MBR-signature node is not ours.
+        let mut data = [0u8; 38];
+        data[36] = 1;
+        let mbr = Node {
+            kind: DP_MEDIA,
+            sub: DP_MEDIA_HARD_DRIVE,
+            data: &data,
+        };
+        assert_eq!(parse_hard_drive(&mbr), None);
     }
 
     #[test]

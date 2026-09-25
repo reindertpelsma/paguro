@@ -20,6 +20,11 @@
 //! | [`seal`]    | §6 — the `*_seal.bin` file layouts               |
 //! | [`fve`]     | §6 — bounded walk over BitLocker FVE metadata    |
 //! | [`bde`]     | §6 — BitLocker volume header, metadata cross-check, protectors, sector map |
+//! | [`efisig`]  | §11.6 — `EFI_SIGNATURE_LIST` (`MokNew`, `db`, `MokListRT`) |
+//! | [`smbios`]  | §11.5 — the DMI strings of the host-hardware export |
+//! | [`hwid`]    | §11.5 — Windows hardware IDs → PCI/USB/ACPI identities and Linux modaliases |
+//! | [`recorded`] | §4.6 — what Linux recorded for the pre-flight (PROPOSED) |
+//! | [`tcglog`]  | §4.6 — the TCG event log's PCR 7 driver-config prefix (pre-flight) |
 #![no_std]
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::indexing_slicing))]
@@ -30,15 +35,20 @@ pub mod bytes;
 pub mod config;
 pub mod disk;
 pub mod edid;
+pub mod efisig;
 pub mod fat;
 pub mod fve;
 pub mod gpt;
 pub mod guid;
 pub mod handoff;
+pub mod hwid;
 pub mod ini;
 pub mod ntfs;
 pub mod range;
+pub mod recorded;
 pub mod runlist;
 pub mod seal;
+pub mod smbios;
+pub mod tcglog;
 pub mod tpm;
 pub mod vhd;
