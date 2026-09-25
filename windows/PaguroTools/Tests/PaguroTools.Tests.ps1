@@ -20,7 +20,11 @@ Describe 'PaguroTools' {
         $env:PAGURO_PIPE = $srv.PipeName
         $env:PAGURO_SHELL = if ($IsWindows) { 'hostname.exe' } else { 'true' }
 
-        function script:Last { $srv.Calls[$srv.Calls.Count - 1] }
+        # These tests check what reaches the service; a command error the fixture
+    # answers with (the demo machine has no Boot0001, no mok.der) is written,
+    # not thrown, even under the CI shell's $ErrorActionPreference = 'Stop'.
+    $global:PSDefaultParameterValues['*-Paguro*:ErrorAction'] = 'SilentlyContinue'
+    function script:Last { $srv.Calls[$srv.Calls.Count - 1] }
         function script:P([string] $name) {
             $n = (Last).Params[$name]
             if ($null -eq $n) { return $null }
