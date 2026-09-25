@@ -863,6 +863,26 @@ Each interface ships with:
 | Windows, hosted | minifilter build + static analysis, test-signed load with `fltmc` on hosted `windows-2022/2025` (runner images ship with `TESTSIGNING ON`) | `windows/` | yes |
 | Windows, WinPE VM | WinPE built with the ADK on a Windows runner, booted by QEMU/KVM on a Linux runner over the module's views: reboot, bugcheck and end-to-end (EIO + minifilter) tests | `test/winpe/` | yes (private artifacts only) |
 
+### 12.0 Hostile interfaces, including denial of service
+
+Every kernel entry point treats its caller as hostile: `/dev/paguro` and the
+device-mapper table lines, `/dev/paguro-handoff`, and the minifilter's port. A
+root caller is trusted to *configure* (DESIGN §8), never to crash, hang, leak or
+exhaust the kernel.
+
+| Property | How it is tested |
+|---|---|
+| malformed input is refused cleanly | fuzzing every ioctl / message / table line: random bytes, every wrong size, bad user pointers, overflowing counts and lengths, unknown numbers |
+| user memory is read once | the struct is copied in a single `copy_from_user` and validated after the copy; tests race a writer against the ioctl |
+| privilege is checked in the entry point | calls without `CAP_SYS_ADMIN` / a non-admin port client / a second client fail, whatever the file mode |
+| lifetime is safe | concurrent claim / grow / release / volume remove / table load / I/O / `rmmod`, and filter unload or disconnect during messages |
+| **denial of service** | bounded everything: volumes, claims, extents, tables, pending growth requests, EVENT messages queued to the service (dropped with a counter when full); refused-I/O logging rate-limited; no unbounded waits in an ioctl or a filter callback; floods of ioctls or messages keep the rest of the system responsive and leak nothing |
+
+Run under KASAN, UBSAN, KCSAN, lockdep and kmemleak in the Linux VM (a
+syzkaller description for `/dev/paguro` once the hand-written fuzzer is clean),
+and under Driver Verifier (special pool, I/O verification, low-resource
+simulation) on the Windows runner.
+
 ### 12.1 Power loss after every write — the release bar
 
 Every write sequence we can produce (ntfs3 growth, WinPE/Windows guest I/O
