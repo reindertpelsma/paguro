@@ -137,9 +137,9 @@ struct Expect<'a> {
     /// The root image's identity (the claim).
     id: (u64, u16),
     ro: bool,
-    /// The module itself made the claim read-only (dirty volume). A
-    /// hibernated Windows is the initrd's call alone: the module cannot
-    /// see `hiberfil.sys`.
+    /// The module itself made the claim read-only: a dirty `$Volume`, or
+    /// a volume the initrd added with `PG_VOLUME_READ_ONLY` (hibernation,
+    /// which only the loader can see, or dirty per the handoff).
     claim_ro: bool,
     boot: u32,
 }
@@ -633,7 +633,8 @@ pub fn dirty(env: &Env) -> R<()> {
 }
 
 /// A hibernated Windows (`hiberfil.sys` starting `HIBR`): read-only too —
-/// initrd policy, since only the loader sees the hibernation file.
+/// the loader sees the hibernation file, the initrd passes it on as
+/// `PG_VOLUME_READ_ONLY`, and the module makes the claim read-only.
 pub fn hibernated(env: &Env) -> R<()> {
     degraded(
         env,
@@ -646,6 +647,6 @@ pub fn hibernated(env: &Env) -> R<()> {
             })
         },
         "Windows saved a session",
-        false,
+        true,
     )
 }
