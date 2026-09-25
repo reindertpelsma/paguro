@@ -61,7 +61,7 @@ trap 'unmount "$work/mnt" || true; rm -rf "$work"' EXIT
 cp --sparse=always "$in" "$work/plain.img"
 
 # Reserve the regions as ordinary (non-resident, contiguous) files.
-cluster=$(ntfsinfo -m "$work/plain.img" 2>/dev/null | awk '/Cluster Size:/ {print $3; exit}')
+cluster=$(ntfsinfo -m "$work/plain.img" 2>/dev/null | awk '/Cluster Size:/ && !n++ {print $3}')
 reserve() { # name bytes -> byte offset of its single run
   head -c "$2" /dev/urandom > "$work/r"
   ntfscp -q -f "$work/plain.img" "$work/r" "$1" >/dev/null 2>&1 \
