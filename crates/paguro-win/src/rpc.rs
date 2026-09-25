@@ -43,6 +43,8 @@ use crate::out::{CmdError, CmdResult, Exit, Report};
 pub const API_VERSION: &str = "1.0";
 /// The named pipe (INTERFACES.md §11.7).
 pub const PIPE: &str = r"\\.\pipe\paguro";
+/// Its name (the part after `\\.\pipe\`).
+pub const PIPE_NAME: &str = "paguro";
 /// Largest request or response line on the pipe.
 pub const MAX_MESSAGE: usize = 4 << 20;
 
