@@ -8,8 +8,12 @@ use std::time::Duration;
 pub fn watchdog(secs: u64, what: &'static str) -> Guard {
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
-        if rx.recv_timeout(Duration::from_secs(secs)) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
-            eprintln!("\nWATCHDOG: {what} still running after {secs} s: a hang (a pipe read or a process wait without an answer)");
+        if rx.recv_timeout(Duration::from_secs(secs))
+            == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        {
+            eprintln!(
+                "\nWATCHDOG: {what} still running after {secs} s: a hang (a pipe read or a process wait without an answer)"
+            );
             std::process::exit(124);
         }
     });

@@ -253,7 +253,10 @@ impl Drop for TempUser {
 /// logon (no interactive group) is not admitted at all.
 #[test]
 fn a_standard_user_is_read_only_and_a_network_logon_is_refused() {
-    let _watchdog = watchdog::watchdog(60, "a_standard_user_is_read_only_and_a_network_logon_is_refused");
+    let _watchdog = watchdog::watchdog(
+        60,
+        "a_standard_user_is_read_only_and_a_network_logon_is_refused",
+    );
     if std::env::var_os("PAGURO_PIPE_ACCOUNT_TESTS").is_none() {
         eprintln!("skipped: set PAGURO_PIPE_ACCOUNT_TESTS=1 (creates a local user)");
         return;
