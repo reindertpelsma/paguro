@@ -93,6 +93,8 @@ struct Env {
     efi_aa64: Option<PathBuf>,
     probe_aa64: Option<PathBuf>,
     aavmf: PathBuf,
+    /// test/qemu/tablet-shim: boots first, gives usb-tablet a pointer.
+    tablet_shim: Option<PathBuf>,
     ovmf: PathBuf,
     work: PathBuf,
     kvm: bool,
@@ -122,6 +124,12 @@ fn make_esp(env: &Env, name: &str, efi: &Path, files: &[(&str, &[u8])]) -> R<Pat
     std::fs::create_dir_all(dir.join("EFI/paguro")).map_err(|e| e.to_string())?;
     std::fs::copy(efi, dir.join("EFI/BOOT/BOOTX64.EFI")).map_err(|e| e.to_string())?;
     for (f, data) in files {
+        // `/EFI/BOOT/…`: next to the default loader (the tablet shim's
+        // PAGURO.EFI).
+        if let Some(boot) = f.strip_prefix("/EFI/BOOT/") {
+            std::fs::write(dir.join("EFI/BOOT").join(boot), data).map_err(|e| e.to_string())?;
+            continue;
+        }
         let path = dir.join("EFI/paguro").join(f);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -403,6 +411,8 @@ struct Vm {
     child: Child,
     stdin: ChildStdin,
     out: Arc<Mutex<String>>,
+    /// The serial stream as sent, escape sequences and all.
+    raw: Arc<Mutex<Vec<u8>>>,
     cursor: usize,
     log_path: PathBuf,
     _tpm: Option<Swtpm>,
@@ -448,7 +458,7 @@ impl Vm {
         vars: &Path,
         state: &Path,
     ) -> R<Vm> {
-        Self::launch(env, name, secure, disks, vars, state, None)
+        Self::launch(env, name, secure, disks, vars, state, None, &[])
     }
 
     /// As [`Vm::start`], with a QMP socket at `qmp` (for screendumps).
@@ -463,7 +473,23 @@ impl Vm {
         state: &Path,
         qmp: Option<&Path>,
     ) -> R<Vm> {
-        Self::launch(env, name, secure, &[esp, data], vars, state, qmp)
+        Self::launch(env, name, secure, &[esp, data], vars, state, qmp, &[])
+    }
+
+    /// As [`Vm::start_with`], with extra QEMU arguments (devices).
+    #[allow(clippy::too_many_arguments)]
+    fn start_ext(
+        env: &Env,
+        name: &str,
+        secure: bool,
+        esp: &Path,
+        data: &Path,
+        vars: &Path,
+        state: &Path,
+        qmp: Option<&Path>,
+        extra: &[&str],
+    ) -> R<Vm> {
+        Self::launch(env, name, secure, &[esp, data], vars, state, qmp, extra)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -475,6 +501,7 @@ impl Vm {
         vars: &Path,
         state: &Path,
         qmp: Option<&Path>,
+        extra: &[&str],
     ) -> R<Vm> {
         let tpm = swtpm_for_qemu(state)?;
         let code = env.ovmf.join(if secure {
@@ -492,7 +519,8 @@ impl Vm {
             .args([
                 "-m", "512", "-display", "none", "-serial", "stdio", "-monitor", "none",
             ])
-            .args(["-no-reboot", "-net", "none"]);
+            .args(["-no-reboot", "-net", "none"])
+            .args(extra);
         if let Some(q) = qmp {
             let _ = std::fs::remove_file(q);
             cmd.arg("-qmp")
@@ -538,13 +566,18 @@ impl Vm {
         let mut stdout = child.stdout.take().ok_or("no stdout")?;
         let mut stderr = child.stderr.take().ok_or("no stderr")?;
         let out = Arc::new(Mutex::new(String::new()));
+        let raw = Arc::new(Mutex::new(Vec::new()));
         let sink = out.clone();
+        let rawsink = raw.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             let mut esc = false;
             while let Ok(n) = stdout.read(&mut buf) {
                 if n == 0 {
                     break;
+                }
+                if let Ok(mut r) = rawsink.lock() {
+                    r.extend_from_slice(&buf[..n]);
                 }
                 let mut s = String::new();
                 clean(&buf[..n], &mut esc, &mut s);
@@ -568,6 +601,7 @@ impl Vm {
             child,
             stdin,
             out,
+            raw,
             cursor: 0,
             log_path,
             _tpm: tpm,
@@ -576,6 +610,20 @@ impl Vm {
 
     fn text(&self) -> String {
         self.out.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    fn raw(&self) -> Vec<u8> {
+        self.raw.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// Send an escape sequence whole (a terminal sends it in one write).
+    fn send_seq(&mut self, s: &str) -> R<()> {
+        self.stdin
+            .write_all(s.as_bytes())
+            .map_err(|e| e.to_string())?;
+        self.stdin.flush().map_err(|e| e.to_string())?;
+        std::thread::sleep(Duration::from_millis(300));
+        Ok(())
     }
 
     /// Wait for `needle` after the cursor; move the cursor past it.
@@ -587,8 +635,9 @@ impl Vm {
                 self.cursor += i + needle.len();
                 return Ok(());
             }
-            if t.is_empty() && t0.elapsed() > Duration::from_secs(30) {
-                return Err("firmware silent for 30 s (no console output at all)".into());
+            // Generous: OVMF under TCG on a loaded host can take a while.
+            if t.is_empty() && t0.elapsed() > Duration::from_secs(90) {
+                return Err("firmware silent for 90 s (no console output at all)".into());
             }
             if t0.elapsed() > Duration::from_secs(secs) {
                 let tail: String = t
@@ -681,11 +730,11 @@ fn recovery_no_config(env: &Env) -> R<()> {
         vm.expect("created B", 10)?;
         vm.expect("pcrs 0=", 10)?;
         vm.expect(&format!("volume {VOLUME} (BitLocker)"), 10)?;
-        vm.expect("Unlock Linux", 10)?;
-        vm.expect("unattested", 5)?;
-        vm.expect("[x] TPM unavailable until restart -- recovery mode", 5)?;
+        vm.expect("Unattested", 10)?;
+        vm.expect("Unlock Linux", 5)?;
+        vm.expect("unavailable until restart", 5)?;
         vm.send("3")?;
-        vm.expect("Recovery key (48 digits", 10)?;
+        vm.expect("Enter your recovery key", 10)?;
         vm.send(RECOVERY_PW)?;
         vm.send("\r")?;
         // The data disk is a real BitLocker volume (make.sh): the recovery
@@ -771,13 +820,14 @@ fn load_taint_and_unseal(env: &Env) -> R<()> {
         vm.expect("Unlock Linux", 10)?;
         vm.expect("TPM attempts left", 5)?;
         vm.send("1")?;
-        vm.expect("Password or PIN:", 10)?;
+        vm.expect("Enter your password or PIN", 10)?;
         vm.send("wrong\r")?;
         vm.expect("rung tpm failed: Rc(", STRETCH_WAIT)?;
-        vm.expect("That did not unlock the volume", 10)?;
+        // The unlock list again, saying why first.
+        vm.expect("That did not unlock Linux", 10)?;
         vm.expect("Unlock Linux", 10)?;
         vm.send("1")?;
-        vm.expect("Password or PIN:", 10)?;
+        vm.expect("Enter your password or PIN", 10)?;
         vm.send(PIN)?;
         vm.send("\r")?;
         vm.expect("rung tpm: unsealed", STRETCH_WAIT)?;
@@ -870,7 +920,7 @@ fn secure_boot_hash_mismatch(env: &Env) -> R<()> {
         vm.send("r")?;
         vm.expect("recovery (HashMismatch)", 10)?;
         vm.expect(&format!("pcr12={} (recovery)", hex(&capped(1))), 10)?;
-        vm.expect("unattested", 20)
+        vm.expect("Unattested", 20)
     })
 }
 
@@ -918,22 +968,58 @@ fn qmp(
     }
 }
 
-/// `screendump` to a PPM and read it back as (width, height, RGB).
-fn screendump(sock: &Path, out: &Path) -> R<(usize, usize, Vec<u8>)> {
+/// A QMP connection past the capabilities handshake.
+fn qmp_connect(sock: &Path) -> R<(UnixStream, std::io::BufReader<UnixStream>)> {
     use std::io::BufRead;
-    let mut s = UnixStream::connect(sock).map_err(|e| format!("qmp connect: {e}"))?;
-    s.set_read_timeout(Some(Duration::from_secs(20)))
+    // QEMU re-creates its single-client QMP listener after each client
+    // leaves; connecting in that gap finds no socket. Retry for a while.
+    let t0 = Instant::now();
+    let s = loop {
+        match UnixStream::connect(sock) {
+            Ok(s) => break s,
+            Err(e) if t0.elapsed() > Duration::from_secs(30) => {
+                return Err(format!("qmp connect {}: {e}", sock.display()));
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
+    s.set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|e| e.to_string())?;
     let mut r = std::io::BufReader::new(s.try_clone().map_err(|e| e.to_string())?);
     let mut greeting = String::new();
     r.read_line(&mut greeting).map_err(|e| e.to_string())?;
+    let mut s = s;
     qmp(&mut s, &mut r, "{\"execute\":\"qmp_capabilities\"}\n")?;
+    Ok((s, r))
+}
+
+/// Run QMP commands in order; any error fails.
+fn qmp_run(sock: &Path, cmds: &[String]) -> R<()> {
+    let (mut s, mut r) = qmp_connect(sock)?;
+    for c in cmds {
+        let reply = qmp(&mut s, &mut r, &format!("{c}\n"))?;
+        if reply.contains("\"error\"") {
+            return Err(format!("qmp {c}: {reply}"));
+        }
+    }
+    Ok(())
+}
+
+/// `screendump` to a PPM and read it back as (width, height, RGB).
+fn screendump(sock: &Path, out: &Path) -> R<(usize, usize, Vec<u8>)> {
+    screendump_dev(sock, out, None)
+}
+
+/// `screendump` of one display device (by its QEMU id).
+fn screendump_dev(sock: &Path, out: &Path, device: Option<&str>) -> R<(usize, usize, Vec<u8>)> {
+    let (mut s, mut r) = qmp_connect(sock)?;
     let _ = std::fs::remove_file(out);
+    let dev = device.map_or(String::new(), |d| format!(",\"device\":\"{d}\""));
     let reply = qmp(
         &mut s,
         &mut r,
         &format!(
-            "{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{}\"}}}}\n",
+            "{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{}\"{dev}}}}}\n",
             out.display()
         ),
     )?;
@@ -963,6 +1049,50 @@ fn screendump(sock: &Path, out: &Path) -> R<(usize, usize, Vec<u8>)> {
         return Err(format!("not a P6 PPM: {fields:?}"));
     }
     Ok((w, h, data[at..at + w * h * 3].to_vec()))
+}
+
+/// The most common colour of an RGB frame and its share (0..=100).
+fn dominant(rgb: &[u8]) -> ((u8, u8, u8), usize) {
+    let mut counts = std::collections::HashMap::new();
+    for p in rgb.chunks_exact(3) {
+        *counts.entry((p[0], p[1], p[2])).or_insert(0usize) += 1;
+    }
+    let (c, n) = counts
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .unwrap_or(((0, 0, 0), 0));
+    (c, n * 100 / (rgb.len() / 3).max(1))
+}
+
+fn near(a: (u8, u8, u8), c: paguro_ui::theme::Color) -> bool {
+    a.0.abs_diff(c.r) <= 4 && a.1.abs_diff(c.g) <= 4 && a.2.abs_diff(c.b) <= 4
+}
+
+/// Wait until display `device`'s dominant colour is (or is not) `c`.
+fn wait_colour(
+    env: &Env,
+    sock: &Path,
+    name: &str,
+    device: Option<&str>,
+    c: paguro_ui::theme::Color,
+    want: bool,
+) -> R<(usize, usize)> {
+    let t0 = Instant::now();
+    loop {
+        let (w, h, rgb) = screendump_dev(sock, &env.work.join(format!("{name}.ppm")), device)?;
+        let (d, share) = dominant(&rgb);
+        if near(d, c) == want && share >= 40 {
+            return Ok((w, h));
+        }
+        if t0.elapsed() > Duration::from_secs(60) {
+            return Err(format!(
+                "{} dominant colour {d:?} ({share}%), expected {}{c:?}",
+                device.unwrap_or("display"),
+                if want { "" } else { "anything but " }
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// The loader draws the unlock screen through GOP under OVMF. Compared
@@ -1028,6 +1158,280 @@ fn graphical_unlock(env: &Env) -> R<()> {
     r
 }
 
+/// The recovery unlock menu this firmware shows (no configuration, no
+/// passphrase seal): for pointer targets.
+fn recovery_menu() -> paguro_boot::platform::Screen {
+    paguro_boot::platform::Screen::Unlock(paguro_boot::platform::UnlockMenu {
+        password_or_pin: false,
+        recovery_passphrase: false,
+        recovery_key: true,
+        tpm: Err(paguro_boot::platform::Grey::RecoveryMode),
+        unattested: true,
+        first_boot: false,
+    })
+}
+
+/// The loader's "paguro: graphics WxH on display N" line for display 0.
+fn resolution(line: &str) -> R<(u32, u32)> {
+    let wh = line.split_whitespace().next().ok_or("no resolution")?;
+    let (w, h) = wh.split_once('x').ok_or("no resolution")?;
+    Ok((
+        w.parse().map_err(|_| "width")?,
+        h.parse().map_err(|_| "height")?,
+    ))
+}
+
+/// `auto`: graphics on the display and the text UI on the serial port at
+/// once, driven from the serial port with VT100 escape sequences: F5 and
+/// arrows through the language list, F4 and a lone Esc, F2 (the light
+/// variant on screen), F3 (text on the display and back), then the unlock.
+fn serial_vt100_auto(env: &Env) -> R<()> {
+    let name = "serial-vt100-auto";
+    let (vars, state) = fresh(env, name, "OVMF_VARS_4M.fd")?;
+    let esp = make_esp(env, name, &env.efi, &[])?;
+    let data = make_data_disk(env)?;
+    let sock = state.join("qmp.sock");
+    let mut vm = Vm::start_with(env, name, false, &esp, &data, &vars, &state, Some(&sock))?;
+    let themes = paguro_ui::builtin::THEMES;
+    let r = (|| {
+        vm.expect("serial console(s)", BOOT_WAIT)?;
+        vm.expect("paguro: screen unlock", 60)?;
+        vm.expect("Unlock Linux", 20)?;
+        wait_colour(env, &sock, name, None, themes[0].palette.background, true)?;
+        let raw = vm.raw();
+        if !raw.windows(4).any(|w| w == b"\x1b[2J") {
+            return Err("the serial console got no VT100 screen".into());
+        }
+        // F5, End, Up, Down, Enter: Dutch (the last of en, de, es, fr, nl).
+        vm.send_seq("\x1b[15~")?;
+        vm.expect("Language", 20)?;
+        vm.send_seq("\x1b[F")?;
+        vm.send_seq("\x1b[A")?;
+        vm.send_seq("\x1b[B")?;
+        vm.send_seq("\r")?;
+        vm.expect("Linux ontgrendelen", 20)?;
+        // F5, Home, Enter: English again.
+        vm.send_seq("\x1b[15~")?;
+        vm.expect("Taal", 20)?;
+        vm.send_seq("\x1b[H")?;
+        vm.send_seq("\r")?;
+        vm.expect("Unlock Linux", 20)?;
+        // F4, then a lone Esc: back where we were.
+        vm.send_seq("\x1b[14~")?;
+        vm.expect("Keyboard layout", 20)?;
+        vm.send_seq("\x1b")?;
+        vm.expect("Unlock Linux", 20)?;
+        // F2: the light variant.
+        vm.send_seq("\x1bOQ")?;
+        wait_colour(env, &sock, name, None, themes[1].palette.background, true)?;
+        // F3: the display shows the firmware text console; F3 again: back.
+        vm.send_seq("\x1bOR")?;
+        wait_colour(env, &sock, name, None, themes[1].palette.background, false)?;
+        vm.send_seq("\x1bOR")?;
+        wait_colour(env, &sock, name, None, themes[1].palette.background, true)?;
+        vm.send("3")?;
+        vm.expect("Enter your recovery key", 20)?;
+        vm.send(RECOVERY_PW)?;
+        vm.send("\r")?;
+        vm.expect("halted: NotImplemented(\"stage 3: recovery password\")", 60)?;
+        Ok(())
+    })();
+    vm.stop();
+    r
+}
+
+/// `[UI] mode = text`: the text UI on ConOut only (its serial terminal
+/// carries it), the display shows the firmware console, not the theme.
+fn mode_text(env: &Env) -> R<()> {
+    ui_mode_case(
+        env,
+        "mode-text",
+        "theme = light\nmode = text",
+        |env, vm, sock, name| {
+            vm.expect("paguro: ui light text us", 10)?;
+            vm.expect("Unlock Linux", 30)?;
+            let bg = paguro_ui::builtin::THEMES[1].palette.background;
+            wait_colour(env, sock, name, None, bg, false)?;
+            vm.send("3")?;
+            vm.expect("Enter your recovery key", 20)?;
+            Ok(())
+        },
+    )
+}
+
+/// `[UI] mode = graphics`, light: the theme on the display, no text UI on
+/// the serial port (only the log), keys still accepted from it.
+fn mode_graphics_light(env: &Env) -> R<()> {
+    ui_mode_case(
+        env,
+        "mode-graphics",
+        "theme = light\nmode = graphics",
+        |env, vm, sock, name| {
+            vm.expect("paguro: ui light graphics us", 10)?;
+            vm.expect("paguro: screen unlock", 30)?;
+            let bg = paguro_ui::builtin::THEMES[1].palette.background;
+            wait_colour(env, sock, name, None, bg, true)?;
+            std::thread::sleep(Duration::from_secs(2));
+            if vm.text().contains("Unlock Linux") {
+                return Err("text UI on the serial port in graphics mode".into());
+            }
+            vm.send("3")?;
+            vm.expect("paguro: screen secret", 20)?;
+            Ok(())
+        },
+    )
+}
+
+/// A configured boot (Secure Boot off, no seal) with `[UI] ui`.
+fn ui_mode_case(
+    env: &Env,
+    name: &str,
+    ui: &str,
+    script: impl FnOnce(&Env, &mut Vm, &Path, &str) -> R<()>,
+) -> R<()> {
+    let (vars, state) = fresh(env, name, "OVMF_VARS_4M.fd")?;
+    let mut ini = ini_text();
+    ini.extend_from_slice(format!("\n[UI]\n{ui}\n").as_bytes());
+    let esp = make_esp(env, name, &env.efi, &[("paguro.ini", &ini)])?;
+    let data = make_data_disk(env)?;
+    let sock = state.join("qmp.sock");
+    let mut vm = Vm::start_with(env, name, false, &esp, &data, &vars, &state, Some(&sock))?;
+    let r = (|| {
+        vm.expect("stage2 ok (1 entries, default debian)", BOOT_WAIT)?;
+        script(env, &mut vm, &sock, name)
+    })();
+    vm.stop();
+    r
+}
+
+/// Two display devices: the loader draws on both, each at its own mode.
+fn two_displays(env: &Env) -> R<()> {
+    let name = "two-displays";
+    let (vars, state) = fresh(env, name, "OVMF_VARS_4M.fd")?;
+    let esp = make_esp(env, name, &env.efi, &[])?;
+    let data = make_data_disk(env)?;
+    let sock = state.join("qmp.sock");
+    let mut vm = Vm::start_ext(
+        env,
+        name,
+        false,
+        &esp,
+        &data,
+        &vars,
+        &state,
+        Some(&sock),
+        &[
+            "-vga",
+            "none",
+            "-device",
+            "VGA,id=video0,xres=1280,yres=800",
+            "-device",
+            "bochs-display,id=video1,xres=1024,yres=768",
+        ],
+    )?;
+    let bg = paguro_ui::builtin::THEMES[0].palette.background;
+    let r = (|| {
+        vm.expect("on display 0", BOOT_WAIT)?;
+        vm.expect("on display 1", 10)?;
+        vm.expect("paguro: screen unlock", 60)?;
+        let a = wait_colour(env, &sock, &format!("{name}-0"), Some("video0"), bg, true)?;
+        let b = wait_colour(env, &sock, &format!("{name}-1"), Some("video1"), bg, true)?;
+        println!(
+            "  video0 {}x{}, video1 {}x{}: both show the theme",
+            a.0, a.1, b.0, b.1
+        );
+        Ok(())
+    })();
+    vm.stop();
+    r
+}
+
+/// A USB tablet (`EFI_ABSOLUTE_POINTER_PROTOCOL` under OVMF): a click on
+/// the recovery-key row, sent through QMP `input-send-event`.
+fn pointer_tablet(env: &Env) -> R<()> {
+    let name = "pointer-tablet";
+    let Some(shim) = env.tablet_shim.as_deref() else {
+        eprintln!("  (skipped: no --tablet-shim)");
+        return Ok(());
+    };
+    let (vars, state) = fresh(env, name, "OVMF_VARS_4M.fd")?;
+    let loader = std::fs::read(&env.efi).map_err(|e| e.to_string())?;
+    let esp = make_esp(env, name, shim, &[("/EFI/BOOT/PAGURO.EFI", &loader)])?;
+    let data = make_data_disk(env)?;
+    let sock = state.join("qmp.sock");
+    let mut vm = Vm::start_ext(
+        env,
+        name,
+        false,
+        &esp,
+        &data,
+        &vars,
+        &state,
+        Some(&sock),
+        &[
+            "-device",
+            "qemu-xhci,id=xhci",
+            "-device",
+            "usb-tablet,bus=xhci.0",
+        ],
+    )?;
+    let r = (|| {
+        vm.expect("tablet-shim: absolute pointer on the usb tablet", BOOT_WAIT)?;
+        let line = vm.capture("paguro: graphics ", BOOT_WAIT)?;
+        let (w, h) = resolution(&line)?;
+        vm.expect("1 absolute", 10)?;
+        vm.expect("paguro: screen unlock", 60)?;
+        // Where the row is, from the same layout the loader uses.
+        let screen = recovery_menu();
+        let mut list = paguro_ui::DrawList::new();
+        paguro_ui::layout(
+            &screen,
+            &paguro_ui::View::IDLE,
+            &paguro_ui::builtin::THEMES[0],
+            w,
+            h,
+            &mut list,
+        );
+        let row = list
+            .hits
+            .as_slice()
+            .iter()
+            .find(|hit| hit.target == paguro_ui::draw::Target::Row(1))
+            .ok_or("no recovery-key row")?
+            .rect;
+        let (x, y) = (row.x + row.w / 2, row.y + row.h / 2);
+        let (ax, ay) = (
+            x as u64 * 0x7fff / u64::from(w - 1),
+            y as u64 * 0x7fff / u64::from(h - 1),
+        );
+        let abs = |ax: u64, ay: u64| {
+            format!(
+                "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"abs\",\"data\":{{\"axis\":\"x\",\"value\":{ax}}}}},{{\"type\":\"abs\",\"data\":{{\"axis\":\"y\",\"value\":{ay}}}}}]}}}}"
+            )
+        };
+        let btn = |down: bool| {
+            format!(
+                "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"btn\",\"data\":{{\"down\":{down},\"button\":\"left\"}}}}]}}}}"
+            )
+        };
+        // Move a little first (the cursor appears), then onto the row and
+        // click.
+        qmp_run(&sock, &[abs(ax / 2, ay / 2)])?;
+        std::thread::sleep(Duration::from_secs(1));
+        qmp_run(&sock, &[abs(ax, ay)])?;
+        std::thread::sleep(Duration::from_secs(1));
+        qmp_run(&sock, &[btn(true)])?;
+        std::thread::sleep(Duration::from_millis(300));
+        qmp_run(&sock, &[btn(false)])?;
+        vm.expect("paguro: screen secret", 30)?;
+        vm.expect("Enter your recovery key", 10)?;
+        println!("  clicked ({x},{y}) of {w}x{h}: the recovery-key row");
+        Ok(())
+    })();
+    vm.stop();
+    r
+}
+
 type Scenario = (&'static str, fn(&Env) -> R<()>);
 
 const SCENARIOS: &[Scenario] = &[
@@ -1056,6 +1460,11 @@ const SCENARIOS: &[Scenario] = &[
     ("s4-bde-clear-key", stage4::bde_clear_key),
     ("s4-bde-disagree", stage4::bde_disagree),
     ("s4-aarch64", stage4::aarch64),
+    ("serial-vt100-auto", serial_vt100_auto),
+    ("mode-text", mode_text),
+    ("mode-graphics", mode_graphics_light),
+    ("two-displays", two_displays),
+    ("pointer-tablet", pointer_tablet),
 ];
 
 fn main() {
@@ -1067,6 +1476,7 @@ fn main() {
     let mut efi_aa64 = None;
     let mut probe_aa64 = None;
     let mut aavmf = PathBuf::from("/usr/share/AAVMF");
+    let mut tablet_shim = None;
     let mut ovmf = PathBuf::from("/usr/share/OVMF");
     let mut work = std::env::temp_dir().join("paguro-qemu");
     let mut accel = "auto".to_string();
@@ -1080,6 +1490,7 @@ fn main() {
             "--efi-aa64" => efi_aa64 = args.next().map(PathBuf::from),
             "--probe-aa64" => probe_aa64 = args.next().map(PathBuf::from),
             "--aavmf" => aavmf = args.next().map(PathBuf::from).unwrap_or(aavmf),
+            "--tablet-shim" => tablet_shim = args.next().map(PathBuf::from),
             "--ovmf" => ovmf = args.next().map(PathBuf::from).unwrap_or(ovmf),
             "--work" => work = args.next().map(PathBuf::from).unwrap_or(work),
             "--accel" => accel = args.next().unwrap_or(accel),
@@ -1094,7 +1505,7 @@ fn main() {
     }
     let Some(efi) = efi else {
         eprintln!(
-            "usage: paguro-qemu --efi paguro.efi [--efi-signed signed.efi] [--ovmf DIR] [--work DIR] [--accel auto|kvm|tcg] [SCENARIO...]"
+            "usage: paguro-qemu --efi paguro.efi [--efi-signed signed.efi] [--tablet-shim tablet-shim.efi] [--ovmf DIR] [--work DIR] [--accel auto|kvm|tcg] [SCENARIO...]"
         );
         std::process::exit(2);
     };
@@ -1116,6 +1527,7 @@ fn main() {
         efi_aa64,
         probe_aa64,
         aavmf,
+        tablet_shim,
         ovmf,
         work,
         kvm,

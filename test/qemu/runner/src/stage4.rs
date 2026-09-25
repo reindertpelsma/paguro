@@ -1071,7 +1071,8 @@ pub fn recovery_browser(env: &Env) -> R<()> {
         vm.expect("stage4 listing \\paguro\n", 20)?;
         vm.send("g")?;
         vm.send("\r")?;
-        vm.expect("Start gpt.vhd", 20)?;
+        vm.expect("How should this disk start?", 20)?;
+        vm.expect("gpt.vhd", 5)?;
         vm.send("2")?;
         // The FAT32 browser: EFI, other, probe.efi.
         vm.expect("stage4 listing \\paguro\\gpt.vhd \\\n", 30)?;

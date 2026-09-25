@@ -13,6 +13,7 @@ members = [
     "crates/paguro-ui-preview",
     "test/qemu/runner",
     "test/uefi-probe",
+    "test/qemu/tablet-shim",
 ]
 # paguro-efi and paguro-probe only build for x86_64-unknown-uefi; see its README.
 default-members = [

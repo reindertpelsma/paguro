@@ -1,0 +1,20 @@
+[package]
+name = "paguro-tablet-shim"
+description = "Test-only UEFI app for the QEMU pointer scenario: an EFI_ABSOLUTE_POINTER_PROTOCOL over QEMU's usb-tablet (OVMF ships no USB pointer driver), then paguro.efi"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "tablet-shim"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+uefi = { version = "0.41", features = ["panic_handler"] }
+uefi-raw = "0.17"
+
+[lints]
+workspace = true

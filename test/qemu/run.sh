@@ -24,11 +24,15 @@ KEYDIR=${OVMF_SNAKEOIL_DIR:-/usr/share/ovmf}
 AAVMF=${AAVMF_DIR:-/usr/share/AAVMF}
 
 cargo build --release -p paguro-efi -p paguro-probe --target x86_64-unknown-uefi
+# Test-only: OVMF has no USB pointer driver; the pointer scenario boots
+# this first (test/qemu/tablet-shim).
+cargo build --release -p paguro-tablet-shim --target x86_64-unknown-uefi
 cargo build --release -p paguro-qemu
 # The BitLocker scenarios encrypt the stage-4 volume with make.sh.
 cargo build --release -p paguro-harness --bin paguro-bde-write
 EFI=target/x86_64-unknown-uefi/release/paguro.efi
 PROBE=target/x86_64-unknown-uefi/release/probe.efi
+SHIM=target/x86_64-unknown-uefi/release/tablet-shim.efi
 mkdir -p "$WORK"
 
 aa64=()
@@ -55,4 +59,4 @@ else
 fi
 
 exec target/release/paguro-qemu --efi "$EFI" --probe "$PROBE" "${signed[@]}" "${aa64[@]}" \
-  --ovmf "$OVMF" --work "$WORK" --accel "$ACCEL" "$@"
+  --tablet-shim "$SHIM" --ovmf "$OVMF" --work "$WORK" --accel "$ACCEL" "$@"
