@@ -338,6 +338,7 @@ Vendor GUID from §1.
 | `PaguroSetup` (`S`) | 32 | NV \| BS \| RT | Windows tool | loader, which deletes it before handoff |
 | `PaguroTpmBroken` | 1 | NV \| BS \| RT | loader | Windows tool |
 | `PaguroUninstall` | 1 | NV \| BS \| RT | Windows tool | loader, which deletes it |
+| `PaguroBootstrap` | ≤ 128 | NV \| BS \| RT | Windows tool, at install | loader, which deletes it first (§9) |
 
 Plus the standard `BootNext` / `Boot####` (the bootstrap entry, §9).
 
@@ -360,6 +361,13 @@ A successful boot alone does not clear it: only a seal that matches again
 does. If the `setupTPM` boot itself fails, the loader sets it again.
 
 Any size mismatch → the variable is treated as absent.
+
+**Recorded boot state for the pre-flight** (DESIGN §4.6): each Linux boot's
+initrd writes what the loader measured — PCR 0/2/4/7 and the Secure Boot
+configuration digest (SHA-256 over PCR 7's `EV_EFI_VARIABLE_DRIVER_CONFIG`
+event digests, in log order) — to `\EFI\paguro\<volume-guid>\recorded.bin`
+(format: `paguro-core::recorded`). PCR values are public, and the ESP is the one
+place both operating systems read without mounting anything.
 
 ## 6. Measurements (PCR 12) — FROZEN
 
@@ -451,17 +459,24 @@ module reads the extents itself (§10).
 How Linux reads the table (a small module or early init code) and what it
 exposes to the initrd (e.g. a read-once `/dev/paguro-handoff`).
 
-## 9. Bootstrap boot entry — DRAFT
+## 9. Bootstrap — DRAFT
 
-The installer's one-shot `Boot####` entry points at `paguro.efi`; its
-`OptionalData`:
+The installer's payload for the first boot travels in a firmware variable, not
+in the boot entry, because under Secure Boot the entry must point at shim, and
+shim reads the entry's load options as its second-stage path.
 
-```text
-magic "PGRBST\0\x01" | volume GUID[16] | salt[16] | wrapped_vmk[32]
-wrapped_vmk = VMK XOR HMAC(pass_hash, "paguro/bootstrap" || salt)
-```
+- `PaguroBootstrap` (NV | BS | RT, ≤ 128 bytes), written by the Windows tool:
 
-The loader deletes the entry as its first action (DESIGN §6 Bootstrap).
+  ```text
+  magic "PGRBST\0\x01" | volume GUID[16] | salt[16] | wrapped_vmk[32]
+  wrapped_vmk = VMK XOR HMAC(pass_hash, "paguro/bootstrap" || salt)
+  ```
+- the one-shot `Boot####` entry points at shim with `paguro.efi` as its
+  second stage (load options = the UCS-2 path), and `BootNext` selects it.
+
+The loader reads and **deletes `PaguroBootstrap` as its first action**, and the
+one-shot entry with it (DESIGN §6 Bootstrap). A payload that fails to parse is
+deleted too.
 
 ## 10. Kernel module — DRAFT
 
