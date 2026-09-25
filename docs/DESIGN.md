@@ -4322,17 +4322,34 @@ strong offline gate by itself. paguro therefore treats the **passphrase and the
 recovery key as the robust baseline** of the dedicated disk and TPM + PIN as a
 convenience layered on top, with the gaps above closed by configuration.
 
-**The user chooses, and each choice is done completely.** The installer asks
-once, explains each option in plain words, and never mixes them:
+**The user chooses, once, and each choice is done completely.** The question
+is asked only when Windows uses BitLocker; with BitLocker off, Linux is
+unprotected by paguro and the distribution's own installer keeps its usual
+encryption option. When paguro sets the protection up, the installer adapter
+pre-creates the LUKS volume and **hides the installer's own encryption
+settings**, so the user is never asked twice. The same choices apply to
+images on NTFS, where BitLocker already covers the data and the choice only
+decides how Linux unlocks:
 
-| Choice | What it is | What paguro guarantees |
+| Choice | Offered when | What paguro guarantees |
 |---|---|---|
-| **TPM + PIN** (offered when Windows uses a TPM) | unlock with a short PIN at boot | matched to BitLocker, not to LUKS defaults: the PIN mixed into the keyslot passphrase through the token plugin (`HMAC(D, stretch(PIN))`), so a compromised TPM still leaves only an offline attack on a stretched PIN; PCR 7 + 15 (zero); volume key into PCR 15; the shell cap; the bypass only on a chain that measures the command line |
-| **Passphrase only** (the default when Windows has no TPM protector) | LUKS's own Argon2id keyslot, nothing else | the strongest offline gate there is, and no TPM, no bypass, no plugin in the path |
-| **TPM only** (opt-in, warned) | unlocks with no input | only with a UKI and the TPM-only obligations of §6 — `lockdown=confidentiality`, a shell before unlock still allowed but costing the key (PCR 15 capped, every mapping closed and every key wiped; reopen with the passphrase or recovery key), IOMMU in strict DMA-remapping mode (not `iommu=pt`), Thunderbolt security — and the warning says why it is the weakest: TPM bus sniffing, the long list of TPM-only BitLocker bypasses (it is Windows Home's default for convenience, not strength), and a running, unlocked machine whose keys are in RAM for cold-boot and DMA attacks by any device with an identity-mapped or unrestricted DMA path |
+| **TPM + PIN** — recommended | Windows' BitLocker uses a TPM | matched to BitLocker: the PIN mixed into the key (`HMAC(D, stretch(PIN))`), PCR 7 + 15 (zero), the volume key measured into PCR 15, the shell cap. **PIN bypass** (*Restart into Linux* skips the PIN) is a checkbox, on by default |
+| **Passphrase** | always | an offline-gate keyslot only (Argon2id on LUKS; the passphrase rung on NTFS), no TPM. Recommended when BitLocker has no TPM protector, or for anyone who would rather not rely on the TPM for Linux |
+| **TPM only** | **only when Windows itself is TPM-only** | unlocks without input and relies on the Linux login screen; the §6 TPM-only obligations and the same initrd protections as TPM + PIN (a shell costs the key) |
+| **Unprotected** | dedicated disk only | no LUKS. **The VMK is not stored on the disk**, so starting the Windows VM asks for a BitLocker unlock (recovery key or password) each time |
 
-In every case the BitLocker recovery-password slot and the VMK slot are added
-as well (when BitLocker is on), so no choice can lock the user out.
+**TPM only is capped at Windows' own level.** Linux holds the VMK — in the
+handoff for images, on the LUKS volume for a dedicated disk — so a Linux that
+unlocks with less than Windows does lowers Windows' protection to that level:
+a TPM + PIN BitLocker user who picked TPM-only for Linux would leave Windows'
+key reachable through the Linux path without a PIN. So TPM-only is offered only
+where Windows is TPM-only already (§6: never weaker than Windows).
+
+**Every protected choice adds the same two extra keyslots**: the BitLocker
+recovery password (a person can always get in the Microsoft way) and the
+VMK-derived slot (Windows and WSL open Linux without asking). And the VMK itself
+is kept inside the LUKS volume, root-only and sealed to PCR 11 like the MOK key
+(§6), so the Windows VM on the dedicated disk starts without a prompt.
 
 PCR 15 bound to zero also closes the published *fake volume* attack (swap in a
 LUKS volume with the same UUID whose `init` then asks the TPM): the fake
