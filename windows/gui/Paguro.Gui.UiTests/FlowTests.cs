@@ -12,7 +12,8 @@ namespace Paguro.Gui.UiTests;
 public class FlowTests
 {
     /// <summary>A TextBlock's text (UIA gives it as the Name).</summary>
-    static string Text(FlaUI.Core.AutomationElements.AutomationElement e) => e.Name ?? "";
+    static string Text(FlaUI.Core.AutomationElements.AutomationElement e) =>
+        e.Properties.Name.TryGetValue(out var n) ? n ?? "" : "";
 
     [Fact]
     public void Launch_shows_every_screen_and_the_checks()
