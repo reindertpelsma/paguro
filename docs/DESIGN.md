@@ -4336,7 +4336,7 @@ decides how Linux unlocks:
 | **TPM + PIN** — recommended | Windows' BitLocker uses a TPM | matched to BitLocker: the PIN mixed into the key (`HMAC(D, stretch(PIN))`), PCR 7 + 15 (zero), the volume key measured into PCR 15, the shell cap. **PIN bypass** (*Restart into Linux* skips the PIN) is a checkbox, on by default |
 | **Passphrase** | always | an offline-gate keyslot only (Argon2id on LUKS; the passphrase rung on NTFS), no TPM. Recommended when BitLocker has no TPM protector, or for anyone who would rather not rely on the TPM for Linux |
 | **TPM only** | **only when Windows itself is TPM-only** | unlocks without input and relies on the Linux login screen; the §6 TPM-only obligations and the same initrd protections as TPM + PIN (a shell costs the key) |
-| **Unprotected** | dedicated disk only | no LUKS. **The VMK is not stored on the disk**, so starting the Windows VM asks for a BitLocker unlock (recovery key or password) each time |
+| **Unprotected** (by paguro) | dedicated disk only | paguro sets up no LUKS, and **the distribution installer's own encryption option reappears**, so the user can encrypt Linux independently of Windows — a LUKS paguro does not manage and adds no keyslots to. **The VMK is not stored on the disk**, so starting the Windows VM asks for a BitLocker unlock (recovery key or password) each time |
 
 **TPM only is capped at Windows' own level.** Linux holds the VMK — in the
 handoff for images, on the LUKS volume for a dedicated disk — so a Linux that
@@ -4345,7 +4345,8 @@ a TPM + PIN BitLocker user who picked TPM-only for Linux would leave Windows'
 key reachable through the Linux path without a PIN. So TPM-only is offered only
 where Windows is TPM-only already (§6: never weaker than Windows).
 
-**Every protected choice adds the same two extra keyslots**: the BitLocker
+**Every choice where paguro manages LUKS adds the same two extra keyslots** —
+alongside a typed passphrase too, not only alongside TPM + PIN: the BitLocker
 recovery password (a person can always get in the Microsoft way) and the
 VMK-derived slot (Windows and WSL open Linux without asking). And the VMK itself
 is kept inside the LUKS volume, root-only and sealed to PCR 11 like the MOK key
