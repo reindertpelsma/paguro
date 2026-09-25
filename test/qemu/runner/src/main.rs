@@ -18,7 +18,7 @@ mod vars;
 
 use paguro_boot::platform::{DiskInfo, Input, Platform, PlatformError, Screen};
 use paguro_boot::tpm::{CreatedObject, Tpm, pcr12_after_load_taint, policy_digest};
-use paguro_core::guid::{Guid, PAGURO_VENDOR};
+use paguro_core::guid::{EFI_GLOBAL_VARIABLE, Guid, PAGURO_VENDOR};
 use paguro_core::seal::{self, Kind, Seal, Sealed};
 use paguro_crypto as kdf;
 use sha2::{Digest, Sha256};
@@ -764,6 +764,68 @@ fn recovery_no_config(env: &Env) -> R<()> {
     r
 }
 
+/// The final uninstall boot (INTERFACES.md §5, DESIGN.md §6b): with
+/// `PaguroUninstall` in NVRAM the loader deletes paguro's variables — `B`
+/// too, which no OS can — unlocks and measures nothing, points `BootNext` at
+/// Windows Boot Manager's entry and resets. Everything is checked in the
+/// VARS file afterwards (QEMU runs with `-no-reboot`, so the reset ends it).
+fn uninstall(env: &Env) -> R<()> {
+    let name = "uninstall";
+    let (vars, state) = fresh(env, name, "OVMF_VARS_4M.fd")?;
+    let esp = make_esp(env, name, &env.efi, &[])?;
+    let ours: [(&str, u32, &[u8]); 6] = [
+        ("PaguroB", 3, &[0xb0; 32]),
+        ("PaguroConfigHash", 7, &[0xc0; 32]),
+        ("PaguroSetup", 7, &[0x5e; 32]),
+        ("PaguroTpmBroken", 7, &[1]),
+        ("PaguroBootstrap", 7, b"a stale payload"),
+        ("PaguroUninstall", 7, &[1]),
+    ];
+    for (n, a, d) in ours {
+        vars::inject(&vars, n, &PAGURO_VENDOR, a, d)?;
+    }
+    // Windows' entry, first in BootOrder: the firmware fails it (no such
+    // file on this ESP) and falls through to the loader.
+    let mut lo = [0u8; 512];
+    let n = paguro_core::bootstrap::write_load_option(
+        paguro_core::bootstrap::LOAD_OPTION_ACTIVE,
+        "Windows Boot Manager",
+        "\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+        &[],
+        &mut lo,
+    )
+    .map_err(|_| "load option")?;
+    vars::inject(&vars, "Boot0200", &EFI_GLOBAL_VARIABLE, 7, &lo[..n])?;
+    vars::inject(&vars, "BootOrder", &EFI_GLOBAL_VARIABLE, 7, &[0x00, 0x02])?;
+    let mut vm = Vm::launch(env, name, false, &[&esp], &vars, &state, None, &[])?;
+    let r = (|| -> R<()> {
+        vm.expect("paguro 0.0.0", BOOT_WAIT)?;
+        // A stale bootstrap payload goes first, as on every boot; the rest
+        // is the uninstall request's (in its order, the request last).
+        vm.expect("paguro: PaguroBootstrap deleted", 10)?;
+        vm.expect("paguro: uninstall request", 10)?;
+        for (n, _, _) in ours.iter().filter(|v| v.0 != "PaguroBootstrap") {
+            vm.expect(&format!("uninstall: {n} deleted"), 10)?;
+        }
+        vm.expect("BootNext=Boot0200 (Windows), resetting", 10)?;
+        Ok(())
+    })();
+    let log = vm.stop();
+    r?;
+    if log.contains("Unlock Linux") || log.contains("pcr12=") || log.contains("stage1") {
+        return Err("the uninstall boot went on to unlock or measure".into());
+    }
+    for (n, _, _) in ours {
+        if let Some(v) = vars::read(&vars, n, &PAGURO_VENDOR)? {
+            return Err(format!("{n} survived the uninstall boot: {v:?}"));
+        }
+    }
+    match vars::read(&vars, "BootNext", &EFI_GLOBAL_VARIABLE)? {
+        Some((_, v)) if v == [0x00, 0x02] => Ok(()),
+        other => Err(format!("BootNext after the uninstall boot: {other:?}")),
+    }
+}
+
 /// Secure Boot off: no hash check, the configuration is parsed, the load taint
 /// lands, and a real TPM2 policy session unseals `tpm_seal.bin` after a wrong
 /// PIN is refused. The loader then runs a second time in the same boot and
@@ -1463,6 +1525,7 @@ const SCENARIOS: &[Scenario] = &[
     ("sb-hash-mismatch", secure_boot_hash_mismatch),
     ("sb-verified", secure_boot_verified),
     ("graphical-unlock", graphical_unlock),
+    ("uninstall", uninstall),
     ("s4-vhd-gpt", stage4::vhd_gpt),
     (
         "s4-superfloppy-raw-other",
@@ -1482,6 +1545,7 @@ const SCENARIOS: &[Scenario] = &[
     ("s4-bde-disagree", stage4::bde_disagree),
     ("s4-aarch64", stage4::aarch64),
     ("s4-notice-screens", stage4::notice_screens),
+    ("s4-bootstrap", stage4::bootstrap),
     ("serial-vt100-auto", serial_vt100_auto),
     ("mode-text", mode_text),
     ("mode-graphics", mode_graphics_light),

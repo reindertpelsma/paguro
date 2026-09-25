@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use paguro_core::guid::PAGURO_VENDOR;
+use paguro_core::bootstrap;
+use paguro_core::guid::{EFI_GLOBAL_VARIABLE, Guid, PAGURO_VENDOR};
 
 use crate::{BOOT_WAIT, Env, R, Vm, fresh, sh, sha256, vars};
 
@@ -633,6 +634,7 @@ pub(crate) fn boot_disk(
     ntfs: &Path,
     guid: &str,
     extra: &[(&str, &[u8])],
+    esp_guid: Option<&str>,
 ) -> R<PathBuf> {
     let dir = env.work.join("stage4");
     let esp = dir.join(format!("{name}-esp.fat"));
@@ -656,7 +658,7 @@ pub(crate) fn boot_disk(
                 code: "ef00",
                 mib: 34,
                 image: Some(&esp),
-                guid: None,
+                guid: esp_guid,
             },
             Part {
                 code: "0700",
@@ -704,6 +706,7 @@ fn boot(env: &Env, c: &Case<'_>, script: impl FnOnce(&mut Vm) -> R<()>) -> R<()>
         ntfs,
         c.guid,
         &[],
+        None,
     )?;
     let template = if c.secure {
         "OVMF_VARS_4M.snakeoil.fd"
@@ -1118,6 +1121,7 @@ pub fn aarch64(env: &Env) -> R<()> {
         &v.ntfs,
         NTFS_VOLUME,
         &[],
+        None,
     )?;
     let dir = env.work.join("stage4");
     // AAVMF pflash images must be exactly 64 MiB.
@@ -1181,13 +1185,18 @@ pub fn aarch64(env: &Env) -> R<()> {
 /// once per option set. Returns the image and its `.keys`.
 fn bde_volume(env: &Env, tag: &str, opts: &[&str]) -> R<(PathBuf, String)> {
     let v = volume(env)?;
+    bde_encrypt(env, &v.ntfs, tag, opts)
+}
+
+/// `plain` encrypted by make.sh with `opts`, cached under `tag`.
+fn bde_encrypt(env: &Env, plain: &Path, tag: &str, opts: &[&str]) -> R<(PathBuf, String)> {
     let dir = env.work.join("stage4");
     let out = dir.join(format!("bde-{tag}.img"));
     let keys = dir.join(format!("bde-{tag}.img.keys"));
     if !out.exists() || !keys.exists() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let mut c = Command::new(root.join("test/fixtures/bde/make.sh"));
-        c.arg(&v.ntfs).arg(&out).args(opts).arg("--no-verify");
+        c.arg(plain).arg(&out).args(opts).arg("--no-verify");
         let w = root.join("target/release/paguro-bde-write");
         if w.exists() {
             c.env("PAGURO_BDE_WRITE", w);
@@ -1461,6 +1470,7 @@ pub fn notice_screens(env: &Env) -> R<()> {
                 ntfs.unwrap_or(&v.ntfs),
                 guid,
                 &extra,
+                None,
             )?;
             let (vars, state) = fresh(env, &name, "OVMF_VARS_4M.fd")?;
             let sock = state.join("qmp.sock");
@@ -1499,4 +1509,138 @@ pub fn notice_screens(env: &Env) -> R<()> {
     let _ = std::fs::remove_file(hib);
     println!("  {done} boots: 5 notices × 4 variants and text mode");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrap (INTERFACES.md §9)
+
+const BOOTSTRAP_PASSPHRASE: &str = "first-boot";
+const BOOTSTRAP_ESP: &str = "4f1c2a9e-8b3d-4e6f-a5c7-1d2e3f4a5b6c";
+const BOOTSTRAP_ENTRY: u16 = 0x0123;
+
+fn unhex32(s: &str) -> R<[u8; 32]> {
+    crate::unhex(s).ok_or_else(|| format!("not 32 hex bytes: {s}"))
+}
+
+/// The first boot, as the Windows tool sets it up: a real one-shot
+/// `Boot####` (the ESP's Hard Drive node + `\EFI\paguro\paguro.efi`; no shim
+/// under non-Secure-Boot OVMF) selected by `BootNext`, and `PaguroBootstrap`
+/// in NVRAM, both written into the VARS file. The loader deletes the
+/// variable and the entry first, unwraps the VMK with the passphrase, opens
+/// the BitLocker volume, takes `\paguro\`'s only disk, seals `D` with
+/// `TPM2_Create` under a salted session (swtpm through OVMF's TCG2), and
+/// hands off; the variables it leaves are read back from the VARS file.
+pub fn bootstrap(env: &Env) -> R<()> {
+    let name = "s4-bootstrap";
+    volume(env)?; // the stage-4 work directory and payloads
+    let dir = env.work.join("stage4");
+    let plain = dir.join("bootstrap-ntfs.img");
+    let bde = dir.join("bde-bootstrap.img");
+    if !bde.exists() {
+        let gpt_raw = esp_disk(env, &dir, "bs-gpt", GPT_MARK)?;
+        let gpt_vhd = dir.join("bs-gpt.vhd");
+        vhd(&gpt_raw, &gpt_vhd, "fixed")?;
+        mkntfs(&plain, 96)?;
+        with_ntfs(&plain, |m| {
+            io(std::fs::create_dir_all(m.join("paguro")))?;
+            io(std::fs::copy(&gpt_vhd, m.join("paguro/linux.vhd"))).map(|_| ())
+        })?;
+        let _ = std::fs::remove_file(&gpt_raw);
+        let _ = std::fs::remove_file(&gpt_vhd);
+    }
+    let (img, keys) = bde_encrypt(
+        env,
+        &plain,
+        "bootstrap",
+        &["--password", BDE_PASSWORD, "--seed", "41"],
+    )?;
+    let vmk = unhex32(key(&keys, "vmk")?)?;
+
+    let loader = io(std::fs::read(&env.efi))?;
+    let disk = boot_disk(
+        env,
+        name,
+        &env.efi,
+        "EFI/BOOT/BOOTX64.EFI",
+        None,
+        &img,
+        NTFS_VOLUME,
+        &[("EFI/paguro/paguro.efi", &loader)],
+        Some(BOOTSTRAP_ESP),
+    )?;
+    let (vars, state) = fresh(env, name, "OVMF_VARS_4M.fd")?;
+    // PaguroBootstrap: volume GUID, salt, VMK XOR HMAC(pass_hash, …).
+    let volume = Guid::parse(NTFS_VOLUME).map_err(|e| format!("{e:?}"))?;
+    let salt = [0x5b; 16];
+    let ph = paguro_crypto::bitlocker_stretch(
+        &paguro_crypto::user_password_hash(BOOTSTRAP_PASSPHRASE),
+        &salt,
+        paguro_crypto::STRETCH_ITERATIONS,
+    );
+    let wrapped = paguro_crypto::xor32(&paguro_crypto::bootstrap_key(&ph, &salt), &vmk);
+    let payload = bootstrap::write_payload(&volume, &salt, &wrapped);
+    vars::inject(&vars, bootstrap::VAR_NAME, &PAGURO_VENDOR, 7, &payload)?;
+    let hd = bootstrap::HardDrive {
+        partition_number: 1,
+        start_lba: 2048,
+        size_lba: 34 * 2048,
+        partition_guid: Guid::parse(BOOTSTRAP_ESP).map_err(|e| format!("{e:?}"))?,
+    };
+    let mut lo = [0u8; 512];
+    let n = bootstrap::write_load_option_hd(
+        bootstrap::LOAD_OPTION_ACTIVE,
+        "paguro setup",
+        &hd,
+        "\\EFI\\paguro\\paguro.efi",
+        &[],
+        &mut lo,
+    )
+    .map_err(|_| "load option")?;
+    let entry = format!("Boot{BOOTSTRAP_ENTRY:04X}");
+    vars::inject(&vars, &entry, &EFI_GLOBAL_VARIABLE, 7, &lo[..n])?;
+    vars::inject(
+        &vars,
+        "BootNext",
+        &EFI_GLOBAL_VARIABLE,
+        7,
+        &BOOTSTRAP_ENTRY.to_le_bytes(),
+    )?;
+
+    let mut vm = Vm::start_disks(env, name, false, &[&disk], &vars, &state)?;
+    let r = (|| {
+        vm.expect("paguro 0.0.0", BOOT_WAIT)?;
+        // Deleted before anything else happens, and only then used.
+        vm.expect(&format!("paguro: {} deleted", bootstrap::VAR_NAME), 10)?;
+        vm.expect(&format!("bootstrap entry {entry} deleted"), 10)?;
+        vm.expect("first boot (bootstrap), compiled-in defaults", 10)?;
+        vm.expect("Unlock Linux", 60)?;
+        vm.send("1")?;
+        vm.expect("Enter your", 10)?;
+        vm.send(BOOTSTRAP_PASSPHRASE)?;
+        vm.send("\r")?;
+        vm.expect("stage3 rung=Bootstrap", crate::STRETCH_WAIT)?;
+        vm.expect("stage4 ntfs mounted", 60)?;
+        vm.expect("paguro: blockio: BitLocker, 512-byte units", 60)?;
+        // TPM2_Create over a salted HMAC session, sensitive encrypted.
+        vm.expect("provisioning: sealed for pcr12=", crate::STRETCH_WAIT)?;
+        vm.expect("handoff published", 20)?;
+        probe_ok(&mut vm, GPT_MARK)?;
+        vm.expect("PAGURO-PROBE: handoff rung=Bootstrap ", 10)?;
+        vm.expect("PAGURO-PROBE: done", 10)
+    })();
+    vm.stop();
+    let _ = std::fs::remove_file(&disk);
+    r?;
+    // What NVRAM holds afterwards: the payload and the entry are gone, B
+    // was created (the reader's positive control).
+    if vars::read(&vars, bootstrap::VAR_NAME, &PAGURO_VENDOR)?.is_some() {
+        return Err("PaguroBootstrap survived the first boot".into());
+    }
+    if vars::read(&vars, &entry, &EFI_GLOBAL_VARIABLE)?.is_some() {
+        return Err(format!("{entry} survived the first boot"));
+    }
+    match vars::read(&vars, "PaguroB", &PAGURO_VENDOR)? {
+        Some((3, b)) if b.len() == 32 => Ok(()),
+        other => Err(format!("PaguroB after the first boot: {other:?}")),
+    }
 }

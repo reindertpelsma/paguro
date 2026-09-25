@@ -123,8 +123,11 @@ Two things the oracles do not settle:
   (the only sample, `bitlk-aes-xts-128-eow`); no reader models it, and
   `FVE_LAYOUT` cannot express it, so paguro refuses them for now.
 - Windows 10+ adds a structure after the offset/size in the volume-header
-  entry naming a further 64 KiB region at `reloc_offset + 8 KiB`; none of
-  the readers hides it, and neither does paguro.
+  entry naming a further 64 KiB region (at `reloc_offset + 8 KiB` on these
+  volumes, `+ 0x515000` on To Go); none of the readers hides it, and
+  neither does paguro's decrypted view. It is in paguro's reserved set
+  (`Layout::reserved_ranges`, the handoff's `FVE_LAYOUT`), so no disk the
+  loader publishes may overlap it.
 
 ## Where the fixtures are used
 
