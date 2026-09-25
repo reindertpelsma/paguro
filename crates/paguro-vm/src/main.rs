@@ -16,6 +16,7 @@
 //!                  [--print-argv]
 //!     QEMU with the host's identity; unplugs the .BEK once read
 //! paguro-vm teardown --work DIR
+//! paguro-vm absorbed --work DIR     what the guest wrote to BitLocker's regions
 //! paguro-vm unlock --partition DEV (--recovery-password PW | --bek F)
 //!                  --vmk-out F [--volume-add]
 //!     stand-in for the initrd: the VMK; with --volume-add the decrypted
@@ -25,6 +26,7 @@
 //! paguro-vm identity [--system-partition NAME]      what would be passed through
 //! paguro-vm windows-provision [--mac MAC]           the guest's link script
 //! paguro-vm smb-conf --root DIR --state DIR         the netns Samba's smb.conf
+//! paguro-vm samba --root DIR --state DIR --secret-file F   L: over the link
 //! paguro-vm mount-c --target DIR --secret-file F [--uid N --gid N]
 //! paguro-vm link --ifname IF                        IF into netns paguro as paguro0
 //! ```
@@ -161,6 +163,18 @@ fn main() {
             session::teardown(&work.unwrap_or_else(|| usage())).unwrap_or_else(|e| fail(e));
         }
         "launch" => launch(a),
+        "absorbed" => {
+            let mut work = None;
+            while let Some(k) = a.it.next() {
+                match k.as_str() {
+                    "--work" => work = Some(PathBuf::from(a.val(&k))),
+                    _ => usage(),
+                }
+            }
+            let w = session::absorbed_writes(&work.unwrap_or_else(|| usage()))
+                .unwrap_or_else(|e| fail(e));
+            println!("{}", serde_json::to_string(&w).unwrap_or_default());
+        }
         "unlock" => {
             let (mut part, mut rp, mut bek, mut out) = (None, None, None, None);
             let mut add = false;
@@ -291,6 +305,23 @@ fn main() {
                     &state.unwrap_or_else(|| usage())
                 )
             );
+        }
+        "samba" => {
+            let (mut root, mut state, mut secret) = (None, None, None);
+            while let Some(k) = a.it.next() {
+                match k.as_str() {
+                    "--root" => root = Some(PathBuf::from(a.val(&k))),
+                    "--state" => state = Some(PathBuf::from(a.val(&k))),
+                    "--secret-file" => secret = Some(read_secret(Path::new(&a.val(&k)))),
+                    _ => usage(),
+                }
+            }
+            net::start_samba(
+                &root.unwrap_or_else(|| usage()),
+                &state.unwrap_or_else(|| usage()),
+                &secret.unwrap_or_else(|| usage()),
+            )
+            .unwrap_or_else(|e| fail(e));
         }
         "mount-c" => {
             let (mut target, mut secret) = (None, None);

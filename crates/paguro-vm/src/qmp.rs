@@ -102,8 +102,10 @@ impl Qmp {
         r
     }
 
-    /// Read-operation count of a block device (by its QOM device id or
-    /// node name), from `query-blockstats`.
+    /// Read-operation count of a block device (by the QOM id of the device
+    /// it sits under — a usb-storage's disk is
+    /// `/machine/peripheral/<id>/<id>.0/legacy[0]` — or its node name),
+    /// from `query-blockstats`.
     pub fn reads(&mut self, id: &str) -> Result<Option<u64>, String> {
         let v = self.cmd("query-blockstats", json!({ "query-nodes": false }))?;
         Ok(v.as_array().and_then(|a| {
@@ -111,7 +113,7 @@ impl Qmp {
                 let matches = d
                     .get("qdev")
                     .and_then(Value::as_str)
-                    .is_some_and(|q| q.ends_with(id))
+                    .is_some_and(|q| q.split('/').any(|c| c == id))
                     || d.get("node-name").and_then(Value::as_str) == Some(id);
                 matches
                     .then(|| d.pointer("/stats/rd_operations").and_then(Value::as_u64))

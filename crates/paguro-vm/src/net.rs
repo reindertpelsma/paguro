@@ -97,8 +97,13 @@ if (-not (Get-NetIPAddress -InterfaceIndex $a.ifIndex -IPAddress '{GUEST_ADDR}' 
 # No gateway, no DNS: the link reaches the host and nothing else.
 Set-DnsClient -InterfaceIndex $a.ifIndex -RegisterThisConnectionsAddress $false
 Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ResetServerAddresses
-Start-Sleep 2
-Set-NetConnectionProfile -InterfaceIndex $a.ifIndex -NetworkCategory Private
+# A link without a gateway is an "unidentified network": its profile may
+# take a moment to appear; the firewall rule below does not depend on it.
+try {{
+    Start-Sleep 2
+    Set-NetConnectionProfile -InterfaceIndex $a.ifIndex -NetworkCategory Private
+}} catch {{ "paguro: warning: network profile: $($_.Exception.Message)" }}
+'paguro: address {GUEST_ADDR}/{PREFIX} on paguro0' 
 # The dedicated account and the C: share.
 $pw = ConvertTo-SecureString $SmbSecret -AsPlainText -Force
 if (Get-LocalUser -Name '{WINDOWS_SMB_USER}' -ErrorAction SilentlyContinue) {{
@@ -110,6 +115,7 @@ if (Get-LocalUser -Name '{WINDOWS_SMB_USER}' -ErrorAction SilentlyContinue) {{
 if (-not (Get-SmbShare -Name '{C_SHARE}' -ErrorAction SilentlyContinue)) {{
     New-SmbShare -Name '{C_SHARE}' -Path 'C:\' -FullAccess '{WINDOWS_SMB_USER}' | Out-Null
 }}
+'paguro: share {C_SHARE} for {WINDOWS_SMB_USER}' 
 Set-SmbServerConfiguration -RequireSecuritySignature $true -EncryptData $false -Force
 # SMB in on this adapter only.
 Get-NetFirewallRule -Name 'paguro-smb-in' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
@@ -117,11 +123,16 @@ New-NetFirewallRule -Name 'paguro-smb-in' -DisplayName 'paguro: SMB on the priva
     -Protocol TCP -LocalPort 445 -InterfaceAlias 'paguro0' -RemoteAddress '{HOST_ADDR}' -Action Allow | Out-Null
 # L:, the host's distributions: the credential goes to Credential Manager
 # (-SaveCredentials), never onto a command line.
-$l = Get-SmbMapping -LocalPath 'L:' -ErrorAction SilentlyContinue
-if (-not $l) {{
-    New-SmbMapping -LocalPath 'L:' -RemotePath '\\{HOST_ADDR}\{L_SHARE}' -UserName '{LINUX_SMB_USER}' `
-        -Password $HostSecret -Persistent $true -SaveCredentials | Out-Null
-}}
+# Not fatal: the host's Samba may not be up yet; a persistent mapping
+# reconnects at the next logon.
+try {{
+    $l = Get-SmbMapping -LocalPath 'L:' -ErrorAction SilentlyContinue
+    if (-not $l) {{
+        New-SmbMapping -LocalPath 'L:' -RemotePath '\\{HOST_ADDR}\{L_SHARE}' -UserName '{LINUX_SMB_USER}' `
+            -Password $HostSecret -Persistent $true -SaveCredentials | Out-Null
+    }}
+    'paguro: L: mapped'
+}} catch {{ "paguro: warning: L: not mapped: $($_.Exception.Message)" }}
 'paguro: private link ready'
 "#
     )
@@ -194,6 +205,35 @@ pub fn in_netns<T: Send + 'static>(
     })
     .join()
     .map_err(|_| "netns thread panicked".to_string())?
+}
+
+/// Samba for `L:`: `smb.conf` under `state`, the share's account with
+/// `secret` (on smbpasswd's stdin), and `smbd` started inside the netns
+/// (a daemon: it detaches). `root` holds a folder per distribution.
+pub fn start_samba(root: &Path, state: &Path, secret: &str) -> Result<(), String> {
+    for d in ["private", "lock", "state", "cache", "ncalrpc"] {
+        std::fs::create_dir_all(state.join(d)).map_err(|e| format!("{}: {e}", state.display()))?;
+    }
+    let conf = state.join("smb.conf");
+    std::fs::write(&conf, smb_conf(root, state)).map_err(|e| format!("{}: {e}", conf.display()))?;
+    let mut c = Command::new("smbpasswd")
+        .arg("-c")
+        .arg(&conf)
+        .args(["-a", "-s", LINUX_SMB_USER])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("smbpasswd: {e}"))?;
+    {
+        use std::io::Write;
+        let mut i = c.stdin.take().ok_or("smbpasswd: stdin")?;
+        write!(i, "{secret}\n{secret}\n").map_err(|e| format!("smbpasswd: {e}"))?;
+    }
+    let st = c.wait().map_err(|e| format!("smbpasswd: {e}"))?;
+    if !st.success() {
+        return Err(format!("smbpasswd: {st}"));
+    }
+    in_netns(move || run(Command::new("smbd").arg("-D").arg("-s").arg(&conf)))
 }
 
 /// Mount `/mnt/c` (Mode 1) from inside the netns.

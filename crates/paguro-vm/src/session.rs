@@ -46,6 +46,8 @@ pub const GPT_MSR: &str = "e3c9e316-0b5c-4db8-817d-f92df00215ae";
 pub const SESSION_FILE: &str = "session.json";
 /// The QOM id of the `.BEK` stick (`qemu::argv`).
 pub const BEK_DEVICE: &str = "paguro-bek";
+/// Log every this many I/O errors reported to the guest.
+const IO_ERROR_LOG_EVERY: u64 = 100;
 
 /// A JSON object's field, `Null` when absent.
 fn field<'a>(v: &'a Value, k: &str) -> &'a Value {
@@ -323,6 +325,7 @@ pub fn prepare(o: &PrepareOpts) -> R<Value> {
         "volume_at": plan.volume_at,
         "volume_bytes": volume_bytes,
         "owned": plan.owned,
+        "owned_names": bl.as_ref().map(|b| owned_names(&b.layout, &owned)).unwrap_or_default(),
         "testsigning": e.testsigning,
     });
     lo.persist();
@@ -334,6 +337,84 @@ pub fn prepare(o: &PrepareOpts) -> R<Value> {
     Ok(s)
 }
 
+/// What each owned range is, for logs and the Q24 report.
+pub fn owned_names(l: &Layout, owned: &[(u64, u64)]) -> Vec<String> {
+    let sec = |b: u64| b / disk::SECTOR;
+    owned
+        .iter()
+        .map(|&(start, _)| {
+            if start == 0 {
+                "volume-header".to_string()
+            } else if start == sec(l.reloc_offset) {
+                "relocated-boot-sectors".to_string()
+            } else if let Some(i) = l.metadata_offsets.iter().position(|&m| sec(m) == start) {
+                format!("metadata-{i}")
+            } else if l.extra_region.is_some_and(|x| sec(x) == start) {
+                "extra-region".to_string()
+            } else {
+                "owned".to_string()
+            }
+        })
+        .collect()
+}
+
+/// Which sectors of the FVE buffer the guest changed: `(range name,
+/// sector within the range, count)` runs, comparing the session's buffer
+/// with what was served (DESIGN.md §6: absorbed, never passed through;
+/// §11 Q24).
+pub fn absorbed_writes(work: &Path) -> R<Vec<(String, u64, u64)>> {
+    let s = read_session(work)?;
+    let served = fs::read(work.join("fve-served.bin")).map_err(|e| e.to_string())?;
+    let f = File::open(work.join("scratch.img")).map_err(|e| e.to_string())?;
+    let at = field(&s, "scratch_fve")
+        .as_u64()
+        .ok_or("session: scratch_fve")?;
+    let now = read_at(&f, at, served.len())?;
+    let names: Vec<String> = field(&s, "owned_names")
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or("?").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for (i, r) in field(&s, "owned")
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let (len, buf) = (
+            r.get(1).and_then(Value::as_u64),
+            r.get(2).and_then(Value::as_u64),
+        );
+        let (Some(len), Some(buf)) = (len, buf) else {
+            continue;
+        };
+        let mut run: Option<(u64, u64)> = None;
+        for k in 0..len {
+            let o = ((buf + k) * disk::SECTOR) as usize;
+            let a = served.get(o..o + disk::SECTOR as usize);
+            let b = now.get(o..o + disk::SECTOR as usize);
+            let changed = a != b;
+            match (&mut run, changed) {
+                (Some((_, n)), true) => *n += 1,
+                (None, true) => run = Some((k, 1)),
+                (Some((st, n)), false) => {
+                    out.push((names.get(i).cloned().unwrap_or_default(), *st, *n));
+                    run = None;
+                }
+                (None, false) => {}
+            }
+        }
+        if let Some((st, n)) = run {
+            out.push((names.get(i).cloned().unwrap_or_default(), st, n));
+        }
+    }
+    Ok(out)
+}
+
 pub fn read_session(work: &Path) -> R<Value> {
     let p = work.join(SESSION_FILE);
     let t = fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -342,6 +423,23 @@ pub fn read_session(work: &Path) -> R<Value> {
 
 pub fn teardown(work: &Path) -> R<()> {
     let s = read_session(work)?;
+    // What the guest wrote to BitLocker's regions: kept nowhere but here.
+    match absorbed_writes(work) {
+        Ok(w) if w.is_empty() => log("FVE: the guest wrote nothing to BitLocker's regions"),
+        Ok(w) => {
+            for (name, at, n) in &w {
+                log(&format!(
+                    "FVE: the guest wrote {n} sector(s) of {name} at +{at}: absorbed, not kept \
+                     (BitLocker changes belong in native Windows)"
+                ));
+            }
+            let _ = fs::write(
+                work.join("absorbed.json"),
+                serde_json::to_string(&w).unwrap_or_default(),
+            );
+        }
+        Err(e) => log(&format!("FVE: could not compare the buffer: {e}")),
+    }
     let d = Dm::open()?;
     let mut errs = Vec::new();
     if let Some(n) = field(&s, "name").as_str() {
@@ -358,7 +456,7 @@ pub fn teardown(work: &Path) -> R<()> {
         // Autoclear may have detached it already.
         let _ = loopdev::detach_path(Path::new(l));
     }
-    for f in ["scratch.img", "bek.img"] {
+    for f in ["scratch.img", "bek.img", "fve-served.bin"] {
         let _ = fs::remove_file(work.join(f));
     }
     let _ = fs::remove_file(work.join(SESSION_FILE));
@@ -523,6 +621,10 @@ pub fn launch(o: &LaunchOpts) -> R<()> {
         fs::copy(&o.ovmf_vars_template, &o.ovmf_vars)
             .map_err(|e| format!("{}: {e}", o.ovmf_vars.display()))?;
     }
+    if let Some(w) = &o.record_writes {
+        // blklogwrites writes into an existing file.
+        File::create(w).map_err(|e| format!("{}: {e}", w.display()))?;
+    }
     for f in ["qmp.sock", "agent.sock", "qemu.pid"] {
         let _ = fs::remove_file(o.work.join(f));
     }
@@ -559,7 +661,7 @@ pub fn launch(o: &LaunchOpts) -> R<()> {
     let pid: u32 = fs::read_to_string(o.work.join("qemu.pid"))
         .ok()
         .and_then(|s| s.trim().parse().ok())
-        .ok_or("no QEMU pid")?;
+        .ok_or_else(|| format!("no QEMU pid; see {}", o.work.join("qemu.log").display()))?;
     log(&format!("QEMU pid {pid}"));
     match mem::protect(pid) {
         Ok(()) => log("memory: QEMU oom_score_adj -1000"),
@@ -589,13 +691,13 @@ pub fn launch(o: &LaunchOpts) -> R<()> {
             net::PREFIX
         ));
     }
-    let r = supervise(o, &qmp_path, pid);
+    let r = supervise(o, &qmp_path, &mut child);
     let st = child.wait().map_err(|e| e.to_string())?;
     log(&format!("QEMU exited: {st}"));
     r
 }
 
-fn supervise(o: &LaunchOpts, qmp_path: &Path, pid: u32) -> R<()> {
+fn supervise(o: &LaunchOpts, qmp_path: &Path, child: &mut std::process::Child) -> R<()> {
     let mut q = Qmp::connect(qmp_path)?;
     let start = Instant::now();
     let mut bek_first_read: Option<Instant> = None;
@@ -604,8 +706,16 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, pid: u32) -> R<()> {
     let mut agent: Option<std::os::unix::net::UnixStream> = None;
     let mut abuf = Vec::new();
     let mut last_note = Instant::now();
+    let mut io_errors = 0u64;
     loop {
-        if !Path::new(&format!("/proc/{pid}")).exists() {
+        // QEMU (or systemd-run, which execs it) gone: reaped here, so an
+        // exited QEMU is never mistaken for a running one.
+        if !matches!(child.try_wait(), Ok(None)) {
+            if io_errors > 0 {
+                log(&format!(
+                    "disk: {io_errors} I/O error(s) reported to the guest in all"
+                ));
+            }
             return Ok(());
         }
         // The .BEK: unplugged once bootmgr has read it and Windows has had
@@ -669,7 +779,12 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, pid: u32) -> R<()> {
                 }
             }
         }
-        let _ = q.poll_events(Duration::from_millis(500));
+        if let Err(e) = q.poll_events(Duration::from_millis(500)) {
+            if e.contains("closed") {
+                // QEMU is exiting: wait for it rather than spin.
+                let _ = child.wait();
+            }
+        }
         let events = std::mem::take(&mut q.events);
         for e in events {
             let name = field(&e, "event").as_str().unwrap_or("");
@@ -682,8 +797,23 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, pid: u32) -> R<()> {
                         let _ = q.cmd("blockdev-del", json!({ "node-name": n }));
                     }
                 }
-                "SHUTDOWN" | "RESET" | "BLOCK_IO_ERROR" | "SUSPEND" | "WAKEUP" | "STOP"
-                | "RESUME" => {
+                // View B's EIO reaching the guest (DESIGN.md §4.3): counted,
+                // the first of each run logged.
+                "BLOCK_IO_ERROR" => {
+                    io_errors += 1;
+                    if io_errors == 1 || io_errors % IO_ERROR_LOG_EVERY == 0 {
+                        log(&format!(
+                            "disk: {io_errors} I/O error(s) reported to the guest (last: {} {})",
+                            e.pointer("/data/operation")
+                                .and_then(Value::as_str)
+                                .unwrap_or("?"),
+                            e.pointer("/data/reason")
+                                .and_then(Value::as_str)
+                                .unwrap_or("?")
+                        ));
+                    }
+                }
+                "SHUTDOWN" | "RESET" | "SUSPEND" | "WAKEUP" | "STOP" | "RESUME" => {
                     log(&format!("qmp: {e}"));
                 }
                 _ => {}
