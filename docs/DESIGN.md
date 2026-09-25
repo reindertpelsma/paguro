@@ -4679,14 +4679,20 @@ later question sits with the ones it belongs to rather than in numeric order.
     still to be decided. It must stay out of the enforcement module, which holds
     no key material.
 
-32. **Does Windows stay activated in the VM, and after returning to the metal?**
-    With the host's SMBIOS, MSDM table, disk serial and MAC passed through
-    (§1b, WinBoat), on OEM-key laptops and on digitally licensed desktops;
-    and whether a VM session ever changes the native boot's activation state.
-    Start with the least: `-cpu host` (the real CPU model and features), SMBIOS
-    and MSDM. Only if that fails, add identity piece by piece; hiding the
-    hypervisor CPUID bit is the last resort, because it costs Windows' Hyper-V
-    enlightenments and VBS inside the VM.
+32. **Does an OEM licence accept being run in a VM?** The precise case to find
+    out. A retail or digital licence moved between identical-looking machines
+    is ordinary; an OEM licence (the key in the firmware's MSDM table,
+    activated against the device's hardware hash) is meant for bare metal, and
+    running the *same* installation virtualised is unusual for it. Whether
+    Windows or Microsoft's activation service rejects it — by the hash, by
+    detecting the hypervisor, or not at all — is unknown. On an OEM laptop,
+    switching native ↔ VM many times: activated in the VM with no watermark?
+    still activated natively? Order of attempts, least first: `-cpu host`,
+    the host's SMBIOS and MSDM (§4.5); then disk serial and MAC; then hiding
+    the hypervisor CPUID bit, which is the likely lever if detection is the
+    trigger but costs Hyper-V enlightenments and VBS in the VM. If nothing
+    works, the VM runs with the watermark and nothing else is affected, and the
+    docs say so for OEM machines. Digitally licensed desktops are the control.
 
 ---
 
