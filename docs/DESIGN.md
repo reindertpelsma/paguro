@@ -2249,6 +2249,22 @@ The pieces, cheapest first:
 4. **The balloon** stays the last resort, and host memory limits (a cgroup for
    the VM) keep the worst case bounded.
 
+**Lending freed pages to Linux as cache only — the guarantee comes from the
+VM's cgroup.** The VM gets a memory cgroup with `memory.min = memory.max =` its
+size: a pool nothing else on the host can take. Inside it live the guest's RAM
+and the host page cache of the guest's own disk. When Windows drops cache and
+the pages are discarded (above), the host cache of that same disk fills the
+room — Windows' cache has moved out of Windows into Linux, still serving its
+reads. When Windows needs the memory back, reclaim inside the cgroup drops that
+cache, and it is always instantly droppable because the VM's disk runs
+write-through, so every cached page is clean. Host programs can never grow into
+the pool, so the guest can never be starved.
+
+What the stock kernel cannot guarantee is lending those pages to *arbitrary*
+host caches: cgroups limit anonymous and file memory together, so "may only be
+used as cache" is enforceable only for the pool's own cache. That would take
+kernel work — the retired cleancache interface had this shape.
+
 A cleverer scheme — a guest driver keeping known-zero pages in Windows' cache
 and a KVM module trapping writes to them — was considered: (1) already provides
 the host half, and the guest half would fight Windows' memory manager (page
