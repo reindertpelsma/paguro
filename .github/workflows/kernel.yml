@@ -63,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [c-ntfs, c-runlist, ntfs_file, runlist, ntfs_diff]
+        target: [c-ntfs, c-runlist, c-payload, ntfs_file, runlist, ntfs_diff]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -82,6 +82,7 @@ jobs:
           cd fuzz
           seeds=../kernel/dm-paguro/test/fuzz/corpus/ntfs
           [ ${{ matrix.target }} = runlist ] && seeds=../kernel/dm-paguro/test/fuzz/corpus/runlist
+          [ ${{ matrix.target }} = ntfs_diff ] && seeds="$seeds ../kernel/dm-paguro/test/fuzz/corpus/payload"
           mkdir -p corpus/${{ matrix.target }}
           # +nightly: rust-toolchain.toml pins stable, and cargo-fuzz needs -Z flags.
           cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} $seeds -- \
@@ -147,3 +148,71 @@ jobs:
         run: cargo build --release -p paguro-harness
       - name: load and exercise it in a throwaway VM
         run: sudo kernel/dm-paguro/test/vm-test.sh "$VMK/boot/vmlinuz-$KVER" "$VMK/lib/modules/$KVER"
+
+  # Views A and C of one NTFS volume live at once under stress, growth,
+  # the view-C guard (BPF-LSM) and power-loss replay of everything recorded
+  # (INTERFACES 10.4, 12.1): kernel/dm-paguro/test/vm-coexist.sh. Longer
+  # stress and a denser replay nightly.
+  coexist:
+    name: module — coexistence, growth, guard, power-loss replay (VM)
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ github.event_name == 'schedule' && 360 || 100 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install build, VM-test and image tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 busybox-static dmsetup zstd cpio \
+            e2fsprogs ntfs-3g dosfstools gdisk fio attr clang llvm \
+            libbpf-dev libelf-dev zlib1g-dev libzstd-dev
+          sudo apt-get install -y -qq bpftool || sudo apt-get install -y -qq linux-tools-common || true
+      - name: fetch the VM kernel (generic HWE image, modules, headers)
+        run: |
+          kver=$(apt-cache depends linux-image-generic-hwe-24.04 |
+                 sed -n 's/^ *Depends: linux-image-\([0-9].*-generic\)$/\1/p' | head -1)
+          [ -n "$kver" ] || { echo "::error::cannot resolve the HWE kernel version"; exit 1; }
+          common=$(apt-cache depends linux-headers-$kver |
+                   sed -n 's/^ *Depends: \(linux-.*-headers-.*\)$/\1/p' | head -1)
+          d=$RUNNER_TEMP/vmk; mkdir -p $d/debs; cd $d/debs
+          apt-get download linux-image-unsigned-$kver linux-modules-$kver \
+            linux-headers-$kver $common
+          for f in *.deb; do dpkg -x $f $d; done
+          echo "VMK=$d" >> "$GITHUB_ENV"; echo "KVER=$kver" >> "$GITHUB_ENV"
+      - name: enable KVM if the runner has it (else TCG)
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+              sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          fi
+      - name: ntfsck (ntfsprogs-plus), built from source
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y -qq autoconf automake libtool pkg-config libgcrypt20-dev
+          git clone -q --depth 1 https://github.com/ntfsprogs-plus/ntfsprogs-plus.git $RUNNER_TEMP/npp
+          cd $RUNNER_TEMP/npp && ./autogen.sh > /dev/null && ./configure -q --disable-shared --enable-static && make -s -j4
+          f=$(find $RUNNER_TEMP/npp -name ntfsck -type f -perm -u+x | head -1)
+          [ -n "$f" ] && echo "PG_NTFSCK=$f" >> "$GITHUB_ENV"
+      - name: build dm-paguro (VM kernel), pgctl, pgguard, the harness
+        run: |
+          make -C kernel/dm-paguro KDIR=$VMK/usr/src/linux-headers-$KVER
+          make -C kernel/dm-paguro/tools
+          cargo build --release -p paguro-harness
+      - name: coexistence, growth, guard and replay in a throwaway VM
+        env:
+          # Push: every 80th flush point (~300 states over the whole log) and
+          # a few subsets. Nightly: every other flush point, every 1000th
+          # write, subsets in a fifth of the flush intervals.
+          PG_SCALE: ${{ github.event_name == 'schedule' && 2 || 1 }}
+          PG_REPLAY: ${{ github.event_name == 'schedule' && '--flush-every 2 --every 1000 --subsets 20 --torn 30 --seed 7' || '--flush-every 80 --subsets 2 --torn 25 --seed 1' }}
+          PG_EFSCK: ${{ github.event_name == 'schedule' && 50 || 20 }}
+        run: |
+          mkdir -p $RUNNER_TEMP/co
+          sudo -E PG_WORK=$RUNNER_TEMP/co kernel/dm-paguro/test/vm-coexist.sh \
+            "$VMK/boot/vmlinuz-$KVER" "$VMK/lib/modules/$KVER"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coexist-log
+          path: ${{ runner.temp }}/co/log

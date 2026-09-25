@@ -36,8 +36,8 @@ specification.
 | File | Lines (code) | Rust spec | What it decides |
 |---|---|---|---|
 | `pg_range.c` / `.h` | 83 (68) | `range.rs` | the whole runtime check for views B/C |
-| `pg_claim.c` / `.h` | 91 (75) | `ntfs.rs` (claims) | what a claim covers, whether claims/reserved ranges collide, growth, view A's translation |
-| `pg_ntfs.c` / `.h` | 624 (~510) | `ntfs.rs`, `runlist.rs` | a file's extents, from the volume itself |
+| `pg_claim.c` / `.h` | 110 (~90) | `ntfs.rs` (claims) | what a claim covers, whether claims/reserved ranges collide, growth, view A's translation |
+| `pg_ntfs.c` / `.h` | 865 (~700) | `ntfs.rs`, `runlist.rs` | a file's extents, from the volume itself; the payload check |
 
 Invariants, function by function:
 
@@ -59,6 +59,11 @@ Invariants, function by function:
 - `pg_claim_coalesce` — merges physically adjacent file-order extents (the
   canonical form `pg_ntfs_extents` produces), so FIEMAP's split points don't
   matter to the cross-check.
+- `pg_claim_truncate` — the first *n* logical sectors of file-order extents;
+  0 if there are fewer. `PG_CROSSCHECK` compares FIEMAP (or any supplied list)
+  with the derived map up to the end of the file's data: ntfs3 reports the
+  last extent up to EOF, the core up to the end of the cluster, and a fixed
+  VHD (clusters + a 512-byte footer) always has such a tail.
 - `pg_claim_gather` — logical sector → physical sector and sectors left in that
   extent; 0 past the end (view A refuses).
 - `pg_runlist_decode` — mapping pairs; every field width checked against the
@@ -88,8 +93,22 @@ Invariants, function by function:
   attribute list is refused (see below).
 - `pg_ntfs_extents` — clusters → 512-byte sectors, file order, adjacent runs
   coalesced; every extent inside the volume.
-- `pg_payload_check` — the mandatory structural assertion: GPT header at LBA 1,
-  128-byte entries, the first ESP's first sector a FAT boot sector.
+- `pg_payload_check` — the mandatory structural assertion, by content
+  (INTERFACES §3.2): a **GPT** (`EFI PART` at LBA 1) needs a valid header CRC
+  and entry-array CRC, the backup header at the primary's alternate LBA
+  agreeing field by field with its own valid array, every used entry inside
+  the usable range, every ESP-typed partition a FAT boot sector no larger
+  than the partition, every partition holding an ext4 superblock passing the
+  ext4 check, and at least one partition verified; **bare ext4** (`0xEF53` at
+  byte 1080) needs a plausible geometry no larger than the payload and the
+  backup superblock in group 1 (or `s_backup_bgs[0]` under `sparse_super2`)
+  agreeing on UUID, block count and its group number; **ISO 9660** needs the
+  PVD's both-endian fields to agree, volume space size × block size = the
+  payload, and the root directory's `.` record to point at itself. Anything
+  else is refused. The backup GPT, partition starts and ext4's group-1 copy
+  lie past a fragmented image's first extent, so misordered gathering fails
+  here; the harness proves it for every swap that moves a sector the check
+  reads. Every read is bounded by the image length first (CBMC).
 
 **Glue** (boring, exercised in the VM): `dm-paguro-main.c` (the two targets),
 `pg_ctl.c` / `pg_ctl.h` (control device, state, locking, reading a block
@@ -110,11 +129,13 @@ device with synchronous bios), `paguro_uapi.h`, `tools/pgctl.c` (test client).
 | unit (Rust) | `crates/paguro-core/tests/ntfs.rs` | every `NtfsError` variant, over synthetic volumes built byte by byte (`tests/synth/`) |
 | unit (C) | `test/unit/` | range/claim/runlist/boot vectors, every manifest case, I/O failure at every read, torn reads, every byte of every sector read mutated; under ASan+UBSan, MSan and Valgrind |
 | fixtures | `test/fixtures/ntfs/` (repo root) | real `mkntfs` volumes written through ntfs-3g (contiguous, fragmented, attribute-list, non-resident list, 4 KiB sectors, compressed, sparse) and 65 named corruptions of them, each with its expected error (`generate.py` rebuilds them) |
-| differential | `crates/paguro-harness` (`ntfs-exhaustive`) | C against Rust: same result, same error, **same sector reads** — fixtures, exhaustive byte mutation, truncation, I/O faults, fuzz corpora |
-| model checking | `test/cbmc/` | CBMC: memory safety + functional equivalence for the range test, claim checks and runlist decoder |
-| fuzzing | `test/fuzz/` (libFuzzer, C), `/fuzz` (cargo-fuzz: `ntfs_file`, `runlist`, `ntfs_diff`) | in-repo seed corpus and dictionary |
+| fixtures | `test/fixtures/payload/` | real GPT (FAT ESP + ext4), bare ext4 (1 KiB/4 KiB blocks, 64-bit, `sparse_super2`), ISO 9660 and grown/unknown images from `sgdisk`/`mkfs`/`genisoimage`, and 85 named corruptions of them with CRCs recomputed where the corruption is meant to get past them |
+| differential | `crates/paguro-harness` (`ntfs-exhaustive`) | C against Rust: same result, same error, **same sector reads** — fixtures, exhaustive byte mutation, truncation, I/O faults, fuzz corpora; for the payload check also misordered gathering (every swap of 4 and 7 extents, and the reversal) |
+| model checking | `test/cbmc/` | CBMC: memory safety + functional equivalence for the range test, claim checks and runlist decoder; the payload check over arbitrary sector contents, one path per run (GPT with ≤ 5 entries, ext4 at any base and length, ISO 9660): memory safety, every read inside the image or partition, a typed result; the bitwise CRC-32 = the table CRC |
+| fuzzing | `test/fuzz/` (libFuzzer, C: `ntfs`, `runlist`, `payload`), `/fuzz` (cargo-fuzz: `ntfs_file`, `runlist`, `ntfs_diff` — which also diffs the payload check) | in-repo seed corpora (`paguro-harness ntfs-seeds` / `payload-seeds`) and dictionary |
 | static analysis | `make -C test/unit analyze` | `gcc -fanalyzer`, `clang --analyze`, `cppcheck`, `sparse` |
 | VM | `test/vm-test.sh` | the module in QEMU (KVM or TCG) on the host's kernel, over the fixtures |
+| VM: coexistence | `test/vm-coexist.sh` (`test/coexist/`) | views A and C of one volume mounted read-write at once under stress; growth; the view-C guard; power-loss replay (below) |
 
 ```sh
 make                              # the module, against /lib/modules/$(uname -r)/build
@@ -122,7 +143,8 @@ make -C test/unit check           # C core tests under ASan+UBSan (msan, valgrin
 make -C test/cbmc                 # bounded model checking
 make -C test/fuzz run T=ntfs      # libFuzzer, 60 s
 cargo run --release -p paguro-harness -- ntfs-exhaustive
-gcc -static -O2 -o tools/pgctl tools/pgctl.c && sudo ./test/vm-test.sh
+make -C tools && sudo ./test/vm-test.sh     # pgctl, pgguard (static)
+cargo build --release -p paguro-harness && sudo ./test/vm-coexist.sh
 ```
 
 `vm-test.sh` never loads anything into the host kernel. In the VM it adds the
@@ -138,3 +160,97 @@ gets no view B and only read-only views; append-only growth extends view A
 (after a fresh cross-check) while truncation makes the claim read-only; a
 dm-error splice at each sector the claim reads makes the add or claim fail;
 and the module unloads cleanly.
+
+## Coexistence, growth, guard and power-loss replay (`test/vm-coexist.sh`)
+
+One VM boot (`lsm=…,bpf`), nine virtio disks: NTFS volumes with 512-byte and
+4096-byte sectors, a `dm-log-writes` log, a replay target, the images built
+on the host (`coexist/mkimages.py`: a fixed VHD holding GPT + FAT32 ESP +
+ext4 with 512-byte and with 4096-byte LBAs, bare ext4) and, when the host is
+root with ntfs-3g, `guard.img` (an image with an 8.3 alias, a hard link and
+an alternate data stream). Tools in the VM: `pgctl`, `pgstress`
+(self-checking files and blocks), `pgreplay`, `pgguard`, `paguro-harness`
+(the Rust reference and the C core in userspace), e2fsprogs, `ntfsfix`,
+`fsck.fat`, and optionally `fio`, `bpftool` and ntfsprogs-plus' `ntfsck`
+(`PG_NTFSCK`).
+
+For each volume — 512e contiguous (recorded), 512e fragmented (the images
+written into 2 MiB holes, > 20 extents each), 4Kn:
+
+1. claim both images, cross-check with ntfs3's FIEMAP, load view A for each
+   (the payload check passes: GPT + FAT + ext4, bare ext4) and view C;
+2. mount both ext4s and the ESP from view A and ntfs3 on view C, all
+   read-write, and run at once: `pgstress` trees and block overwrites on
+   both ext4s and the ESP, a create/overwrite/rename/delete churn on NTFS,
+   and NTFS filled to ENOSPC (plus `fio --verify` when present);
+3. verify every file and block live, unmount, `e2fsck -fn`, `fsck.fat -n`,
+   `ntfsfix -n` (and `ntfsck -n`), remount read-only and verify from disk;
+   re-parse both runlists with the Rust and C cores and have the module
+   compare them with its claims (`pgctl crosscheck-list`); `PG_STATUS` shows
+   no guard hits and no view-A refusals;
+4. growth: append 64 MiB to the bare image through ntfs3 on view C,
+   `PG_GROW`, cross-check, reload view A under the mounted ext4, online
+   `resize2fs`, stress again, verify, fsck. If ntfs3 had to give the file an
+   extension record (fragmented free space), see Findings: `PG_GROW` must
+   refuse it and the claim go read-only (reported as `XFAIL`).
+
+**Power-loss replay** (INTERFACES §12.1): the 512e run is recorded with
+`dm-log-writes` under the volume. `pgreplay walk` (a reimplementation of
+xfstests' `replay-log` from the log format, no GPL code) replays it onto a
+copy of the starting volume and at every FLUSH/FUA entry, every Nth write,
+and for a sample of flush intervals a random subset of the unflushed writes
+(FUA kept; some writes torn to a subset of their 512-byte sectors), runs
+`replaycheck`: the Rust reference and the C core (userspace) must agree, the
+map must be the pre-, the post-growth map or one between them (append-only),
+or a refusal — and the module (`PG_VOLUME_ADD`, `PG_CLAIM`, then
+`PG_CROSSCHECK` against the Rust map) must give exactly the same map or the
+same refusal code. At every `PG_EFSCK`th state both images are mounted from
+a snapshot of view A (journal replay) and `e2fsck -fn` must be clean.
+
+**The view-C guard** (`tools/pgguard.bpf.c`, `tools/pgguard.c`): a CO-RE
+BPF-LSM program keyed on `(dev, ino)`: `file_open`, `file_permission`,
+`path_truncate`, `inode_setattr`, `inode_setxattr`, `inode_removexattr`,
+`inode_file_setattr` (≥ 6.17) → `EACCES`; `inode_unlink`, `inode_rename`
+(either end), `inode_link` → `EBUSY`; one exempt cgroup. It pins its links
+and its image map in bpffs and refuses (`EPERM`) unlinking or renaming those
+pins, unmounting that bpffs (`sb_umount`), a link fd by id (`bpf`), and any
+new fd for its maps outside the exempt cgroup (`bpf_map`). The test: every
+operation through the path, the 8.3 alias, the hard link, a file handle and
+the stream name is refused with `EACCES`/`EPERM`/`EBUSY`, never `EIO` —
+with `sys_immutable` and the `SYSTEM` attribute, and by the BPF layer alone;
+`find`, `du`, `tar`, `rm -rf` of the parent, a churn, ENOSPC, `fstrim` and a
+remount cause no guard hit in `PG_STATUS`; `rm` of the pins, `umount` (also
+`-l`) of the bpffs and `bpftool link detach` (by id and by pin) all fail.
+
+## Findings
+
+- **ntfs3 writes MFT records in the NTFS 3.0 layout** (update sequence at
+  0x2A, no self record number), on NTFS 3.1 volumes; Windows and ntfs-3g use
+  0x30. The core refuses that layout (INTERFACES §10.1a), so a file created
+  by ntfs3 cannot be claimed, and an image grown by ntfs3 into fragmented free
+  space (which needs an extension record) makes `PG_GROW` refuse and the claim
+  read-only. The tests write images with libntfs-3g (`ntfscp`) and grow into
+  freed contiguous space; the fragmented case is checked as the refusal.
+  Accepting the 3.0 layout needs a decision in §10.1a (the self-number check
+  would be lost for those records; sequence and base-reference checks stay).
+- **A refused `PG_GROW` on a mounted, read-write view A** turns every later
+  write into `EIO` at once (the claim is read-only): ext4 aborts its journal.
+  Fail-safe, but the growth service should unmount or remount read-only first,
+  or the module keep the old map writable when only the *new* part is
+  unparseable.
+- **Fixed VHDs never passed the cross-check** before `pg_claim_truncate`:
+  ntfs3's FIEMAP ends at EOF, the derived map at the end of the cluster.
+- The mounted ntfs3 has **no `ads=` option** (Linux 7.0); ntfs3 has no stream
+  names in paths anyway (the ADS name is `ENOENT`). ntfs3 has no `FITRIM`.
+- `sys_immutable` + `SYSTEM` also stops the exempt growth service from
+  appending (`EPERM`): growth needs the attribute cleared first. And it makes
+  the volume's root directory immutable too (NTFS marks it `SYSTEM|HIDDEN`):
+  nothing new can be created at the top level of view C.
+- Payload check, deviations from INTERFACES §3.2 wording: the backup GPT
+  header is looked for at the primary's alternate LBA, which may be before the
+  last LBA (a grown disk whose backup has not moved yet); a GPT's LBAs are in
+  view A's logical block size (4Kn); at least one partition must verify; a
+  GPT partition whose ext4 superblock is gone reads as unknown content and is
+  skipped (so a misordering that only replaces that superblock is not caught
+  — it also cannot be mounted as ext4); ISO 9660 has nothing to read past a
+  first extent besides the root directory record.
