@@ -36,6 +36,11 @@ vm_bin() {
 vm_modules() {
     md=$1; shift
     : > "$r/mod/order"
+    # An unpacked (dpkg -x) module tree has no modules.dep: make one there.
+    if [ ! -e "$md/modules.dep" ]; then
+        depmod -b "$(cd "$md/../../.." && pwd)" "$(basename "$md")" ||
+            { echo "vm_modules: no modules.dep in $md and depmod failed" >&2; return 1; }
+    fi
     for m in "$@"; do vm_module_dep "$md" "kernel/$m"; done
 }
 
