@@ -8,7 +8,7 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Paguro.Api.Codegen\Paguro.Api.Codegen.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" SetTargetFramework="TargetFramework=net8.0" />
+    <ProjectReference Include="..\Paguro.Api.Codegen\Paguro.Api.Codegen.csproj" ReferenceOutputAssembly="false" Private="false" SkipGetTargetFrameworkProperties="true" SetTargetFramework="TargetFramework=net8.0" />
   </ItemGroup>
   <PropertyGroup>
     <PaguroGenerated>$(BaseIntermediateOutputPath)generated\PaguroApi.g.cs</PaguroGenerated>

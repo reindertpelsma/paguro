@@ -46,6 +46,16 @@ public sealed class FakeServer : IDisposable
 
     public void On(string method, Func<JsonObject, Reply> handler) => handlers[method] = handler;
 
+    /// <summary>Ask back for <paramref name="param"/> (a secret) until a call
+    /// carries it, then answer with <paramref name="dataJson"/>.</summary>
+    public void OnNeedsInput(string method, string param, string prompt, bool confirm, string dataJson)
+        => On(method, p => p.ContainsKey(param)
+            ? Ok(JsonNode.Parse(dataJson))
+            : Error("refused", 3, $"{prompt}: not given", new JsonObject
+            {
+                ["needs_input"] = param, ["param"] = param, ["prompt"] = prompt, ["confirm"] = confirm,
+            }));
+
     public static Reply Ok(JsonNode? data, string exit = "ok", params string[] lines) => new(new JsonObject
     {
         ["data"] = data,
@@ -60,6 +70,17 @@ public sealed class FakeServer : IDisposable
         var d = new JsonObject { ["code"] = code, ["exit"] = exit };
         if (data != null) d["data"] = data;
         return new(null, new JsonObject { ["code"] = -32000 - exit, ["message"] = message, ["data"] = d }, Array.Empty<JsonObject>());
+    }
+
+    /// <summary>A handler answering with one fixture file's exchange (its JSON text).</summary>
+    public static Func<JsonObject, Reply> FromFixture(string fixtureJson)
+    {
+        var fx = JsonNode.Parse(fixtureJson)!.AsObject();
+        var resp = fx["response"]!.AsObject();
+        var notes = fx["notifications"]!.AsArray().Select(n => n!.AsObject()).ToList();
+        var result = resp["result"] as JsonObject;
+        var error = resp["error"] as JsonObject;
+        return _ => new Reply((JsonObject?)result?.DeepClone(), (JsonObject?)error?.DeepClone(), notes.Select(n => (JsonObject)n.DeepClone()).ToList());
     }
 
     /// <summary>Answer every method with its fixture (windows/api/fixtures):

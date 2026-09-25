@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Configuration>
+  <ViewDefinitions>
+    <View>
+      <Name>Distribution</Name>
+      <ViewSelectedBy><TypeName>Paguro.Api.Distribution</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Kind</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Default</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Size(GB)</Label><Alignment>Right</Alignment></TableColumnHeader>
+          <TableColumnHeader><Label>Path</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries><TableRowEntry><TableColumnItems>
+          <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+          <TableColumnItem><PropertyName>Kind</PropertyName></TableColumnItem>
+          <TableColumnItem><PropertyName>Default</PropertyName></TableColumnItem>
+          <TableColumnItem><ScriptBlock>if ($_.Size) { [math]::Round($_.Size / 1GB, 1) }</ScriptBlock></TableColumnItem>
+          <TableColumnItem><PropertyName>Path</PropertyName></TableColumnItem>
+        </TableColumnItems></TableRowEntry></TableRowEntries>
+      </TableControl>
+    </View>
+    <View>
+      <Name>SystemCheck</Name>
+      <ViewSelectedBy><TypeName>Paguro.Api.SystemCheck</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Id</Label></TableColumnHeader>
+          <TableColumnHeader><Label>State</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Detail</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries><TableRowEntry><TableColumnItems>
+          <TableColumnItem><PropertyName>Id</PropertyName></TableColumnItem>
+          <TableColumnItem><PropertyName>State</PropertyName></TableColumnItem>
+          <TableColumnItem><PropertyName>Detail</PropertyName></TableColumnItem>
+        </TableColumnItems></TableRowEntry></TableRowEntries>
+      </TableControl>
+    </View>
+  </ViewDefinitions>
+</Configuration>

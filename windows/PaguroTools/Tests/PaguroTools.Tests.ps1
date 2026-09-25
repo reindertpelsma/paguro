@@ -1,192 +1,377 @@
-# Pester 5+ tests for PaguroTools.
+# Pester 5+ tests for the PaguroTools binary module: every cmdlet, against a
+# fake paguro service (Paguro.Testing.FakeServer) that answers from the API
+# fixtures (windows/api/fixtures, made by the Rust side from the real
+# methods) and records each call. Runs wherever pwsh 7.4+ runs: .NET's
+# named pipes are Unix sockets on Linux.
 #
-# The module is a thin layer, so what is tested is the layer: the command
-# line each cmdlet builds, -WhatIf -> --dry-run, confirmation -> --yes, the
-# passphrase on stdin and never in argv, the envelope's errors and warnings.
-# The process is mocked (Invoke-PaguroProcess), so these run anywhere pwsh
-# runs. When $env:PAGURO_EXE names a built paguro.exe (CI on Windows), the
-# 'real binary' block runs read-only and dry-run commands against it.
+#   $env:PAGURO_MODULE       PaguroTools.psd1 of a build (default: ../bin/module)
+#   $env:PAGURO_TESTING_DLL  Paguro.Testing.dll (default: ../bin/testing)
 
-BeforeAll {
-    Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'PaguroTools.psd1') -Force
-    function New-Envelope($Command, $Data, [string[]] $Warnings = @()) {
-        [pscustomobject]@{
-            ExitCode = 0
-            StdOut   = (@{ schema = 'paguro-cli/1'; command = $Command; ok = $true; dry_run = $false; data = $Data; warnings = $Warnings } | ConvertTo-Json -Depth 10)
-            StdErr   = ''
-        }
-    }
-    function New-Failure($Command, $Code, $Exit, $Message, $Data = $null) {
-        $err = @{ code = $Code; message = $Message; exit = $Exit }
-        if ($null -ne $Data) { $err.data = $Data }
-        [pscustomobject]@{
-            ExitCode = $Exit
-            StdOut   = (@{ schema = 'paguro-cli/1'; command = $Command; ok = $false; dry_run = $false; error = $err } | ConvertTo-Json -Depth 10)
-            StdErr   = ''
-        }
-    }
-}
+Describe 'PaguroTools' {
+    BeforeAll {
+        $root = Split-Path $PSScriptRoot -Parent
+        $module = if ($env:PAGURO_MODULE) { $env:PAGURO_MODULE } else { Join-Path $root 'bin/module/PaguroTools.psd1' }
+        $testing = if ($env:PAGURO_TESTING_DLL) { $env:PAGURO_TESTING_DLL } else { Join-Path $root 'bin/testing/Paguro.Testing.dll' }
+        $script:fixtures = Join-Path $root '../api/fixtures'
+        Add-Type -Path $testing
+        Import-Module $module -Force
+        $script:srv = [Paguro.Testing.FakeServer]::Start()
+        $srv.LoadFixtures($fixtures)
+        $env:PAGURO_PIPE = $srv.PipeName
+        $env:PAGURO_SHELL = if ($IsWindows) { 'hostname.exe' } else { 'true' }
 
-Describe 'PaguroTools module' {
-    It 'exports the documented cmdlets' {
-        $names = (Get-Command -Module PaguroTools).Name
-        foreach ($n in 'Get-PaguroStatus', 'Export-PaguroHardware', 'New-PaguroDisk', 'Install-PaguroDistro',
-            'Restart-PaguroLinux', 'Set-PaguroConfig', 'Repair-Paguro', 'Uninstall-Paguro') {
-            $names | Should -Contain $n
+        function script:Last { $srv.Calls[$srv.Calls.Count - 1] }
+        function script:P([string] $name) {
+            $n = (Last).Params[$name]
+            if ($null -eq $n) { return $null }
+            $n.GetValue[object]().ToString()
         }
+        function script:Secure([string] $s) { ConvertTo-SecureString $s -AsPlainText -Force }
     }
-}
 
-Describe 'command lines' {
+    AfterAll {
+        $srv.Dispose()
+        Remove-Item env:PAGURO_PIPE, env:PAGURO_SHELL -ErrorAction SilentlyContinue
+    }
+
     BeforeEach {
-        $script:calls = [System.Collections.Generic.List[object]]::new()
-        Mock -ModuleName PaguroTools Invoke-PaguroProcess {
-            $script:calls.Add([pscustomobject]@{ Args = $ArgumentList; Stdin = $StandardInput })
-            New-Envelope 'x' @{ ok = 1 }
+        $srv.ClearCalls()
+        $srv.LoadFixtures($fixtures)
+    }
+
+    Describe 'the module' {
+        It 'exports a cmdlet for every API method (nothing is GUI-only)' {
+            $exported = @((Get-Command -Module PaguroTools).Name)
+            $asm = (Get-Command Get-PaguroStatus).ImplementingType.Assembly
+            $covered = $asm.GetTypes() |
+                Where-Object { $_.IsSubclassOf([System.Management.Automation.PSCmdlet]) -and -not $_.IsAbstract } |
+                ForEach-Object { $_.GetCustomAttributes([Paguro.PowerShell.PaguroMethodAttribute], $false).Method } |
+                Sort-Object -Unique
+            foreach ($m in [Paguro.Api.PaguroMethods]::All) {
+                $covered | Should -Contain $m.Name -Because "$($m.Name) needs a cmdlet"
+                foreach ($c in $m.Cmdlets) { $exported | Should -Contain $c -Because "the schema names $c for $($m.Name)" }
+            }
+        }
+
+        It 'fails with a clear error when the service is not there' {
+            $old = $env:PAGURO_PIPE
+            try {
+                $env:PAGURO_PIPE = 'paguro-nobody-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+                { Get-PaguroStatus -ErrorAction Stop } | Should -Throw -ErrorId 'paguro.no_service*'
+            } finally { $env:PAGURO_PIPE = $old }
+        }
+
+        It 'turns a command error into an ErrorRecord with its category' {
+            $srv.OnError('status', 'needs_elevation', 7, 'status needs an administrator')
+            Get-PaguroStatus -ErrorAction SilentlyContinue -ErrorVariable e | Should -BeNullOrEmpty
+            $e[0].FullyQualifiedErrorId | Should -BeLike 'paguro.needs_elevation*'
+            $e[0].CategoryInfo.Category | Should -Be 'PermissionDenied'
+            $e[0].Exception.Exit | Should -Be 7
         }
     }
 
-    It 'Get-PaguroStatus runs status with --json' {
-        Get-PaguroStatus | Out-Null
-        $script:calls[0].Args | Should -Be @('--json', 'status')
+    Describe 'status and checks' {
+        It 'Get-PaguroService' {
+            $s = Get-PaguroService
+            $s | Should -BeOfType [Paguro.Api.ServiceInfo]
+            $s.ApiVersion | Should -Be '1.0'
+            (Last).Method | Should -Be 'service.info'
+        }
+        It 'Get-PaguroStatus' {
+            $s = Get-PaguroStatus
+            $s | Should -BeOfType [Paguro.Api.Status]
+            $s.Uefi | Should -BeTrue
+            $s.Arch | Should -Be 'x64'
+        }
+        It 'Get-PaguroCheck returns one typed object per check, filterable' {
+            $all = @(Get-PaguroCheck)
+            $all.Count | Should -Be 8
+            $all[0] | Should -BeOfType [Paguro.Api.SystemCheck]
+            @(Get-PaguroCheck fast_startup).State | Should -Be 'warn'
+        }
+        It 'Repair-PaguroCheck takes checks from the pipeline; -WhatIf is the dry run' {
+            Get-PaguroCheck | Where-Object { $_.Fix.Automatic } | Repair-PaguroCheck -WhatIf | Out-Null
+            (Last).Method | Should -Be 'checks.fix'
+            P 'id' | Should -Be 'fast_startup'
+            P 'dry_run' | Should -Be 'True'
+            Repair-PaguroCheck fast_startup -Confirm:$false | Out-Null
+            P 'dry_run' | Should -BeNullOrEmpty
+        }
+        It 'Get-PaguroSecureBoot' {
+            $s = Get-PaguroSecureBoot
+            $s | Should -BeOfType [Paguro.Api.SecureBootStatus]
+            $s.SecureBoot | Should -BeTrue
+        }
     }
 
-    It 'New-PaguroDisk maps -WhatIf to --dry-run' {
-        New-PaguroDisk -Path 'C:\paguro\a.vhd' -Size 20G -WhatIf | Out-Null
-        $script:calls[0].Args | Should -Be @('--json', '--dry-run', 'disk', 'create', '--size', '20G', '--path', 'C:\paguro\a.vhd')
-        New-PaguroDisk -Path 'C:\paguro\a.vhd' -Size 20G | Out-Null
-        $script:calls[1].Args | Should -Not -Contain '--dry-run'
+    Describe 'hardware and disks' {
+        It 'Export-PaguroHardware writes the file itself and returns the object' {
+            $f = Join-Path ([IO.Path]::GetTempPath()) "hw-$([guid]::NewGuid()).json"
+            try {
+                $h = Export-PaguroHardware -Path $f
+                $h | Should -BeOfType [Paguro.Api.HostHardware]
+                (Get-Content $f -Raw | ConvertFrom-Json).version | Should -Be 1
+            } finally { Remove-Item $f -ErrorAction SilentlyContinue }
+        }
+        It 'Get-PaguroModalias takes an export from the pipeline or a file' {
+            $m = @(Export-PaguroHardware | Get-PaguroModalias)
+            (Last).Method | Should -Be 'hw.modalias'
+            (Last).Params['hardware']['version'].GetValue[int]() | Should -Be 1
+            $m | Should -Contain 'pci:v000010DEd000028A0sv00001043sd00001F3Abc03sc00i00'
+        }
+        It 'New-PaguroDisk sends an absolute path and bytes from 20GB; -WhatIf is the dry run' {
+            $d = New-PaguroDisk -Path 'rel.vhd' -Size 20GB -WhatIf
+            $d | Should -BeOfType [Paguro.Api.DiskInfo]
+            P 'size' | Should -Be '21474836480'
+            [IO.Path]::IsPathRooted((P 'path')) | Should -BeTrue
+            P 'dry_run' | Should -Be 'True'
+            New-PaguroDisk -Path 'C:\x.vhd' -Size 32G | Out-Null
+            P 'size' | Should -Be '32G'
+        }
+        It 'Get-PaguroDisk accepts paths from the pipeline' {
+            @('a.vhd', 'b.vhd') | Get-PaguroDisk | Should -HaveCount 2
+            $srv.Calls.Count | Should -Be 2
+            (Last).Method | Should -Be 'disk.inspect'
+        }
     }
 
-    It 'Set-PaguroConfig passes only bound parameters, booleans as 0/1' {
-        Set-PaguroConfig -Entry debian -Root 'C:\paguro\debian.vhd' -Tpm $false -Theme light | Out-Null
-        $script:calls[0].Args | Should -Be @('--json', 'config', 'set', '--entry', 'debian', '--root', 'C:\paguro\debian.vhd', '--theme', 'light', '--tpm', '0')
+    Describe 'configuration' {
+        It 'Get-PaguroConfig' {
+            (Get-PaguroConfig).Config.Default | Should -Be 'debian'
+        }
+        It 'Test-PaguroConfig' {
+            (Test-PaguroConfig).File.Valid | Should -BeTrue
+        }
+        It 'Set-PaguroConfig sends only what was given' {
+            Set-PaguroConfig -Keyboard de -Tpm $false -Confirm:$false | Out-Null
+            (Last).Method | Should -Be 'config.set'
+            P 'keyboard' | Should -Be 'de'
+            P 'tpm' | Should -Be 'False'
+            (Last).Params.ContainsKey('root') | Should -BeFalse
+        }
     }
 
-    It 'Restart-PaguroLinux passes --yes only when confirmed, and the passphrase only on stdin' {
-        $pw = ConvertTo-SecureString 'correct horse' -AsPlainText -Force
-        Restart-PaguroLinux -Passphrase $pw -Confirm:$false | Out-Null
-        $c = $script:calls[0]
-        $c.Args | Should -Contain '--yes'
-        $c.Args | Should -Contain '--passphrase-stdin'
-        ($c.Args -join ' ') | Should -Not -Match 'correct horse'
-        $c.Stdin | Should -Be "correct horse`n"
-        Restart-PaguroLinux -WhatIf | Out-Null
-        $script:calls[1].Args | Should -Be @('--json', '--dry-run', 'restart-linux')
+    Describe 'firmware' {
+        It 'Get-PaguroFirmwareVariable lists, or gets one by -Name' {
+            @(Get-PaguroFirmwareVariable).Count | Should -BeGreaterThan 3
+            (Last).Method | Should -Be 'efi.vars.list'
+            (Get-PaguroFirmwareVariable PaguroConfigHash).Present | Should -BeTrue
+            (Last).Method | Should -Be 'efi.vars.get'
+        }
+        It 'Set-PaguroFirmwareVariable' {
+            Set-PaguroFirmwareVariable PaguroTpmBroken 01 -Confirm:$false | Out-Null
+            (Last).Method | Should -Be 'efi.vars.set'
+            P 'hex' | Should -Be '01'
+        }
+        It 'Remove-PaguroFirmwareVariable -WhatIf' {
+            Remove-PaguroFirmwareVariable PaguroSetup -WhatIf | Out-Null
+            (Last).Method | Should -Be 'efi.vars.delete'
+            P 'dry_run' | Should -Be 'True'
+        }
+        It 'Get-PaguroBootEntry' {
+            $e = @(Get-PaguroBootEntry)
+            $e[0] | Should -BeOfType [Paguro.Api.FirmwareBootEntry]
+            $e[0].Description | Should -Be 'Windows Boot Manager'
+            @(Get-PaguroBootEntry -Ours).Count | Should -Be 0
+        }
+        It 'New-PaguroBootEntry' {
+            New-PaguroBootEntry -Confirm:$false | Out-Null
+            (Last).Method | Should -Be 'efi.boot-entry.create'
+        }
+        It 'Remove-PaguroBootEntry takes entries from the pipeline' {
+            [pscustomobject]@{ Name = 'Boot0003' } | Remove-PaguroBootEntry -Confirm:$false | Out-Null
+            P 'entry' | Should -Be 'Boot0003'
+        }
+        It 'Set-PaguroBootNext -Clear' {
+            Set-PaguroBootNext -Clear -Confirm:$false | Out-Null
+            P 'clear' | Should -Be 'True'
+        }
     }
 
-    It 'Restart-PaguroLinux -NoRestart prepares without --yes' {
-        Restart-PaguroLinux -NoRestart -Confirm:$false | Out-Null
-        $script:calls[0].Args | Should -Not -Contain '--yes'
+    Describe 'ESP and MOK' {
+        It 'Install-PaguroEsp' {
+            Install-PaguroEsp -Shim s.efi -MokManager m.efi -Loader l.efi -WhatIf | Out-Null
+            (Last).Method | Should -Be 'esp.install'
+            [IO.Path]::IsPathRooted((P 'mm')) | Should -BeTrue
+        }
+        It 'Test-PaguroEsp' {
+            (Test-PaguroEsp).Files.Count | Should -Be 4
+        }
+        It 'Repair-PaguroEsp' {
+            Repair-PaguroEsp -Confirm:$false | Out-Null
+            (Last).Method | Should -Be 'esp.repair'
+        }
+        It 'Register-PaguroMok sends a chosen password as a secret' {
+            Register-PaguroMok -Certificate c.der -Password (Secure 'hunter2') -Confirm:$false | Out-Null
+            (Last).Method | Should -Be 'mok.enroll'
+            P 'mok_password' | Should -Be 'hunter2'
+        }
+        It 'Get-PaguroMok' {
+            (Get-PaguroMok).Enrolled | Should -BeFalse
+        }
     }
 
-    It 'Install-PaguroDistro builds the install command' {
-        $pw = ConvertTo-SecureString 'pw' -AsPlainText -Force
-        Install-PaguroDistro debian -Path 'C:\paguro\debian.vhd' -Size 40G -Script 'C:\s.sh' -Shim 'C:\in\shimx64.efi' `
-            -MokManager 'C:\in\mmx64.efi' -Loader 'C:\in\paguro.efi' -Passphrase $pw -Confirm:$false | Out-Null
-        $script:calls[0].Args | Should -Be @('--json', '--passphrase-stdin', 'install', 'debian', '--path', 'C:\paguro\debian.vhd',
-            '--size', '40G', '--script', 'C:\s.sh', '--shim', 'C:\in\shimx64.efi', '--mm', 'C:\in\mmx64.efi', '--loader', 'C:\in\paguro.efi')
+    Describe 'the way into Linux' {
+        It 'Test-PaguroPreflight' {
+            $p = Test-PaguroPreflight
+            $p | Should -BeOfType [Paguro.Api.Preflight]
+            $p.Checks.Count | Should -BeGreaterThan 5
+            (Last).Params.ContainsKey('repair') | Should -BeFalse
+            Test-PaguroPreflight -Repair | Out-Null
+            P 'repair' | Should -Be 'True'
+        }
+        It 'Get-PaguroDistribution | Where Size -gt 20GB | Start-PaguroLinux' {
+            Get-PaguroDistribution | Where-Object Size -gt 20GB | Start-PaguroLinux -Confirm:$false | Out-Null
+            (Last).Method | Should -Be 'restart-linux'
+            P 'entry' | Should -Be 'debian'
+            P 'yes' | Should -Be 'True'
+        }
+        It 'Restart-PaguroLinux -NoRestart, -WhatIf' {
+            Restart-PaguroLinux -NoRestart -Confirm:$false | Out-Null
+            (Last).Params.ContainsKey('yes') | Should -BeFalse
+            Restart-PaguroLinux -WhatIf | Out-Null
+            P 'dry_run' | Should -Be 'True'
+        }
+        It 'Request-PaguroSetupTpm answers the passphrase the service asks for' {
+            $srv.OnNeedsInput('stage-setup', 'linux_passphrase', 'Linux passphrase', $true, '{"volume":"v","seal":"s","variable":"PaguroSetup"}')
+            $r = Request-PaguroSetupTpm -Passphrase (Secure 'correct horse') -Confirm:$false
+            $r.Variable | Should -Be 'PaguroSetup'
+            # Always needed: sent with the first call.
+            $srv.Calls.Count | Should -Be 1
+            (Last).Params['linux_passphrase'].GetValue[string]() | Should -Be 'correct horse'
+        }
+        It 'Restart-PaguroLinux answers a passphrase only when the service asks back for it' {
+            $srv.OnNeedsInput('restart-linux', 'linux_passphrase', 'Linux passphrase', $true, '{"checks":[],"secure_boot":true,"staged":{}}')
+            Restart-PaguroLinux -NoRestart -Passphrase (Secure 'pw') -Confirm:$false | Out-Null
+            $srv.Calls.Count | Should -Be 2
+            $srv.Calls[0].Params.ContainsKey('linux_passphrase') | Should -BeFalse
+            (Last).Params['linux_passphrase'].GetValue[string]() | Should -Be 'pw'
+        }
+        It 'Request-PaguroSetupTpm without a passphrase and nobody to ask fails' {
+            $srv.OnNeedsInput('stage-setup', 'linux_passphrase', 'Linux passphrase', $true, '{}')
+            Request-PaguroSetupTpm -Confirm:$false -ErrorAction SilentlyContinue -ErrorVariable e | Out-Null
+            $e[0].FullyQualifiedErrorId | Should -BeLike 'paguro.refused*'
+        }
+        It 'Repair-Paguro -Stage' {
+            Repair-Paguro -Stage -Confirm:$false | Out-Null
+            P 'stage' | Should -Be 'True'
+        }
+        It 'Uninstall-Paguro -WhatIf is the summary of what is and is not touched' {
+            $u = Uninstall-Paguro -WhatIf
+            $u.Steps.Count | Should -BeGreaterThan 3
+            P 'dry_run' | Should -Be 'True'
+            Uninstall-Paguro -DeleteImages -Confirm:$false | Out-Null
+            P 'yes' | Should -Be 'True'
+            P 'delete_images' | Should -Be 'True'
+        }
     }
 
-    It 'Uninstall-Paguro needs confirmation for --yes' {
-        Uninstall-Paguro -DeleteImages -Confirm:$false | Out-Null
-        $script:calls[0].Args | Should -Be @('--json', 'uninstall', '--yes', '--delete-images')
-        Uninstall-Paguro -WhatIf | Out-Null
-        $script:calls[1].Args | Should -Be @('--json', '--dry-run', 'uninstall')
+    Describe 'distributions' {
+        It 'Get-PaguroDistribution filters by name and kind' {
+            @(Get-PaguroDistribution).Count | Should -Be 2
+            @(Get-PaguroDistribution -Kind wsl).Name | Should -Be 'Ubuntu'
+            @(Get-PaguroDistribution deb*).Name | Should -Be 'debian'
+            (Get-PaguroDistribution debian).Size | Should -BeGreaterThan 30GB
+        }
+        It 'Rename-PaguroDistribution' {
+            Rename-PaguroDistribution debian deb -Confirm:$false | Out-Null
+            P 'new_name' | Should -Be 'deb'
+        }
+        It 'Remove-PaguroDistribution -DeleteImage consents for the image' {
+            Get-PaguroDistribution debian | Remove-PaguroDistribution -DeleteImage -Confirm:$false | Out-Null
+            P 'name' | Should -Be 'debian'
+            P 'yes' | Should -Be 'True'
+        }
+        It 'Resize-PaguroDistribution is a stub and says so' {
+            Resize-PaguroDistribution debian 64GB -Confirm:$false -ErrorAction SilentlyContinue -ErrorVariable e | Out-Null
+            $e[0].Exception.Message | Should -BeLike '*STUB*'
+            P 'size' | Should -Be '68719476736'
+        }
+        It 'Enter-PaguroDistro attaches, runs the shell, detaches' {
+            $r = Enter-PaguroDistro debian
+            $r.ShellExit | Should -Be 0
+            $srv.Calls.Method | Should -Be @('distro.enter', 'distro.leave')
+        }
+        It 'Dismount-PaguroDistro -Path' {
+            Dismount-PaguroDistro -Path 'C:\paguro\debian.vhd' | Out-Null
+            (Last).Method | Should -Be 'distro.leave'
+        }
+        It 'Install-PaguroDistro -Iso shows progress and reports the stub' {
+            $fx = Get-Content (Join-Path $fixtures 'install.1.json') -Raw
+            $srv.On('install', [Paguro.Testing.FakeServer]::FromFixture($fx))
+            $out = Install-PaguroDistro fedora 'C:\paguro\fedora.vhd' -Iso 'C:\iso\fedora.iso' -Confirm:$false -Verbose -ErrorAction SilentlyContinue -ErrorVariable e 4>&1
+            ($out | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] }).Message | Should -Contain '[1/9] host: running'
+            $e[0].Exception.Message | Should -BeLike '*STUB*'
+            P 'source' | Should -Be 'iso'
+        }
+        It 'Install-PaguroDistro -FromWsl, -Finish' {
+            Install-PaguroDistro deb2 'C:\d.vhd' -FromWsl Ubuntu -WhatIf | Out-Null
+            P 'wsl_distro' | Should -Be 'Ubuntu'
+            Install-PaguroDistro deb2 'C:\d.vhd' -Finish -WhatIf | Out-Null
+            P 'finish' | Should -Be 'True'
+        }
+        It 'Enter-PaguroInstaller runs the shell the service names' {
+            $srv.OnData('install', '{"steps":[{"id":"build","state":"awaiting_user"}],"shell":["wsl.exe","--user","root"]}', 'pending', [string[]]@())
+            $j = Enter-PaguroInstaller fedora 'C:\f.vhd' -Iso 'C:\f.iso' -Confirm:$false -WarningAction SilentlyContinue
+            P 'shell' | Should -Be 'True'
+            $j.ShellExit | Should -Be 0
+        }
     }
 
-    It 'Repair-Paguro and Request-PaguroSetupTpm' {
-        $pw = ConvertTo-SecureString 'pw' -AsPlainText -Force
-        Repair-Paguro -Stage -Passphrase $pw | Out-Null
-        $script:calls[0].Args | Should -Be @('--json', '--passphrase-stdin', 'repair', '--stage')
-        Request-PaguroSetupTpm -Passphrase $pw | Out-Null
-        $script:calls[1].Args | Should -Be @('--json', '--passphrase-stdin', 'stage-setup')
-    }
-
-    It 'efi, esp and mok cmdlets' {
-        Get-PaguroFirmwareVariable -Name PaguroConfigHash | Out-Null
-        Set-PaguroBootNext -Clear | Out-Null
-        Remove-PaguroBootEntry -Entry 0003 -Confirm:$false | Out-Null
-        Install-PaguroEsp -Shim a -MokManager b -Loader c | Out-Null
-        Register-PaguroMok -Certificate 'C:\k\mok.der' | Out-Null
-        Export-PaguroHardware -Path 'C:\h.json' | Out-Null
-        $script:calls[0].Args | Should -Be @('--json', 'efi', 'vars', 'get', 'PaguroConfigHash')
-        $script:calls[1].Args | Should -Be @('--json', 'efi', 'bootnext', '--clear')
-        $script:calls[2].Args | Should -Be @('--json', 'efi', 'boot-entry', 'delete', '0003')
-        $script:calls[3].Args | Should -Be @('--json', 'esp', 'install', '--shim', 'a', '--mm', 'b', '--loader', 'c')
-        $script:calls[4].Args | Should -Be @('--json', 'mok', 'enroll', '--cert', 'C:\k\mok.der')
-        $script:calls[5].Args | Should -Be @('--json', 'hw', 'export', '--output', 'C:\h.json')
+    Describe 'protection' {
+        It 'Get-PaguroProtection' {
+            $p = Get-PaguroProtection -Klid 00000407
+            $p | Should -BeOfType [Paguro.Api.ProtectionOptions]
+            # The demo machine's BitLocker is TPM-only, so TPM-only is offered too.
+            ($p.Choices | Where-Object Id -eq 'tpm_only').Offered | Should -BeTrue
+            ($p.Choices | Where-Object Recommended).Id | Should -Be 'tpm_pin'
+            P 'klid' | Should -Be '00000407'
+        }
+        It 'Set-PaguroProtection sends the PIN as a secret' {
+            Set-PaguroProtection tpm_pin -Keyboard de -Pin (Secure '4711') -Confirm:$false | Out-Null
+            (Last).Method | Should -Be 'protection.set'
+            P 'pin' | Should -Be '4711'
+            P 'pin_bypass' | Should -Be 'True'
+            Set-PaguroProtection passphrase -Pin (Secure 'x') -NoPinBypass -Confirm:$false | Out-Null
+            P 'pin_bypass' | Should -Be 'False'
+        }
+        It 'Test-PaguroSecret returns the refusal as its answer' {
+            $srv.OnError('protection.check', 'refused', 3, '1 character(s) cannot be typed at boot',
+                '{"ok":false,"keyboard":"fr","length":2,"refused":[{"char":"ê","position":1,"reason":"needs a dead key"}]}')
+            $r = Test-PaguroSecret (Secure 'aê') -Keyboard fr
+            P 'pin' | Should -Be 'aê'
+            $r.Ok | Should -BeFalse
+            $r.Refused[0].Char | Should -Be 'ê'
+        }
     }
 }
 
-Describe 'the envelope' {
-    It 'returns data' {
-        Mock -ModuleName PaguroTools Invoke-PaguroProcess { New-Envelope 'status' @{ uefi = $true } }
-        (Get-PaguroStatus).uefi | Should -BeTrue
+# The same cmdlets against the real service logic: `paguro-service console
+# --mock` (the demo machine) on the pipe named by $env:PAGURO_SERVICE_PIPE.
+Describe 'PaguroTools against paguro-service --mock' -Skip:(-not $env:PAGURO_SERVICE_PIPE) {
+    BeforeAll {
+        $root = Split-Path $PSScriptRoot -Parent
+        $module = if ($env:PAGURO_MODULE) { $env:PAGURO_MODULE } else { Join-Path $root 'bin/module/PaguroTools.psd1' }
+        Import-Module $module -Force
+        $script:pipe = $env:PAGURO_SERVICE_PIPE
     }
-
-    It 'throws a structured error on ok=false' {
-        Mock -ModuleName PaguroTools Invoke-PaguroProcess { New-Failure 'disk create' 'refused' 3 'already exists' }
-        $e = { New-PaguroDisk -Path x.vhd -Size 1G } | Should -Throw -PassThru
-        $e.Exception.Message | Should -Match 'already exists'
-        $e.Exception.Data['exit'] | Should -Be 3
-        $e.Exception.Data['code'] | Should -Be 'refused'
-        $e.CategoryInfo.Category | Should -Be 'InvalidOperation'
+    It 'reads through the service' {
+        (Get-PaguroService -PipeName $pipe).Service | Should -BeTrue
+        $d = @(Get-PaguroDistribution -PipeName $pipe)
+        ($d | Where-Object Kind -eq image).Name | Should -Be 'debian'
+        (Get-PaguroDistribution -PipeName $pipe | Where-Object Size -gt 20GB).Name | Should -Be 'debian'
+        @(Get-PaguroCheck -PipeName $pipe).Count | Should -Be 8
     }
-
-    It 'turns check_failed into $false for the Test- cmdlets' {
-        Mock -ModuleName PaguroTools Invoke-PaguroProcess { New-Failure 'esp verify' 'check_failed' 6 'modified' @{ files = @() } }
-        Test-PaguroEsp | Should -BeFalse
-        Test-PaguroConfig | Should -BeFalse
-        Test-PaguroPreflight | Should -Not -BeNullOrEmpty -Because 'the failing checks are returned'
+    It 'plans with -WhatIf and refuses what the layout cannot type' {
+        (Uninstall-Paguro -PipeName $pipe -WhatIf).Steps.Count | Should -BeGreaterThan 3
+        $r = Test-PaguroSecret -PipeName $pipe (ConvertTo-SecureString 'aê' -AsPlainText -Force) -Keyboard fr
+        $r.Ok | Should -BeFalse
+        Set-PaguroProtection -PipeName $pipe passphrase -Keyboard fr -Pin (ConvertTo-SecureString 'azerty' -AsPlainText -Force) -WhatIf |
+            Select-Object -ExpandProperty Choice | Should -Be 'passphrase'
     }
-
-    It 'surfaces warnings' {
-        Mock -ModuleName PaguroTools Invoke-PaguroProcess { New-Envelope 'config set' @{} @('the TPM seal no longer matches') }
-        Set-PaguroConfig -Tpm $true -WarningVariable w -WarningAction SilentlyContinue | Out-Null
-        $w | Should -Match 'TPM seal'
-    }
-
-    It 'refuses another schema' {
-        Mock -ModuleName PaguroTools Invoke-PaguroProcess {
-            [pscustomobject]@{ ExitCode = 0; StdOut = '{"schema":"paguro-cli/2","ok":true,"data":{}}'; StdErr = '' }
-        }
-        { Get-PaguroStatus } | Should -Throw '*paguro-cli/2*'
-    }
-
-    It 'reports usage errors from the parser' {
-        Mock -ModuleName PaguroTools Invoke-PaguroProcess { [pscustomobject]@{ ExitCode = 2; StdOut = ''; StdErr = 'error: unexpected argument' } }
-        $e = { Invoke-Paguro @('nonsense') } | Should -Throw -PassThru
-        $e.Exception.Data['exit'] | Should -Be 2
-    }
-
-    It 'warns when an operation is pending a restart (exit 8)' {
-        Mock -ModuleName PaguroTools Invoke-PaguroProcess {
-            $r = New-Envelope 'uninstall' @{ finished = $false }
-            $r.ExitCode = 8
-            $r
-        }
-        Uninstall-Paguro -Confirm:$false -WarningVariable w -WarningAction SilentlyContinue | Out-Null
-        $w | Should -Match 'restart'
-    }
-}
-
-Describe 'real binary' -Skip:(-not $env:PAGURO_EXE) {
-    It 'status speaks paguro-cli/1' {
-        $s = Get-PaguroStatus
-        $s.PSObject.Properties.Name | Should -Contain 'uefi'
-    }
-    It 'a dry-run disk creation changes nothing' -Skip:($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
-        $p = Join-Path ([System.IO.Path]::GetTempPath()) "paguro-pester-$PID.vhd"
-        $r = New-PaguroDisk -Path $p -Size 1G -WhatIf
-        $r.format | Should -Be 'fixed_vhd'
-        Test-Path $p | Should -BeFalse
-    }
-    It 'the hardware export has version 1' {
-        (Export-PaguroHardware).version | Should -Be 1
-    }
-    It 'a bad argument is a usage error' {
-        $e = { Invoke-Paguro @('frobnicate') } | Should -Throw -PassThru
-        $e.Exception.Data['exit'] | Should -Be 2
+    It 'streams install progress and reports the stub' {
+        $out = Install-PaguroDistro -PipeName $pipe fedora 'C:\paguro\fedora.vhd' -Iso 'C:\iso\fedora.iso' -Confirm:$false -Verbose -ErrorAction SilentlyContinue -ErrorVariable e 4>&1
+        ($out | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] }).Message | Should -Contain '[1/9] host: running'
+        $e[0].Exception.Message | Should -BeLike '*STUB*'
     }
 }

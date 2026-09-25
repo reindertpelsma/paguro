@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- PaguroTools: the PowerShell binary module (INTERFACES.md §11.7). Cmdlets
+       call the paguro service over \\.\pipe\paguro and return the API's typed
+       objects. PowerShell 7.4+ (.NET 8). -->
+  <Import Project="..\dotnet\Directory.Build.props" />
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Paguro.PowerShell</RootNamespace>
+    <AssemblyName>PaguroTools</AssemblyName>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Management.Automation" Version="7.4.6" PrivateAssets="all" ExcludeAssets="runtime" />
+    <ProjectReference Include="..\dotnet\Paguro.Api\Paguro.Api.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="PaguroTools.psd1" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="PaguroTools.format.ps1xml" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Remove="Tests\**" />
+  </ItemGroup>
+</Project>

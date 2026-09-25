@@ -1,7 +1,7 @@
 name: windows
 
-# The Windows side (INTERFACES.md §11): paguro.exe, the PaguroTools module and
-# the minifilter. Safe real-API tests only: NOTHING here writes a firmware
+# The Windows side (INTERFACES.md §11): paguro.exe, paguro-service, the API
+# contract, the PaguroTools module and the minifilter. Safe real-API tests only: NOTHING here writes a firmware
 # variable, a boot entry or the ESP of the runner — those paths are covered by
 # the mock tests, which run everywhere.
 
@@ -95,39 +95,40 @@ jobs:
             checks.json
 
   pester:
-    name: PaguroTools (Pester, pwsh and Windows PowerShell)
+    name: PaguroTools binary module (Pester, fake service and the real service --mock)
     needs: rust
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
       - uses: actions/download-artifact@v4
         with:
           name: paguro-exe
           path: bin
-      - name: Pester 5 (pwsh)
+      - name: build the module and the fake service
+        working-directory: windows
+        run: |
+          dotnet publish PaguroTools/PaguroTools.csproj -c Release -m:1 -o PaguroTools/bin/module
+          dotnet build dotnet/Paguro.Testing -c Release -m:1 -o PaguroTools/bin/testing
+      - name: Pester 5 (pwsh 7.4); the service's demo machine on a pipe for the end-to-end block
         shell: pwsh
         run: |
-          $env:PAGURO_EXE = (Resolve-Path bin\target\release\paguro.exe).Path
-          Install-Module Pester -MinimumVersion 5.5 -Force -Scope CurrentUser -SkipPublisherCheck
-          Import-Module Pester -MinimumVersion 5.5
-          $c = New-PesterConfiguration
-          $c.Run.Path = 'windows/PaguroTools/Tests'
-          $c.Run.Exit = $true
-          $c.Output.Verbosity = 'Detailed'
-          Invoke-Pester -Configuration $c
-      - name: Pester 5 (Windows PowerShell 5.1)
-        shell: powershell
-        run: |
-          $env:PAGURO_EXE = (Resolve-Path bin\target\release\paguro.exe).Path
-          Install-Module Pester -MinimumVersion 5.5 -Force -Scope CurrentUser -SkipPublisherCheck
-          Import-Module Pester -MinimumVersion 5.5
-          $c = New-PesterConfiguration
-          $c.Run.Path = 'windows/PaguroTools/Tests'
-          $c.Run.Exit = $true
-          Invoke-Pester -Configuration $c
+          $svc = Start-Process -PassThru -NoNewWindow (Resolve-Path bin\target\release\paguro-service.exe).Path -ArgumentList 'console', '--mock', '--pipe', 'paguro-e2e'
+          $env:PAGURO_SERVICE_PIPE = 'paguro-e2e'
+          try {
+            Install-Module Pester -MinimumVersion 5.5 -Force -Scope CurrentUser -SkipPublisherCheck
+            Import-Module Pester -MinimumVersion 5.5
+            $c = New-PesterConfiguration
+            $c.Run.Path = 'windows/PaguroTools/Tests'
+            $c.Run.Exit = $true
+            $c.Output.Verbosity = 'Detailed'
+            Invoke-Pester -Configuration $c
+          } finally { Stop-Process -Id $svc.Id -ErrorAction SilentlyContinue }
 
   api:
-    name: API contract (schema, generated C# types, pipe client) on Linux
+    name: API contract, method coverage, PaguroTools on Linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -137,9 +138,39 @@ jobs:
       - name: C# types generated from paguro-api.json; fixtures round-trip; client over a pipe
         working-directory: windows/dotnet
         run: dotnet test Paguro.Api.Tests -m:1 --logger "console;verbosity=normal"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build the module, the fake service and paguro-service
+        run: |
+          dotnet publish windows/PaguroTools/PaguroTools.csproj -c Release -m:1 -o windows/PaguroTools/bin/module
+          dotnet build windows/dotnet/Paguro.Testing -c Release -m:1 -o windows/PaguroTools/bin/testing
+          cargo build -p paguro-service
+      - name: every API method has a CLI command and a cmdlet (nothing is GUI-only)
+        shell: pwsh
+        run: |
+          cargo test -p paguro-win --test api_contract -- every_method_has_a_cli_command methods_match_the_schema
+          if ($LASTEXITCODE) { throw 'a method without a CLI command' }
+          Install-Module Pester -MinimumVersion 5.5 -Force -Scope CurrentUser
+          $c = New-PesterConfiguration
+          $c.Run.Path = 'windows/PaguroTools/Tests'
+          $c.Filter.FullName = '*exports a cmdlet for every API method*'
+          $c.Run.Exit = $true
+          $c.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $c
+      - name: Pester on Linux (.NET pipes are Unix sockets), with paguro-service --mock for the end-to-end block
+        shell: pwsh
+        run: |
+          $svc = Start-Process -PassThru target/debug/paguro-service -ArgumentList 'console', '--mock', '--unix', '/tmp/CoreFxPipe_paguro-e2e'
+          $env:PAGURO_SERVICE_PIPE = 'paguro-e2e'
+          Start-Sleep 1
+          try {
+            $c = New-PesterConfiguration
+            $c.Run.Path = 'windows/PaguroTools/Tests'
+            $c.Run.Exit = $true
+            Invoke-Pester -Configuration $c
+          } finally { Stop-Process -Id $svc.Id -ErrorAction SilentlyContinue }
 
   linux:
-    name: cross-compile, SMBIOS parser (ASan/UBSan), Pester on Linux, fuzz
+    name: cross-compile, SMBIOS parser (ASan/UBSan), fuzz
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -160,14 +191,6 @@ jobs:
               -Iwindows/minifilter windows/minifilter/pg_smbios.c windows/minifilter/test/smbios_test.c -o smbios_test
             ./smbios_test
           done
-      - name: Pester (pwsh on Linux, mocked process)
-        shell: pwsh
-        run: |
-          Install-Module Pester -MinimumVersion 5.5 -Force -Scope CurrentUser
-          $c = New-PesterConfiguration
-          $c.Run.Path = 'windows/PaguroTools/Tests'
-          $c.Run.Exit = $true
-          Invoke-Pester -Configuration $c
       - uses: dtolnay/rust-toolchain@nightly
       - run: command -v cargo-fuzz || cargo install cargo-fuzz --locked
       - name: fuzz win_formats (60 s)
