@@ -1,0 +1,63 @@
+{
+  "method": "hw.modalias",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "hw.modalias",
+    "params": {
+      "hardware": {
+        "acpi": [
+          "PNP0C50"
+        ],
+        "cpu": {
+          "family": 6,
+          "model": 170,
+          "stepping": 4,
+          "vendor": "GenuineIntel"
+        },
+        "dmi": {
+          "bios_vendor": "B",
+          "bios_version": "1",
+          "board_name": "Z",
+          "board_vendor": "X",
+          "product_name": "Y",
+          "sys_vendor": "X"
+        },
+        "pci": [
+          {
+            "class": "030000",
+            "device": "28a0",
+            "subdevice": "1f3a",
+            "subvendor": "1043",
+            "vendor": "10de"
+          }
+        ],
+        "storage": [],
+        "usb": [],
+        "version": 1
+      }
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "modaliases": [
+          "pci:v000010DEd000028A0sv00001043sd00001F3Abc03sc00i00",
+          "acpi:PNP0C50:",
+          "dmi:bvnB:bvr1:bd:br:efr:svnX:pnY:pvr:rvnX:rnZ:rvr:cvn:ct:cvr:sku:"
+        ]
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "pci:v000010DEd000028A0sv00001043sd00001F3Abc03sc00i00",
+        "acpi:PNP0C50:",
+        "dmi:bvnB:bvr1:bd:br:efr:svnX:pnY:pvr:rvnX:rnZ:rvr:cvn:ct:cvr:sku:"
+      ],
+      "warnings": []
+    }
+  }
+}

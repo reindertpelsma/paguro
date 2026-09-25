@@ -1,0 +1,2 @@
+# The root .gitignore drops *.mod* (kernel build files); fixtures are named after methods.
+!*.json

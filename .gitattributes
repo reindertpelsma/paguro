@@ -1,0 +1,2 @@
+# Byte-exact on every OS: the contract test compares them.
+windows/api/** text eol=lf
