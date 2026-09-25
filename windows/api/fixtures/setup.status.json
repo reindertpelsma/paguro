@@ -1,0 +1,41 @@
+{
+  "method": "setup.status",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "setup.status",
+    "params": {}
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "app": false,
+        "apps_and_features": true,
+        "has_gui": false,
+        "install_dir": "C:\\Program Files\\paguro",
+        "installed": false,
+        "payloads": [],
+        "running_from": "C:\\Users\\me\\Downloads\\paguro.exe",
+        "running_installed": false,
+        "service": false,
+        "setup_copy": false,
+        "version": "0.0.0"
+      },
+      "dry_run": false,
+      "exit": "ok",
+      "lines": [
+        "paguro 0.0.0: not installed",
+        "  program files  C:\\Program Files\\paguro",
+        "  service        no",
+        "  Apps & Features yes",
+        "  repair copy    no",
+        "  GUI            no",
+        "  this paguro.exe carries 0 payload file(s)"
+      ],
+      "warnings": []
+    }
+  }
+}

@@ -1227,10 +1227,10 @@ fn uninstall_two_phases_and_leaves_the_rest_alone() {
     assert_eq!(run(&m, &["uninstall"]).code, 3, "needs --yes");
     m.mutations.borrow_mut().clear();
     let d = ok(&m, &["--dry-run", "uninstall"]);
-    assert_eq!(d["steps"].as_array().unwrap().len(), 9);
+    assert_eq!(d["steps"].as_array().unwrap().len(), 13);
     assert!(m.mutations.borrow().is_empty());
 
-    let r = run(&m, &["uninstall", "--yes"]);
+    let r = run(&m, &["uninstall", "--yes", "--keep-images"]);
     assert_eq!(r.code, 8, "{}", r.stdout);
     assert_eq!(r.json["ok"], true);
     assert_eq!(m.var("PaguroUninstall", &PAGURO_VENDOR).unwrap(), vec![1]);
@@ -1243,13 +1243,13 @@ fn uninstall_two_phases_and_leaves_the_rest_alone() {
     );
 
     // Still before the reboot: nothing more happens.
-    assert_eq!(run(&m, &["uninstall", "--yes"]).code, 8);
+    assert_eq!(run(&m, &["uninstall", "--yes", "--keep-images"]).code, 8);
     // The reboot: the driver is gone, the loader consumed the request.
     m.set_runner(runner(&["sc.exe query paguroflt", "sc.exe delete"]));
     m.vars
         .borrow_mut()
         .remove(&("PaguroUninstall".to_string(), PAGURO_VENDOR.0));
-    let r = run(&m, &["uninstall", "--yes"]);
+    let r = run(&m, &["uninstall", "--yes", "--keep-images"]);
     assert_eq!(r.code, 0, "{}", r.stdout);
     assert!(
         m.list_dir(&format!("{ESP_PATH}EFI\\paguro"))
@@ -1306,7 +1306,10 @@ fn uninstall_skip_final_boot_and_delete_images() {
     assert!(!m.exists("C:\\paguro\\debian.vhd"));
     assert_eq!(m.var("PaguroUninstall", &PAGURO_VENDOR), None);
     // Idempotent: a second run on a clean machine succeeds.
-    ok(&m, &["uninstall", "--yes", "--skip-final-boot"]);
+    ok(
+        &m,
+        &["uninstall", "--yes", "--keep-images", "--skip-final-boot"],
+    );
 }
 
 #[test]
@@ -1314,7 +1317,10 @@ fn a_boot_services_only_b_is_never_touched() {
     let m = installed();
     m.set_var_raw("PaguroB", &PAGURO_VENDOR, &[9; 32], attr::NV | attr::BS);
     m.set_runner(runner(&[]));
-    ok(&m, &["uninstall", "--yes", "--skip-final-boot"]);
+    ok(
+        &m,
+        &["uninstall", "--yes", "--keep-images", "--skip-final-boot"],
+    );
     assert_eq!(m.var("PaguroB", &PAGURO_VENDOR).unwrap(), vec![9; 32]);
 }
 
@@ -1355,4 +1361,116 @@ fn status_unelevated_reports_unknown_not_a_wrong_value() {
     let r = paguro_win::cli::run(&m, ["paguro", "status"]);
     assert!(r.stdout.contains("secure boot: on"), "{}", r.stdout);
     assert!(r.stdout.contains("minifilter: loaded"), "{}", r.stdout);
+}
+
+// ---- paguro itself: install, repair, uninstall (INTERFACES §11.7a) -----------
+
+#[test]
+fn install_without_a_distribution_installs_paguro() {
+    let m = MockApi::standard();
+    m.put_file("C:\\Users\\me\\Downloads\\paguro.exe", b"MZpaguro");
+    let d = common::ok(&m, &["install"]);
+    assert_eq!(d["state"]["installed"], true);
+    assert!(m.exists("C:\\Program Files\\paguro\\paguro.exe"));
+    assert!(m.exists("C:\\ProgramData\\paguro\\setup\\paguro.exe"));
+    let cmds = m.commands.borrow().join("\n");
+    assert!(
+        cmds.contains("Uninstall\\paguro /v UninstallString"),
+        "{cmds}"
+    );
+    // A distribution still needs --path.
+    let r = common::run(&m, &["install", "debian"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+}
+
+#[test]
+fn install_unelevated_relaunches_elevated_and_relays_the_report() {
+    let m = MockApi::standard();
+    m.elevated.set(false);
+    let r = paguro_win::cli::run(&m, ["paguro", "install"]);
+    let runs = m.elevated_runs.borrow().clone();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(runs[0].starts_with("C:\\Users\\me\\Downloads\\paguro.exe install --direct --report C:\\Users\\me\\AppData\\Local\\Temp\\paguro-"), "{runs:?}");
+    assert_eq!(r.code, 0);
+    assert!(
+        m.mutations
+            .borrow()
+            .iter()
+            .all(|x| !x.contains("Program Files")),
+        "nothing done unelevated"
+    );
+}
+
+#[test]
+fn uninstall_never_deletes_images_silently() {
+    let m = MockApi::standard();
+    // No console to ask at: refused, nothing done.
+    let r = common::run(&m, &["uninstall", "--yes"]);
+    assert_eq!(r.code, 3, "{}", r.stdout);
+    assert_eq!(r.json["error"]["data"]["needs_choice"], "images");
+    assert!(m.mutations.borrow().is_empty());
+    // Asked at the console: "n" keeps them.
+    m.lines.borrow_mut().push("n".into());
+    let r = common::run(&m, &["uninstall", "--yes", "--skip-final-boot"]);
+    assert!(r.code == 0 || r.code == 8, "{}", r.stdout);
+    assert!(m.lines.borrow().is_empty(), "the question was asked");
+    // Both flags: a usage error.
+    let r = common::run(
+        &m,
+        &["uninstall", "--yes", "--keep-images", "--delete-images"],
+    );
+    assert_eq!(r.code, 2);
+}
+
+#[test]
+fn uninstall_removes_what_install_added() {
+    let m = MockApi::standard();
+    m.put_file("C:\\Users\\me\\Downloads\\paguro.exe", b"MZpaguro");
+    common::ok(&m, &["install"]);
+    let r = common::run(
+        &m,
+        &["uninstall", "--yes", "--keep-images", "--skip-final-boot"],
+    );
+    assert!(r.code == 0 || r.code == 8, "{}", r.stdout);
+    let cmds = m.commands.borrow().join("\n");
+    if r.code == 8 {
+        assert!(
+            cmds.contains("RunOnce /v paguro-uninstall"),
+            "phase 2 at the next logon: {cmds}"
+        );
+        // After the reboot: the minifilter is gone.
+        m.set_runner(|prog, _| {
+            (prog == "fltmc.exe").then(|| paguro_win::api::Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        });
+        let r = common::run(
+            &m,
+            &["uninstall", "--yes", "--keep-images", "--skip-final-boot"],
+        );
+        assert_eq!(r.code, 0, "{}", r.stdout);
+    }
+    assert!(!m.exists("C:\\Program Files\\paguro\\paguro.exe"));
+    assert!(!m.exists("C:\\ProgramData\\paguro\\setup\\paguro.exe"));
+    let cmds = m.commands.borrow().join("\n");
+    assert!(cmds.contains("reg.exe delete HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\paguro /f"), "{cmds}");
+}
+
+#[test]
+fn repair_app_only_never_touches_images_or_firmware() {
+    let m = MockApi::standard();
+    m.put_file("C:\\Users\\me\\Downloads\\paguro.exe", b"MZpaguro");
+    common::ok(&m, &["install"]);
+    m.put_file("C:\\paguro\\debian.vhd", b"image");
+    m.mutations.borrow_mut().clear();
+    let d = common::ok(&m, &["repair", "--app-only"]);
+    assert!(d["app"].is_array(), "{d}");
+    let muts = m.mutations.borrow().join("\n");
+    assert!(!muts.contains("debian.vhd"), "{muts}");
+    assert!(
+        !muts.contains("fw_set") && !muts.contains("fw_delete"),
+        "{muts}"
+    );
 }

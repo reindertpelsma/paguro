@@ -703,14 +703,29 @@ fn entry_choice<'e>(entry: Option<&'e str>, default: Option<&str>) -> Option<&'e
 /// `paguro repair` (INTERFACES.md §11.2, DESIGN.md §7): ESP files and the
 /// entry silently; the TPM path by staging (with `--stage`); a cleared NVRAM
 /// by re-running the bootstrap (with `--bootstrap`).
-pub fn repair(ctx: &Ctx<'_>, stage_now: bool, bootstrap: bool) -> CmdResult {
-    ctx.need_uefi()?;
+pub fn repair(ctx: &Ctx<'_>, stage_now: bool, bootstrap: bool, app_only: bool) -> CmdResult {
     if !ctx.dry_run {
         ctx.need_admin()?;
     }
+    // paguro's own files, service, driver and entries first (INTERFACES
+    // §11.7a): never the Linux images.
+    let app = crate::cmd::setup::repair_app(ctx)?;
+    let app_json = app.as_ref().map(|(s, _)| json!(s));
+    let app_lines = app.map(|(_, l)| l).unwrap_or_default();
+    if app_only {
+        return Ok(Report::new(
+            json!({ "checks": [], "secure_boot": false, "app": app_json, "action": null }),
+        )
+        .lines(app_lines)
+        .line("paguro's files, service and entries checked (--app-only: not the boot path)"));
+    }
+    ctx.need_uefi()?;
     let pf = run_preflight(ctx, true)?;
     let mut data = serde_json::to_value(&pf).map_err(|e| CmdError::internal(e.to_string()))?;
-    let mut r = Report::new(Value::Null).lines(pf.lines());
+    if let Some(o) = data.as_object_mut() {
+        o.insert("app".into(), app_json.unwrap_or(Value::Null));
+    }
+    let mut r = Report::new(Value::Null).lines(app_lines).lines(pf.lines());
     let esp_vol = pf
         .esp
         .clone()

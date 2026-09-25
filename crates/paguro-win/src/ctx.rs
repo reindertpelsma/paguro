@@ -25,6 +25,9 @@ pub struct Ctx<'a> {
     /// Step progress of long operations (install, uninstall), for the
     /// service's `progress` notifications.
     pub progress: Option<&'a dyn Fn(&Progress)>,
+    /// Running inside the paguro service (which uninstall must not remove
+    /// from under itself).
+    pub in_service: bool,
 }
 
 /// A secret a command may need, and the request parameter that carries it.
@@ -74,6 +77,7 @@ impl<'a> Ctx<'a> {
             interactive: true,
             secrets: Vec::new(),
             progress: None,
+            in_service: false,
         }
     }
 
@@ -157,6 +161,15 @@ impl<'a> Ctx<'a> {
                 Exit::NeedsElevation,
                 "this needs an elevated (administrator) prompt",
             ))
+        }
+    }
+
+    /// Administrator, unless only planning (`--dry-run`).
+    pub fn need_admin_or_plan(&self) -> Result<(), CmdError> {
+        if self.dry_run {
+            Ok(())
+        } else {
+            self.need_admin()
         }
     }
 

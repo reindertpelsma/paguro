@@ -111,6 +111,16 @@ pub struct MockApi {
     pub commands: RefCell<Vec<String>>,
     pub restarted: Cell<bool>,
     pub uptime: Cell<u64>,
+    /// Embedded resources by id (the payloads of a release build).
+    pub resources: RefCell<BTreeMap<u16, Vec<u8>>>,
+    /// Programs run elevated (`run_elevated`), and what they return.
+    pub elevated_runs: RefCell<Vec<String>>,
+    pub elevated_exit: Cell<i32>,
+    /// Files queued for deletion at the next start.
+    pub reboot_deletes: RefCell<Vec<String>>,
+    pub exe: RefCell<String>,
+    /// Lines "typed" at the console (`read_line`); none: no console.
+    pub lines: RefCell<Vec<String>>,
     /// Interactive programs started (`run_interactive`).
     pub interactive: RefCell<Vec<String>>,
 }
@@ -163,6 +173,12 @@ impl MockApi {
             commands: RefCell::default(),
             restarted: Cell::new(false),
             uptime: Cell::new(600),
+            resources: RefCell::default(),
+            elevated_runs: RefCell::default(),
+            elevated_exit: Cell::new(0),
+            reboot_deletes: RefCell::default(),
+            lines: RefCell::default(),
+            exe: RefCell::new("C:\\Users\\me\\Downloads\\paguro.exe".into()),
             interactive: RefCell::default(),
         }
     }
@@ -810,6 +826,33 @@ impl WinApi for MockApi {
         Ok(0)
     }
 
+    fn run_elevated(&self, program: &str, args: &[&str]) -> ApiResult<i32> {
+        let line = std::iter::once(program)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.elevated_runs.borrow_mut().push(line);
+        Ok(self.elevated_exit.get())
+    }
+
+    fn current_exe(&self) -> ApiResult<String> {
+        Ok(self.exe.borrow().clone())
+    }
+
+    fn program_files(&self) -> String {
+        "C:\\Program Files".into()
+    }
+
+    fn resource(&self, id: u16) -> ApiResult<Option<Vec<u8>>> {
+        Ok(self.resources.borrow().get(&id).cloned())
+    }
+
+    fn delete_on_reboot(&self, path: &str) -> ApiResult<()> {
+        self.mutated(format!("delete-on-reboot {path}"));
+        self.reboot_deletes.borrow_mut().push(path.to_string());
+        Ok(())
+    }
+
     fn restart(&self) -> ApiResult<()> {
         self.mutated("restart".into());
         self.restarted.set(true);
@@ -841,6 +884,18 @@ impl WinApi for MockApi {
 
     fn system_drive(&self) -> String {
         "C:".into()
+    }
+
+    fn read_line(&self, _prompt: &str) -> ApiResult<String> {
+        let mut l = self.lines.borrow_mut();
+        if l.is_empty() {
+            return Err(ApiError::unsupported("ReadConsoleW", "no console"));
+        }
+        Ok(l.remove(0))
+    }
+
+    fn temp_dir(&self) -> String {
+        "C:\\Users\\me\\AppData\\Local\\Temp".into()
     }
 
     fn read_secret(&self, _prompt: &str) -> ApiResult<Zeroizing<String>> {

@@ -1,6 +1,6 @@
 name: windows
 
-# The Windows side (INTERFACES.md §11): paguro.exe, paguro-service, the API
+# The Windows side (INTERFACES.md §11): paguro.exe (CLI, service, installer), the API
 # contract, the PaguroTools module and the minifilter. Safe real-API tests only: NOTHING here writes a firmware
 # variable, a boot entry or the ESP of the runner — those paths are covered by
 # the mock tests, which run everywhere.
@@ -31,7 +31,7 @@ env:
 
 jobs:
   rust:
-    name: paguro.exe and paguro-service (build, clippy, mock, real-API and pipe tests)
+    name: paguro.exe (build, clippy, mock, real-API and pipe tests)
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +51,7 @@ jobs:
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
-          foreach ($b in 'paguro.exe', 'paguro-service.exe') {
+          foreach ($b in 'paguro.exe') {
             $deps = & $dumpbin.FullName /nologo /dependents "target\release\$b" | Out-String
             "$b`n$deps"
             if ($deps -match '(?i)vcruntime|msvcp|api-ms-win-crt|ucrtbase') { throw "$b depends on the C runtime" }
@@ -77,8 +77,7 @@ jobs:
         shell: pwsh
         run: |
           $exe = (Resolve-Path target\release\paguro.exe).Path
-          $svc = (Resolve-Path target\release\paguro-service.exe).Path
-          & $exe --direct service install --exe $svc
+          & $exe --direct service install
           if ($LASTEXITCODE -ne 0) { throw "service install exited $LASTEXITCODE" }
           sc.exe query paguro
           try {
@@ -107,7 +106,6 @@ jobs:
           name: paguro-exe
           path: |
             target/release/paguro.exe
-            target/release/paguro-service.exe
             status.json
             checks.json
 
@@ -132,7 +130,7 @@ jobs:
       - name: Pester 5 (pwsh 7.4); the service's demo machine on a pipe for the end-to-end block
         shell: pwsh
         run: |
-          $svc = Start-Process -PassThru -NoNewWindow (Resolve-Path bin\target\release\paguro-service.exe).Path -ArgumentList 'console', '--mock', '--pipe', 'paguro-e2e'
+          $svc = Start-Process -PassThru -NoNewWindow (Resolve-Path bin\target\release\paguro.exe).Path -ArgumentList 'service', 'console', '--mock', '--pipe', 'paguro-e2e'
           $env:PAGURO_SERVICE_PIPE = 'paguro-e2e'
           try {
             Install-Module Pester -MinimumVersion 5.5 -Force -Scope CurrentUser -SkipPublisherCheck
@@ -194,7 +192,7 @@ jobs:
         working-directory: windows/gui
         run: dotnet test Paguro.Gui.Core.Tests -m:1 --logger "console;verbosity=normal"
       - uses: dtolnay/rust-toolchain@stable
-      - name: build the module, the fake service and paguro-service
+      - name: build the module, the fake service and paguro
         run: |
           dotnet publish windows/PaguroTools/PaguroTools.csproj -c Release -m:1 -o windows/PaguroTools/bin/module
           dotnet build windows/dotnet/Paguro.Testing -c Release -m:1 -o windows/PaguroTools/bin/testing
@@ -211,10 +209,10 @@ jobs:
           $c.Run.Exit = $true
           $c.Output.Verbosity = 'Detailed'
           Invoke-Pester -Configuration $c
-      - name: Pester on Linux (.NET pipes are Unix sockets), with paguro-service --mock for the end-to-end block
+      - name: Pester on Linux (.NET pipes are Unix sockets), with paguro service console --mock for the end-to-end block
         shell: pwsh
         run: |
-          $svc = Start-Process -PassThru target/debug/paguro-service -ArgumentList 'console', '--mock', '--unix', '/tmp/CoreFxPipe_paguro-e2e'
+          $svc = Start-Process -PassThru target/debug/paguro -ArgumentList 'service', 'console', '--mock', '--unix', '/tmp/CoreFxPipe_paguro-e2e'
           $env:PAGURO_SERVICE_PIPE = 'paguro-e2e'
           Start-Sleep 1
           try {
@@ -233,7 +231,7 @@ jobs:
         with:
           targets: x86_64-pc-windows-gnu
       - run: sudo apt-get update && sudo apt-get install -y mingw-w64
-      - name: paguro.exe and paguro-service cross-compile (x86_64-pc-windows-gnu)
+      - name: paguro.exe cross-compiles (x86_64-pc-windows-gnu)
         run: cargo build -p paguro-win -p paguro-service --target x86_64-pc-windows-gnu
       - name: the driver's user-mode test program cross-compiles
         run: >

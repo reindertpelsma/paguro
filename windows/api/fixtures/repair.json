@@ -6,6 +6,7 @@
     "jsonrpc": "2.0",
     "method": "repair",
     "params": {
+      "app_only": false,
       "bootstrap": false,
       "dry_run": true,
       "stage": false
@@ -19,6 +20,7 @@
         "action": {
           "action": "restart"
         },
+        "app": null,
         "checks": [
           {
             "detail": "UEFI firmware",

@@ -25,8 +25,20 @@
 //!                           PaguroTpmBroken, PaguroBootstrap,
 //!                           PaguroUninstall, the MOK key
 //!          driver-remove    sc delete; pnputil /delete-driver
-//!          images           only with --delete-images
+//!          images           only with --delete-images (--keep-images keeps them;
+//!                           one of the two is required: never silently)
+//!          app-files        C:\Program Files\paguro (INTERFACES §11.7a)
+//!          shortcut         the Start menu entry
+//!          apps-and-features the Apps & Features entry
 //!          store            %ProgramData%\paguro
+//!          setup-copy       %ProgramData%\paguro\setup (this program, when it
+//!                           runs from there: removed at the next start)
+//! ```
+//!
+//! Phase 1 schedules phase 2 for the next administrator logon (HKLM
+//! RunOnce, the repair copy with the same image choice). Uninstall runs in
+//! `paguro.exe` itself, never in the service it removes.
+//! ```text
 //! ```
 //!
 //! `--skip-final-boot` leaves `PaguroB` as 32 inert bytes and the
@@ -46,7 +58,17 @@ use crate::journal::{Journal, StepState};
 use crate::out::{At, CmdError, CmdResult, Exit, Report};
 
 pub const PHASE1: [&str; 4] = ["inventory", "windows-tasks", "driver-disable", "final-boot"];
-pub const PHASE2: [&str; 5] = ["boot-entries", "esp", "driver-remove", "images", "store"];
+pub const PHASE2: [&str; 9] = [
+    "boot-entries",
+    "esp",
+    "driver-remove",
+    "images",
+    "app-files",
+    "shortcut",
+    "apps-and-features",
+    "store",
+    "setup-copy",
+];
 pub const TASK: &str = "\\paguro\\repair";
 pub const SERVICE: &str = "paguro";
 pub const DRIVER: &str = "paguroflt";
@@ -317,6 +339,32 @@ fn step(
             }
             Ok((StepState::Done, format!("{n} image file(s) deleted")))
         }
+        "app-files" | "shortcut" | "apps-and-features" => {
+            let (st, d) = crate::cmd::setup::remove(ctx, id)?;
+            Ok((
+                if st == "done" {
+                    StepState::Done
+                } else {
+                    StepState::Skipped
+                },
+                d,
+            ))
+        }
+        "setup-copy" => {
+            let (n, later) =
+                crate::cmd::setup::remove_tree_or_later(api, &crate::cmd::setup::setup_dir(api))?;
+            Ok((
+                StepState::Done,
+                format!(
+                    "{n} file(s) removed{}",
+                    if later > 0 {
+                        format!(", {later} in use: removed at the next start")
+                    } else {
+                        String::new()
+                    }
+                ),
+            ))
+        }
         "store" => {
             let n = remove_tree(api, &esp::store_dir(api))?;
             api.remove_file(&join(&ctx.data_dir(), "host-hardware.json"))?;
@@ -420,9 +468,16 @@ fn run_step(
 pub fn uninstall(
     ctx: &Ctx<'_>,
     delete_images: bool,
+    keep_images: bool,
     skip_final_boot: bool,
     yes: bool,
 ) -> CmdResult {
+    if delete_images && keep_images {
+        return Err(CmdError::new(
+            Exit::Usage,
+            "--keep-images or --delete-images, not both",
+        ));
+    }
     let o = Opts {
         delete_images,
         skip_final_boot,
@@ -441,6 +496,17 @@ pub fn uninstall(
             "uninstall removes paguro from this machine: pass --yes (or --dry-run to see the plan)",
         ));
     }
+    if !delete_images && !keep_images {
+        return Err(CmdError::refused(
+            "the Linux images are never deleted silently: choose --keep-images or --delete-images",
+        )
+        .with_data(json!({ "needs_choice": "images" })));
+    }
+    if ctx.in_service {
+        return Err(CmdError::refused(
+            "uninstall removes the paguro service, so it runs in paguro.exe itself (elevated), not in the service: `paguro uninstall`",
+        ));
+    }
     ctx.need_admin()?;
     let ids = steps();
     let mut j = match Journal::load(ctx.api, "uninstall", KEY)? {
@@ -456,6 +522,7 @@ pub fn uninstall(
     let waiting = settle(ctx, &mut j, &o)?;
     j.save(ctx.api)?;
     if waiting {
+        crate::cmd::setup::schedule_phase2(ctx, delete_images)?;
         let data = json!({ "journal": j, "finished": false });
         return Ok(Report::new(data)
             .lines(lines)

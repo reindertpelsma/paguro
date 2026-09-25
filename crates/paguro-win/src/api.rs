@@ -329,6 +329,21 @@ pub trait WinApi {
     fn run_interactive(&self, program: &str, args: &[&str]) -> ApiResult<i32>;
     /// A restart (never a shutdown: DESIGN.md §4.6).
     fn restart(&self) -> ApiResult<()>;
+    /// Run `program` elevated (UAC's consent prompt: `ShellExecuteEx`
+    /// "runas"), wait, and return its exit code. Only a front end calls this.
+    fn run_elevated(&self, program: &str, args: &[&str]) -> ApiResult<i32>;
+
+    // -- the program itself (INTERFACES.md §11.7a) --------------------------
+    /// This executable's path.
+    fn current_exe(&self) -> ApiResult<String>;
+    /// `%ProgramFiles%` (`C:\Program Files`, the 64-bit one).
+    fn program_files(&self) -> String;
+    /// An `RT_RCDATA` resource of this executable by id: the embedded
+    /// payloads. `Ok(None)`: not embedded (a development build).
+    fn resource(&self, id: u16) -> ApiResult<Option<Vec<u8>>>;
+    /// Delete `path` when Windows next starts (`MoveFileEx`
+    /// `MOVEFILE_DELAY_UNTIL_REBOOT`): for the running program's own files.
+    fn delete_on_reboot(&self, path: &str) -> ApiResult<()>;
 
     // -- environment --------------------------------------------------------
     fn random(&self, buf: &mut [u8]) -> ApiResult<()>;
@@ -339,6 +354,11 @@ pub trait WinApi {
     fn program_data(&self) -> String;
     /// `%SystemDrive%` (`C:`).
     fn system_drive(&self) -> String;
+    /// A line typed at the console (echoed); an error without a console to
+    /// ask at (a script, a service, a redirected standard input).
+    fn read_line(&self, prompt: &str) -> ApiResult<String>;
+    /// `%TEMP%`.
+    fn temp_dir(&self) -> String;
     /// Prompt on the console without echo.
     fn read_secret(&self, prompt: &str) -> ApiResult<Zeroizing<String>>;
     /// Standard input, whole (for `--passphrase-stdin`), capped at `max`.

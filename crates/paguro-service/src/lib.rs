@@ -25,6 +25,7 @@ use paguro_win::api::WinApi;
 use paguro_win::rpc::{self, Caller};
 use serde_json::{Value, json};
 
+pub mod console;
 #[cfg(windows)]
 pub mod win;
 

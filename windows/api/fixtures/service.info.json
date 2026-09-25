@@ -12,7 +12,7 @@
     "jsonrpc": "2.0",
     "result": {
       "data": {
-        "api_version": "1.0",
+        "api_version": "1.1",
         "caller": {
           "admin": true,
           "elevated": true,
@@ -59,7 +59,9 @@
           "protection.options",
           "protection.set",
           "protection.check",
-          "secure-boot.status"
+          "secure-boot.status",
+          "setup.status",
+          "setup.install"
         ],
         "pipe": "\\\\.\\pipe\\paguro",
         "service": true,
@@ -68,7 +70,7 @@
       "dry_run": false,
       "exit": "ok",
       "lines": [
-        "paguro API 1.0 (service), caller contract (elevated administrator)"
+        "paguro API 1.1 (service), caller contract (elevated administrator)"
       ],
       "warnings": []
     }

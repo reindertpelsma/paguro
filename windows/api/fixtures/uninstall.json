@@ -8,6 +8,7 @@
     "params": {
       "delete_images": false,
       "dry_run": true,
+      "keep_images": false,
       "skip_final_boot": false,
       "yes": false
     }
@@ -53,7 +54,23 @@
             "state": "pending"
           },
           {
+            "id": "app-files",
+            "state": "pending"
+          },
+          {
+            "id": "shortcut",
+            "state": "pending"
+          },
+          {
+            "id": "apps-and-features",
+            "state": "pending"
+          },
+          {
             "id": "store",
+            "state": "pending"
+          },
+          {
+            "id": "setup-copy",
             "state": "pending"
           }
         ]
@@ -69,7 +86,11 @@
         "would run: esp",
         "would run: driver-remove",
         "would run: images",
-        "would run: store"
+        "would run: app-files",
+        "would run: shortcut",
+        "would run: apps-and-features",
+        "would run: store",
+        "would run: setup-copy"
       ],
       "warnings": []
     }

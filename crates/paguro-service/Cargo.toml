@@ -1,18 +1,29 @@
 [package]
 name = "paguro-service"
 license.workspace = true
-description = "The paguro Windows service: the API of INTERFACES.md §11.7 as JSON-RPC 2.0 over \\\\.\\pipe\\paguro"
+description = "paguro.exe: the command line, the Windows service (the API of INTERFACES.md §11.7 over \\\\.\\pipe\\paguro) and its own installer (§11.7a)"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
+# One binary (INTERFACES §11.7a): CLI, service (`paguro.exe service`) and installer.
 [[bin]]
-name = "paguro-service"
+name = "paguro"
 path = "src/main.rs"
 
 [dependencies]
 paguro-win = { path = "../paguro-win" }
+serde_json = "1"
+
+[features]
+default = ["gui"]
+# Embed the GUI (paguro-app.exe) with the payloads. Without it: the CLI-only
+# build (INTERFACES §11.7a), which installs everything but the GUI.
+gui = []
+
+[build-dependencies]
+sha2 = { workspace = true, features = ["std"] }
 serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
@@ -26,6 +37,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_System_SystemServices",
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]

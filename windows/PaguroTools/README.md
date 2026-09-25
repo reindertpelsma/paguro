@@ -31,6 +31,6 @@ dotnet build ../dotnet/Paguro.Testing -c Release -o bin/testing
 pwsh -c 'Invoke-Pester Tests'     # a fake service answering from the API fixtures
 ```
 
-With `PAGURO_SERVICE_PIPE` naming a running `paguro-service console --mock`
+With `PAGURO_SERVICE_PIPE` naming a running `paguro service console --mock`
 (on Linux: `--unix /tmp/CoreFxPipe_<name>`), the end-to-end block runs the
 cmdlets against the real service logic too.

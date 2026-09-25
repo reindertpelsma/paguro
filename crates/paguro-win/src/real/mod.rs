@@ -1063,6 +1063,96 @@ impl WinApi for RealApi {
         Ok(st.code().unwrap_or(-1))
     }
 
+    fn run_elevated(&self, program: &str, args: &[&str]) -> ApiResult<i32> {
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, INFINITE, WaitForSingleObject,
+        };
+        use windows::Win32::UI::Shell::{
+            SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let params: String = args
+            .iter()
+            .map(|a| {
+                if !a.is_empty() && !a.contains([' ', '\t', '"']) {
+                    (*a).to_string()
+                } else {
+                    format!("\"{}\"", a.replace('"', "\\\""))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let verb = HSTRING::from("runas");
+        let file = HSTRING::from(program);
+        let par = HSTRING::from(params.as_str());
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+            lpVerb: PCWSTR(verb.as_ptr()),
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR(par.as_ptr()),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        // SAFETY: the strings outlive the call; hProcess is closed below.
+        unsafe { ShellExecuteExW(&mut info) }.map_err(|e| win_err("ShellExecuteExW", e))?;
+        let mut code = 0u32;
+        // SAFETY: a process handle from ShellExecuteExW.
+        unsafe {
+            WaitForSingleObject(info.hProcess, INFINITE);
+            let _ = GetExitCodeProcess(info.hProcess, &mut code);
+            let _ = CloseHandle(info.hProcess);
+        }
+        Ok(code as i32)
+    }
+
+    fn current_exe(&self) -> ApiResult<String> {
+        std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .map_err(|e| io_err("GetModuleFileNameW", "paguro.exe", e))
+    }
+
+    fn program_files(&self) -> String {
+        std::env::var("ProgramW6432")
+            .or_else(|_| std::env::var("ProgramFiles"))
+            .unwrap_or_else(|_| "C:\\Program Files".into())
+    }
+
+    fn resource(&self, id: u16) -> ApiResult<Option<Vec<u8>>> {
+        use windows::Win32::System::LibraryLoader::{
+            FindResourceW, LoadResource, LockResource, SizeofResource,
+        };
+        const RT_RCDATA: PCWSTR = PCWSTR(10 as _);
+        // SAFETY: MAKEINTRESOURCE(id) in this module; the data is mapped for
+        // the process's life and copied out.
+        unsafe {
+            let r = FindResourceW(None, PCWSTR(usize::from(id) as _), RT_RCDATA);
+            if r.is_invalid() {
+                return Ok(None);
+            }
+            let n = SizeofResource(None, r) as usize;
+            let g = LoadResource(None, r).map_err(|e| win_err("LoadResource", e))?;
+            let p = LockResource(g).cast::<u8>();
+            if p.is_null() {
+                return Err(ApiError::new(ErrorKind::Other, "LockResource", "no data"));
+            }
+            Ok(Some(std::slice::from_raw_parts(p, n).to_vec()))
+        }
+    }
+
+    fn delete_on_reboot(&self, path: &str) -> ApiResult<()> {
+        use windows::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
+        // SAFETY: a valid path; no new name means "delete".
+        unsafe {
+            MoveFileExW(
+                &HSTRING::from(path),
+                PCWSTR::null(),
+                MOVEFILE_DELAY_UNTIL_REBOOT,
+            )
+        }
+        .map_err(|e| win_err("MoveFileExW", e))
+    }
+
     fn restart(&self) -> ApiResult<()> {
         // SAFETY: plain arguments; SeShutdownPrivilege was enabled at start.
         unsafe {
@@ -1106,6 +1196,26 @@ impl WinApi for RealApi {
 
     fn system_drive(&self) -> String {
         std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into())
+    }
+
+    fn read_line(&self, prompt: &str) -> ApiResult<String> {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+            return Err(ApiError::unsupported(
+                "ReadConsoleW",
+                "no console to ask at",
+            ));
+        }
+        eprint!("{prompt}");
+        let mut l = String::new();
+        std::io::stdin()
+            .read_line(&mut l)
+            .map_err(|e| io_err("ReadConsoleW", "stdin", e))?;
+        Ok(l.trim_end_matches(['\r', '\n']).to_string())
+    }
+
+    fn temp_dir(&self) -> String {
+        std::env::temp_dir().display().to_string()
     }
 
     fn read_secret(&self, prompt: &str) -> ApiResult<Zeroizing<String>> {

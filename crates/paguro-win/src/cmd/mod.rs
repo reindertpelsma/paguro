@@ -13,6 +13,7 @@ pub mod mok;
 pub mod protection;
 pub mod secureboot;
 pub mod service;
+pub mod setup;
 pub mod status;
 pub mod transition;
 pub mod uninstall;

@@ -1,0 +1,70 @@
+{
+  "method": "setup.install",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "setup.install",
+    "params": {
+      "dry_run": true
+    }
+  },
+  "response": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": {
+        "state": {
+          "app": false,
+          "apps_and_features": true,
+          "has_gui": false,
+          "install_dir": "C:\\Program Files\\paguro",
+          "installed": false,
+          "payloads": [],
+          "running_from": "C:\\Users\\me\\Downloads\\paguro.exe",
+          "running_installed": false,
+          "service": false,
+          "setup_copy": false,
+          "version": "0.0.0"
+        },
+        "steps": [
+          {
+            "id": "files",
+            "state": "pending"
+          },
+          {
+            "id": "setup-copy",
+            "state": "pending"
+          },
+          {
+            "id": "driver",
+            "state": "pending"
+          },
+          {
+            "id": "service",
+            "state": "pending"
+          },
+          {
+            "id": "apps-and-features",
+            "state": "pending"
+          },
+          {
+            "id": "shortcut",
+            "state": "pending"
+          }
+        ]
+      },
+      "dry_run": true,
+      "exit": "ok",
+      "lines": [
+        "would run: files",
+        "would run: setup-copy",
+        "would run: driver",
+        "would run: service",
+        "would run: apps-and-features",
+        "would run: shortcut"
+      ],
+      "warnings": []
+    }
+  }
+}

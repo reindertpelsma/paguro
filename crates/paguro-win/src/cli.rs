@@ -44,6 +44,10 @@ pub struct Cli {
     /// Run in this process even when the paguro service is installed.
     #[arg(long, global = true)]
     pub direct: bool,
+    /// Also write the output to this file (and its standard error to FILE.err):
+    /// how an elevated or console-less run reports back.
+    #[arg(long, global = true, hide = true, value_name = "FILE")]
+    pub report: Option<String>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -127,19 +131,30 @@ pub enum Command {
         /// Re-run the bootstrap (after a firmware NVRAM clear).
         #[arg(long)]
         bootstrap: bool,
+        /// Only paguro's own files, service, driver and entries, not the boot path.
+        #[arg(long)]
+        app_only: bool,
     },
-    /// Build a distribution image through WSL2 and make it bootable (INTERFACES §11.4).
+    /// Install paguro itself (no arguments), or build a distribution image through WSL2 (INTERFACES §11.7a, §11.4).
     Install(Box<InstallCli>),
     /// Remove paguro (DESIGN §6b); resumable, two phases around a reboot.
     Uninstall {
         #[arg(long)]
         yes: bool,
         /// Also delete the image files paguro.ini names.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "keep_images")]
         delete_images: bool,
+        /// Keep the image files (one of the two is required: never silently).
+        #[arg(long)]
+        keep_images: bool,
         /// Do not boot once through paguro to remove PaguroB and the machine key.
         #[arg(long)]
         skip_final_boot: bool,
+    },
+    /// paguro itself: is it installed, and what this paguro.exe carries.
+    Setup {
+        #[command(subcommand)]
+        cmd: SetupCmd,
     },
     /// The paguro service: its API, and installing it.
     Service {
@@ -376,12 +391,17 @@ pub enum DistroCmd {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum SetupCmd {
+    Status,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ServiceCmd {
     /// The API version, and what this caller may do.
     Info,
-    /// Register and start paguro-service.exe (direct mode, elevated).
+    /// Register this paguro.exe as the service and start it (direct mode, elevated).
     Install {
-        /// Default: paguro-service.exe next to paguro.exe.
+        /// Default: this paguro.exe.
         #[arg(long)]
         exe: Option<String>,
     },
@@ -392,9 +412,10 @@ pub enum ServiceCmd {
 
 #[derive(Args, Debug)]
 pub struct InstallCli {
-    pub distro: String,
-    #[arg(long)]
-    pub path: String,
+    /// A distribution to install (without one: install paguro itself, INTERFACES §11.7a).
+    pub distro: Option<String>,
+    #[arg(long, requires = "distro")]
+    pub path: Option<String>,
     #[arg(long, default_value = "32G")]
     pub size: String,
     /// The distribution's ISO: its own installer in a WSL2 container.
@@ -564,9 +585,22 @@ pub fn request(c: &Command) -> Result<Option<(&'static str, Value)>, CmdError> {
         C::Preflight { repair } => r("preflight", json!({ "repair": repair })),
         C::RestartLinux { yes, entry } => r("restart-linux", json!({ "yes": yes, "entry": entry })),
         C::StageSetup => r("stage-setup", json!({})),
-        C::Repair { stage, bootstrap } => {
-            r("repair", json!({ "stage": stage, "bootstrap": bootstrap }))
-        }
+        C::Setup {
+            cmd: SetupCmd::Status,
+        } => r("setup.status", json!({})),
+        C::Repair {
+            stage,
+            bootstrap,
+            app_only,
+        } => r(
+            "repair",
+            json!({ "stage": stage, "bootstrap": bootstrap, "app_only": app_only }),
+        ),
+        C::Install(i) if i.distro.is_none() => r("setup.install", json!({})),
+        C::Install(i) if i.path.is_none() => Err(CmdError::new(
+            Exit::Usage,
+            "installing a distribution needs --path (the disk file to create)",
+        )),
         C::Install(i) => {
             let source = if i.iso.is_some() {
                 install::Source::Iso
@@ -588,10 +622,11 @@ pub fn request(c: &Command) -> Result<Option<(&'static str, Value)>, CmdError> {
         C::Uninstall {
             yes,
             delete_images,
+            keep_images,
             skip_final_boot,
         } => r(
             "uninstall",
-            json!({ "yes": yes, "delete_images": delete_images, "skip_final_boot": skip_final_boot }),
+            json!({ "yes": yes, "delete_images": delete_images, "keep_images": keep_images, "skip_final_boot": skip_final_boot }),
         ),
         C::Service {
             cmd: ServiceCmd::Info,
@@ -828,7 +863,8 @@ fn post(
                 }
                 r.human.push(format!(
                     "when the system is installed: paguro install {} --path {} --finish",
-                    i.distro, i.path
+                    i.distro.as_deref().unwrap_or(""),
+                    i.path.as_deref().unwrap_or("")
                 ));
             }
             Ok(r)
@@ -849,13 +885,7 @@ fn direct_only(api: &dyn WinApi, cli: &Cli) -> CmdResult {
             ServiceCmd::Install { exe } => {
                 let exe = match exe {
                     Some(e) => e.clone(),
-                    None => std::env::current_exe()
-                        .ok()
-                        .and_then(|p| p.parent().map(|d| d.join("paguro-service.exe")))
-                        .map(|p| p.display().to_string())
-                        .ok_or_else(|| {
-                            CmdError::not_found("cannot find paguro-service.exe; pass --exe")
-                        })?,
+                    None => api.current_exe()?,
                 };
                 service::install(&ctx, &exe)
             }
@@ -913,7 +943,8 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = match Cli::try_parse_from(args) {
+    let mut argv: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+    let cli = match Cli::try_parse_from(&argv) {
         Ok(c) => c,
         Err(e) => {
             let code = if e.use_stderr() {
@@ -938,9 +969,50 @@ where
         }
     };
     let name = command_name(&cli.command);
-    let r = execute(api, &cli, connect, live, abs);
-    out::render(&name, cli.dry_run, cli.json, &r)
+    let report = cli.report.clone();
+    let rendered = match prepare(api, &cli, &mut argv) {
+        Ok(Some(relayed)) => relayed,
+        Ok(None) => {
+            // The image choice may have been added to the command line.
+            let cli = Cli::try_parse_from(&argv).unwrap_or(cli);
+            let r = execute(api, &cli, connect, live, abs);
+            out::render(&name, cli.dry_run, cli.json, &r)
+        }
+        Err(e) => out::render(&name, cli.dry_run, cli.json, &Err(e)),
+    };
+    if let Some(p) = &report {
+        let _ = api.write_file(p, rendered.stdout.as_bytes());
+        let _ = api.write_file(&format!("{p}.err"), rendered.stderr.as_bytes());
+    }
+    rendered
 }
+
+/// Install and uninstall run in this process, elevated: ask what must be
+/// asked here, then relaunch elevated when this process is not.
+fn prepare(
+    api: &dyn WinApi,
+    cli: &Cli,
+    argv: &mut Vec<std::ffi::OsString>,
+) -> Result<Option<Rendered>, CmdError> {
+    let Some((method, _)) = request(&cli.command)? else {
+        return Ok(None);
+    };
+    if !DIRECT_ONLY.contains(&method) || cli.dry_run {
+        return Ok(None);
+    }
+    if method == "uninstall" {
+        choose_images(api, cli, argv)?;
+    }
+    if api.is_elevated() {
+        return Ok(None);
+    }
+    relaunch_elevated(api, argv).map(Some)
+}
+
+/// Methods that run in `paguro.exe` itself, never in the service
+/// (INTERFACES §11.7a): installing registers the service, uninstalling
+/// removes it.
+pub const DIRECT_ONLY: [&str; 2] = ["setup.install", "uninstall"];
 
 fn execute(
     api: &dyn WinApi,
@@ -962,8 +1034,13 @@ fn execute(
     if let Some(e) = &cli.esp {
         params.insert("esp".into(), Value::String(e.clone()));
     }
+    let direct_only = DIRECT_ONLY.contains(&method) && !cli.dry_run;
     pre(api, &cli.command, &mut params)?;
-    let remote = if cli.direct { None } else { connect() };
+    let remote = if cli.direct || direct_only {
+        None
+    } else {
+        connect()
+    };
     let local = Local {
         api,
         passphrase_stdin: cli.passphrase_stdin,
@@ -982,4 +1059,73 @@ fn execute(
     };
     let r = call_with_secrets(api, t, cli, method, params.clone(), &mut note)?;
     post(api, t, cli, &params, r, &mut note)
+}
+
+/// Uninstall never deletes the Linux images silently: ask at the console
+/// (the answer becomes `--keep-images` / `--delete-images`), or refuse
+/// without one.
+fn choose_images(
+    api: &dyn WinApi,
+    cli: &Cli,
+    argv: &mut Vec<std::ffi::OsString>,
+) -> Result<(), CmdError> {
+    let Command::Uninstall {
+        yes: true,
+        delete_images: false,
+        keep_images: false,
+        ..
+    } = &cli.command
+    else {
+        return Ok(());
+    };
+    let answer = api
+        .read_line("Delete the Linux disk images too? That erases those Linux installations. [y/N] ")
+        .map_err(|_| {
+            CmdError::refused("the Linux images are never deleted silently: choose --keep-images or --delete-images")
+                .with_data(json!({ "needs_choice": "images" }))
+        })?;
+    let delete = matches!(answer.trim(), "y" | "Y" | "yes" | "Yes");
+    argv.push(
+        if delete {
+            "--delete-images"
+        } else {
+            "--keep-images"
+        }
+        .into(),
+    );
+    Ok(())
+}
+
+/// Run the same command line elevated (UAC's prompt) and in-process there,
+/// and show what it reported: an elevated process gets no console of ours.
+fn relaunch_elevated(api: &dyn WinApi, argv: &[std::ffi::OsString]) -> Result<Rendered, CmdError> {
+    let exe = api.current_exe()?;
+    let report = crate::api::join(
+        &api.temp_dir(),
+        &format!("paguro-{}-{}.out", std::process::id(), api.now_unix()),
+    );
+    let mut args: Vec<String> = argv
+        .iter()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    args.extend(["--direct".into(), "--report".into(), report.clone()]);
+    let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let code = api.run_elevated(&exe, &argrefs).map_err(|e| {
+        CmdError::new(
+            Exit::NeedsElevation,
+            format!("this needs an administrator, and the elevation did not happen: {e}"),
+        )
+    })?;
+    let out = api.read_file(&report, 16 << 20)?.unwrap_or_default();
+    let err = api
+        .read_file(&format!("{report}.err"), 16 << 20)?
+        .unwrap_or_default();
+    let _ = api.remove_file(&report);
+    let _ = api.remove_file(&format!("{report}.err"));
+    Ok(Rendered {
+        stdout: String::from_utf8_lossy(&out).into_owned(),
+        stderr: String::from_utf8_lossy(&err).into_owned(),
+        code,
+    })
 }

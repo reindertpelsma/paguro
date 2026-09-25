@@ -350,9 +350,9 @@ Describe 'PaguroTools' {
     }
 }
 
-# The same cmdlets against the real service logic: `paguro-service console
+# The same cmdlets against the real service logic: `paguro service console
 # --mock` (the demo machine) on the pipe named by $env:PAGURO_SERVICE_PIPE.
-Describe 'PaguroTools against paguro-service --mock' -Skip:(-not $env:PAGURO_SERVICE_PIPE) {
+Describe 'PaguroTools against paguro service console --mock' -Skip:(-not $env:PAGURO_SERVICE_PIPE) {
     BeforeAll {
         $root = Split-Path $PSScriptRoot -Parent
         $module = if ($env:PAGURO_MODULE) { $env:PAGURO_MODULE } else { Join-Path $root 'bin/module/PaguroTools.psd1' }

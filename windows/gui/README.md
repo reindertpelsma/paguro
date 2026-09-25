@@ -35,5 +35,5 @@ PAGURO_GUI_EXE=…\paguro-gui.exe PAGURO_SCREENSHOTS=shots dotnet test Paguro.Gu
 ```
 
 `PAGURO_PIPE` points the app at another pipe (the tests' fake service, or
-`paguro-service console --mock --pipe NAME` for the demo machine);
+`paguro service console --mock --pipe NAME` for the demo machine);
 `PAGURO_GUI_NO_RUN=1` records instead of starting terminals or UAC.

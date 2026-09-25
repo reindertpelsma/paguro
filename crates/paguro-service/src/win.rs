@@ -378,7 +378,7 @@ pub fn file_log() -> Arc<dyn Fn(&str) + Send + Sync> {
 
 windows_service::define_windows_service!(ffi_service_main, service_main);
 
-/// `paguro-service run`: hand the process to the service control manager.
+/// `paguro service`: hand the process to the service control manager.
 pub fn run_service() -> windows_service::Result<()> {
     windows_service::service_dispatcher::start(SERVICE_NAME, ffi_service_main)
 }

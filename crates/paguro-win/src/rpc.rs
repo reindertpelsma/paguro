@@ -32,15 +32,15 @@ use zeroize::Zeroizing;
 
 use crate::api::WinApi;
 use crate::cmd::{
-    checks, config, disk, distro, efi, esp, hw, install, mok, protection, secureboot, status,
-    transition, uninstall,
+    checks, config, disk, distro, efi, esp, hw, install, mok, protection, secureboot, setup,
+    status, transition, uninstall,
 };
 use crate::ctx::{Ctx, Progress, Secret};
 use crate::out::{CmdError, CmdResult, Exit, Report};
 
 /// `paguro-api.json`'s `version`. Minor: methods or fields added; major:
 /// removed or changed meaning.
-pub const API_VERSION: &str = "1.0";
+pub const API_VERSION: &str = "1.1";
 /// The named pipe (INTERFACES.md §11.7).
 pub const PIPE: &str = r"\\.\pipe\paguro";
 /// Its name (the part after `\\.\pipe\`).
@@ -173,6 +173,12 @@ pub const METHODS: &[Method] = &[
     },
     m("protection.check", Read),
     m("secure-boot.status", Read),
+    m("setup.status", Read),
+    Method {
+        dry_run_read: true,
+        progress: true,
+        ..m("setup.install", Elevated)
+    },
 ];
 
 pub fn method(name: &str) -> Option<&'static Method> {
@@ -539,6 +545,7 @@ pub struct RestartLinux {
 pub struct Repair {
     pub stage: bool,
     pub bootstrap: bool,
+    pub app_only: bool,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -546,6 +553,7 @@ pub struct Repair {
 pub struct Uninstall {
     pub yes: bool,
     pub delete_images: bool,
+    pub keep_images: bool,
     pub skip_final_boot: bool,
 }
 
@@ -623,6 +631,7 @@ pub fn call(
         interactive: o.interactive,
         secrets: common.secrets,
         progress: o.progress,
+        in_service: o.service,
     };
     let dry = ctx.dry_run;
     let r = dispatch(&ctx, m, rest, o)?;
@@ -718,12 +727,18 @@ fn dispatch(
         }
         "repair" => {
             let p: Repair = parse(rest)?;
-            transition::repair(ctx, p.stage, p.bootstrap)
+            transition::repair(ctx, p.stage, p.bootstrap, p.app_only)
         }
         "install" => install::install(ctx, &parse::<install::InstallArgs>(rest)?),
         "uninstall" => {
             let p: Uninstall = parse(rest)?;
-            uninstall::uninstall(ctx, p.delete_images, p.skip_final_boot, p.yes)
+            uninstall::uninstall(
+                ctx,
+                p.delete_images,
+                p.keep_images,
+                p.skip_final_boot,
+                p.yes,
+            )
         }
         "distro.list" => {
             none(rest)?;
@@ -758,6 +773,20 @@ fn dispatch(
         "secure-boot.status" => {
             none(rest)?;
             secureboot::status(ctx)
+        }
+        "setup.status" => {
+            none(rest)?;
+            setup::status(ctx)
+        }
+        "setup.install" => {
+            none(rest)?;
+            if ctx.in_service && !ctx.dry_run {
+                Err(CmdError::refused(
+                    "installing paguro registers the service, so it runs in paguro.exe itself: `paguro install`",
+                ))
+            } else {
+                setup::install(ctx)
+            }
         }
         other => {
             return Err(RpcError::new(

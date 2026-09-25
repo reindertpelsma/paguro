@@ -101,10 +101,10 @@ fn checked(ctx: &Ctx<'_>, args: &[&str]) -> Result<(), CmdError> {
     }
 }
 
-/// Register `exe` (`paguro-service.exe`) as an auto-start LocalSystem
+/// Register `exe` (`paguro.exe`, run as `paguro.exe service`) as an auto-start LocalSystem
 /// service, restarted on failure, and start it.
 pub fn install(ctx: &Ctx<'_>, exe: &str) -> CmdResult {
-    let bin = format!("\"{exe}\" run");
+    let bin = format!("\"{exe}\" service");
     let plan = json!({ "name": NAME, "binary": exe, "command_line": bin });
     if ctx.dry_run {
         return Ok(Report::new(plan).line(format!("would install the service {NAME} ({exe})")));

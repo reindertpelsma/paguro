@@ -1,0 +1,25 @@
+{
+  "method": "uninstall",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "uninstall",
+    "params": {
+      "keep_images": true,
+      "yes": true
+    }
+  },
+  "response": {
+    "error": {
+      "code": -32003,
+      "data": {
+        "code": "refused",
+        "exit": 3
+      },
+      "message": "uninstall removes the paguro service, so it runs in paguro.exe itself (elevated), not in the service: `paguro uninstall`"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

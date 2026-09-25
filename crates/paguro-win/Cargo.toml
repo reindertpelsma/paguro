@@ -7,10 +7,6 @@ version.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "paguro"
-path = "src/main.rs"
-
 [dependencies]
 paguro-core.workspace = true
 paguro-crypto.workspace = true
@@ -48,6 +44,10 @@ windows = { version = "0.62", features = [
     "Win32_System_Console",
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Security_Cryptography",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]

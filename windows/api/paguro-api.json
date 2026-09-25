@@ -3,7 +3,7 @@
   "$id": "https://github.com/reindertpelsma/paguro/blob/main/windows/api/paguro-api.json",
   "title": "paguro Windows API",
   "description": "The one API of the Windows side (INTERFACES.md §11.7): JSON-RPC 2.0 over the named pipe \\\\.\\pipe\\paguro, one message per line (UTF-8, LF, at most 4 MiB). `methods` names every method with its access, CLI command, cmdlets, params and result; `$defs` holds the types. Rust (crates/paguro-win/src/rpc.rs) is checked against this file by tests/api_contract.rs; the C# types are generated from it (windows/api/codegen). A method's `params` are its own plus `$defs/CommonParams`. Errors: code -32000 - exit (JSON.md), data per `$defs/ErrorData`; a missing secret is data.data per `$defs/NeedsInput`.",
-  "version": "1.0",
+  "version": "1.1",
   "x-pipe": "\\\\.\\pipe\\paguro",
   "x-access": {
     "read": "anyone the pipe admits (the interactive user)",
@@ -712,12 +712,12 @@
       "dry_run_read": true
     },
     "repair": {
-      "summary": "Repair ESP files and entry; stage or bootstrap.",
+      "summary": "Repair paguro's files, service, driver and entries, then the ESP files and boot entry; stage or bootstrap. Never the Linux images.",
       "cli_example": [
         "repair"
       ],
       "access": "admin",
-      "cli": "paguro repair [--stage] [--bootstrap]",
+      "cli": "paguro repair [--stage] [--bootstrap] [--app-only]",
       "cmdlets": [
         "Repair-Paguro"
       ],
@@ -731,6 +731,7 @@
         {
           "stage": false,
           "bootstrap": false,
+          "app_only": false,
           "dry_run": true
         }
       ],
@@ -787,12 +788,12 @@
       "stub": "the ISO-in-container and from-WSL builds (Linux side); the --finish package/initramfs/bootloader checks"
     },
     "uninstall": {
-      "summary": "Remove paguro (DESIGN §6b); dry_run gives the summary.",
+      "summary": "Remove paguro (DESIGN §6b, INTERFACES §11.7a); dry_run gives the summary. Runs in paguro.exe (elevated), never in the service.",
       "cli_example": [
         "uninstall"
       ],
       "access": "admin",
-      "cli": "paguro uninstall [--yes] [--delete-images] [--skip-final-boot]",
+      "cli": "paguro uninstall [--yes] [--keep-images|--delete-images] [--skip-final-boot]",
       "cmdlets": [
         "Uninstall-Paguro"
       ],
@@ -806,8 +807,13 @@
         {
           "yes": false,
           "delete_images": false,
+          "keep_images": false,
           "skip_final_boot": false,
           "dry_run": true
+        },
+        {
+          "yes": true,
+          "keep_images": true
         }
       ],
       "dry_run_read": true,
@@ -1069,6 +1075,52 @@
       "examples": [
         {}
       ]
+    },
+    "setup.status": {
+      "summary": "Is paguro installed, and what does this paguro.exe carry (INTERFACES §11.7a).",
+      "cli_example": [
+        "setup",
+        "status"
+      ],
+      "access": "read",
+      "cli": "paguro setup status",
+      "cmdlets": [
+        "Get-PaguroSetup"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SetupState"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "setup.install": {
+      "summary": "Install paguro itself: Program Files, the repair copy, the minifilter, the service, Apps & Features, the Start menu. Runs in paguro.exe (elevated), never in the service.",
+      "cli_example": [
+        "install"
+      ],
+      "access": "elevated",
+      "cli": "paguro install",
+      "cmdlets": [
+        "Install-Paguro"
+      ],
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SetupInstall"
+      },
+      "examples": [
+        {
+          "dry_run": true
+        },
+        {}
+      ],
+      "dry_run_read": true,
+      "progress": true
     }
   },
   "notifications": {
@@ -1226,7 +1278,9 @@
           "type": "string",
           "enum": [
             "install",
-            "uninstall"
+            "uninstall",
+            "setup",
+            "repair"
           ]
         },
         "step": {
@@ -1235,13 +1289,13 @@
         "state": {
           "type": "string",
           "enum": [
-            "running",
-            "pending",
-            "done",
-            "skipped",
-            "failed",
             "awaiting_reboot",
-            "awaiting_user"
+            "awaiting_user",
+            "done",
+            "failed",
+            "pending",
+            "running",
+            "skipped"
           ]
         },
         "index": {
@@ -2337,6 +2391,9 @@
         },
         "restarting": {
           "type": "boolean"
+        },
+        "app": {
+          "description": "repair: the steps of repairing paguro's own files, service, driver and entries (null: paguro is not installed)."
         }
       },
       "required": [
@@ -2488,6 +2545,9 @@
           "type": "boolean"
         },
         "skip_final_boot": {
+          "type": "boolean"
+        },
+        "keep_images": {
           "type": "boolean"
         }
       }
@@ -3200,6 +3260,10 @@
         },
         "bootstrap": {
           "type": "boolean"
+        },
+        "app_only": {
+          "type": "boolean",
+          "description": "Only paguro's own files, service, driver and entries, not the boot path."
         }
       },
       "additionalProperties": false
@@ -3300,6 +3364,10 @@
         },
         "skip_final_boot": {
           "type": "boolean"
+        },
+        "keep_images": {
+          "type": "boolean",
+          "description": "Keep the Linux images. With yes, one of keep_images and delete_images is required: never silently."
         }
       },
       "additionalProperties": false
@@ -3461,6 +3529,125 @@
       "required": [
         "level",
         "message"
+      ]
+    },
+    "SetupStep": {
+      "type": "object",
+      "description": "One step of installing or repairing paguro itself.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "files",
+            "setup-copy",
+            "driver",
+            "service",
+            "apps-and-features",
+            "shortcut"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "done",
+            "skipped",
+            "failed"
+          ]
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "state"
+      ]
+    },
+    "SetupState": {
+      "type": "object",
+      "description": "setup.status: what is installed, and what this paguro.exe carries.",
+      "properties": {
+        "installed": {
+          "type": "boolean"
+        },
+        "version": {
+          "type": "string"
+        },
+        "install_dir": {
+          "type": "string"
+        },
+        "setup_copy": {
+          "type": "boolean",
+          "description": "The repair copy in %ProgramData%\\paguro\\setup, which Apps & Features runs."
+        },
+        "app": {
+          "type": "boolean",
+          "description": "The GUI is installed."
+        },
+        "apps_and_features": {
+          "type": "boolean"
+        },
+        "service": {
+          "type": "boolean"
+        },
+        "running_from": {
+          "type": "string"
+        },
+        "running_installed": {
+          "type": "boolean"
+        },
+        "payloads": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "len": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "has_gui": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "installed",
+        "version",
+        "install_dir",
+        "setup_copy",
+        "app",
+        "apps_and_features",
+        "service"
+      ]
+    },
+    "SetupInstall": {
+      "type": "object",
+      "description": "setup.install",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/SetupState"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SetupStep"
+          }
+        },
+        "app": {
+          "type": "string",
+          "description": "The GUI's path."
+        }
+      },
+      "required": [
+        "state",
+        "steps"
       ]
     }
   }

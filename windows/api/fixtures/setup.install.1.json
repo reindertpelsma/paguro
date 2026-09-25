@@ -1,0 +1,22 @@
+{
+  "method": "setup.install",
+  "notifications": [],
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "setup.install",
+    "params": {}
+  },
+  "response": {
+    "error": {
+      "code": -32003,
+      "data": {
+        "code": "refused",
+        "exit": 3
+      },
+      "message": "installing paguro registers the service, so it runs in paguro.exe itself: `paguro install`"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}
