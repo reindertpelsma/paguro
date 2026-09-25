@@ -2114,8 +2114,14 @@ I/O failure and a half-written metadata change:
   `STATUS_FLT_DO_NOT_DETACH`) for the life of the session
 - **hold the protected handle** with `MARK_HANDLE_PROTECT_CLUSTERS`, so defrag
   skips the image instead of meeting `EIO`
-- **deny all sharing** on the image, which also blocks `rm /mnt/c/linux.vhd` over
-  SMB (§5b) — a path sector exclusion never touches, since it travels through
+- **refuse access to the image files themselves**, not only their clusters:
+  opens by path or by file ID from anything but the paguro service, delete,
+  rename, hard links, size and allocation changes, non-paging writes, and the
+  FSCTLs that would move, sparsify, compress, trim or duplicate their extents.
+  Nothing in the guest — an indexer, antivirus, backup, a user double-clicking
+  the `.vhd` — ever reads those sectors and meets `EIO`; it gets a clean
+  *access denied* instead. This also blocks `rm /mnt/c/linux.vhd` over SMB
+  (§5b), a path sector exclusion never touches, since it travels through
   Windows' filesystem layer
 - **reject incompatible volume-wide transformations** cleanly (§5.7), so the
   conversion never starts rather than failing partway against rejected writes
