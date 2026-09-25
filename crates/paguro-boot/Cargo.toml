@@ -1,5 +1,6 @@
 [package]
 name = "paguro-boot"
+license.workspace = true
 description = "The loader's logic as a stage machine over a Platform trait (DESIGN.md §4.1, §6)"
 edition.workspace = true
 version.workspace = true

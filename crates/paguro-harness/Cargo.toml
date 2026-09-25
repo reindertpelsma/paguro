@@ -1,5 +1,6 @@
 [package]
 name = "paguro-harness"
+license.workspace = true
 description = "The storage torture harness — the first artifact to build (DESIGN.md §1b, §11)"
 edition.workspace = true
 version.workspace = true

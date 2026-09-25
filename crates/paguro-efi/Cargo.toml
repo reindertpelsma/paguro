@@ -1,5 +1,6 @@
 [package]
 name = "paguro-efi"
+license.workspace = true
 description = "The UEFI loader: verify, ratchet, unlock, chainload the UKI (DESIGN.md §4.1)"
 edition.workspace = true
 version.workspace = true

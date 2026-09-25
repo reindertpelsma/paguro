@@ -89,5 +89,12 @@ qemu-system-x86_64 -machine q35 -m 256 -nographic -net none \
 
 ## Licence
 
-Not chosen yet. The kernel module is GPL-2.0 (a kernel requirement); `pg_range.[ch]`
-are dual GPL-2.0 OR MIT so they can be shared with userspace.
+paguro is licensed under the **Apache License 2.0** ([`LICENSE`](LICENSE)),
+except:
+
+- the Linux kernel module (`kernel/dm-paguro`) is **GPL-2.0**, as Linux
+  requires; its dependency-free core (`pg_range`, `pg_claim`, `pg_ntfs`) and
+  the uapi header are dual **GPL-2.0 OR MIT** so userspace tests and tools can
+  share them;
+- bundled third-party material keeps its own licence, stated next to it (the
+  Inter font under the SIL OFL, test fixtures under their sources' licences).

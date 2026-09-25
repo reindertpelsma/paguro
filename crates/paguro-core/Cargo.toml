@@ -1,5 +1,6 @@
 [package]
 name = "paguro-core"
+license.workspace = true
 description = "Pure, dependency-free logic shared by paguro-efi, the kernel module and userspace"
 edition.workspace = true
 version.workspace = true

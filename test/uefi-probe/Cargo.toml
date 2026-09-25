@@ -1,5 +1,6 @@
 [package]
 name = "paguro-probe"
+license.workspace = true
 description = "A tiny UEFI app the QEMU scenarios chain into: prints how it was started, reads its own FAT and the handoff"
 edition.workspace = true
 version.workspace = true

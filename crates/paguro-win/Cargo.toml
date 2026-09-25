@@ -1,5 +1,6 @@
 [package]
 name = "paguro-win"
+license.workspace = true
 description = "Windows side: Restart into Linux, pre-flight, repair hook (DESIGN.md §4.6, §7)"
 edition.workspace = true
 version.workspace = true

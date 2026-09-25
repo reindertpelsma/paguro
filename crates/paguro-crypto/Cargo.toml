@@ -1,5 +1,6 @@
 [package]
 name = "paguro-crypto"
+license.workspace = true
 description = "The DESIGN.md §6 key derivation chain: no_std, symmetric only"
 edition.workspace = true
 version.workspace = true

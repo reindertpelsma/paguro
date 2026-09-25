@@ -1,5 +1,6 @@
 [package]
 name = "paguro-ui"
+license.workspace = true
 description = "The loader's graphical UI: compiled-in theme, layout, software rasteriser, prompt loop (INTERFACES.md §13)"
 edition.workspace = true
 version.workspace = true

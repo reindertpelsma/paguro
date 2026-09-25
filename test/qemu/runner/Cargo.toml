@@ -1,5 +1,6 @@
 [package]
 name = "paguro-qemu"
+license.workspace = true
 description = "QEMU + OVMF + swtpm boot tests for paguro.efi (INTERFACES.md §12, QEMU level)"
 edition.workspace = true
 version.workspace = true

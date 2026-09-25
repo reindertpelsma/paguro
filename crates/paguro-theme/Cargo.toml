@@ -1,5 +1,6 @@
 [package]
 name = "paguro-theme"
+license.workspace = true
 description = "Build-time theme compiler: validates themes/<name>/ and emits Rust statics for paguro-ui (INTERFACES.md §13.1)"
 edition.workspace = true
 version.workspace = true

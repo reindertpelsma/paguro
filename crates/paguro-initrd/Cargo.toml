@@ -1,5 +1,6 @@
 [package]
 name = "paguro-initrd"
+license.workspace = true
 description = "Initrd-side setup: build the views, write seal files, record PCRs (DESIGN.md §4.3, §6)"
 edition.workspace = true
 version.workspace = true

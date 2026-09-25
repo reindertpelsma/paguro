@@ -1,5 +1,6 @@
 [package]
 name = "paguro-ui-preview"
+license.workspace = true
 description = "Render the loader's screens to PNG on the host, for theme authors (INTERFACES.md §13)"
 edition.workspace = true
 version.workspace = true
