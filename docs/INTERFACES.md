@@ -987,6 +987,24 @@ For a non-expert, in this order:
 6. **Restart into Linux**, and the uninstall, both with a clear summary of what
    will and will not be touched.
 
+### 11.9 GPU backends for the Windows VM — DRAFT
+
+The VM launcher does not know any GPU technology. A **GPU backend** is a small
+provider the launcher asks, in order, and the first that applies is used:
+
+| Backend | Applies when | Provides |
+|---|---|---|
+| **kayfabe** | an NVIDIA GPU and kayfabe's host side are present | its QEMU device arguments; the guest runs NVIDIA's own driver (DESIGN §1b) |
+| **Helios** | AMD/Intel, or chosen by the user on NVIDIA | its device arguments and the guest driver it needs |
+| **none** | always | a plain display device; the VM works without acceleration |
+
+Contract, per backend: `probe() → available | unavailable(reason)`,
+`qemu_args(vm) → [args]`, `guest_requirements() → [drivers/versions]`,
+`health() → ok | degraded(reason)`. The launcher logs which backend was chosen
+and why the others were not, the GUI shows it, and a backend failing at start
+falls back to the next, so a GPU problem never stops Windows from starting.
+Backends ship and version independently of paguro.
+
 ## 12. Testing contract
 
 Each interface ships with:
