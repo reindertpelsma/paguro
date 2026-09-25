@@ -20,38 +20,12 @@ moddir=${2:-/lib/modules/$kver}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 r=$work/root
-mkdir -p "$r/bin" "$r/sbin" "$r/proc" "$r/sys" "$r/dev" "$r/tmp" "$r/mod" "$r/fx" "$r/mnt"
-
-cp "$(command -v busybox)" "$r/bin/"
-for a in sh mount umount insmod rmmod losetup cat poweroff grep head tail yes \
-         blockdev cmp cp mkdir sed awk cut tr sleep sync truncate echo ls wc \
-         printf expr seq rm stat od; do
-    ln -s busybox "$r/bin/$a"
-done
-copy_bin() {
-    cp "$1" "$r/$2"
-    for l in $(ldd "$1" | grep -o '/[^ ]*'); do
-        mkdir -p "$r$(dirname "$l")"; cp -L "$l" "$r$l"
-    done
-}
-copy_bin "$(command -v dmsetup)" sbin/dmsetup
-copy_bin "$(command -v dd)" bin/dd
-copy_bin "$(command -v losetup)" sbin/losetup.ul	# for --sector-size
+. "$here/vm-lib.sh"
+vm_root "$r"
 cp "$here/../dm-paguro.ko" "$r/"
 cp "$here/../tools/pgctl" "$r/bin/"
-
 # dm, loop and ntfs3 may be modules on this kernel; ship them uncompressed.
-for m in drivers/md/dm-mod drivers/block/loop fs/ntfs3/ntfs3 drivers/md/dm-log-writes; do
-    for ext in .ko .ko.zst .ko.xz; do
-        f=$moddir/kernel/$m$ext
-        [ -e "$f" ] || continue
-        case $ext in
-            .ko.zst) zstd -qdc "$f" > "$r/mod/$(basename "$m").ko" ;;
-            .ko.xz)  xz -dc "$f" > "$r/mod/$(basename "$m").ko" ;;
-            *)       cp "$f" "$r/mod/" ;;
-        esac
-    done
-done
+vm_modules "$moddir" drivers/md/dm-mod drivers/block/loop fs/ntfs3/ntfs3 drivers/md/dm-log-writes
 
 # Fixtures, identities from the manifest, and a dirty copy of vol512.
 for v in vol512 vol4k vol4kn; do gzip -dc "$fix/$v.img.gz" > "$r/fx/$v.img"; done
@@ -72,23 +46,8 @@ if [ -n "$harness" ]; then
     "$harness" ntfs-reads "$fix/vol512.img.gz" "$1" "$2" > "$r/reads"
 fi
 
-cat > "$r/init" <<'INIT'
-#!/bin/sh
-export PATH=/bin:/sbin
-mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev; mount -t tmpfs tmp /tmp
-fail=0
-ok()  { echo "PASS: $1"; }
-bad() { echo "FAIL: $1"; fail=1; }
-for m in /mod/*.ko; do [ -e "$m" ] && insmod "$m"; done
-INIT
+vm_init_head > "$r/init"
 cat "$here/vm-test.body" >> "$r/init"
 chmod +x "$r/init"
-
-(cd "$r" && find . | cpio -o -H newc 2>/dev/null | gzip -1) > "$work/initramfs.gz"
-accel=""
-[ -w /dev/kvm ] && [ -z "${PG_NO_KVM:-}" ] && accel="-enable-kvm -cpu host"	# else TCG
-timeout 900 qemu-system-x86_64 $accel -m 1536 -smp 2 -nographic -no-reboot \
-    -kernel "$kernel" -initrd "$work/initramfs.gz" \
-    -append "console=ttyS0 quiet panic=-1" 2>&1 | tr -d '\r' | tee "$work/log" \
-    | grep -E "PASS|FAIL|SKIP|RESULT|status:|BUG|Oops|WARNING|paguro"
+vm_boot "$r" "$kernel" 900 "$work/log" ""
 grep -q "RESULT: ALL PASS" "$work/log"

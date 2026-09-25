@@ -6,6 +6,7 @@
  *   pgctl claim <volume> <mft-record> <mft-seq> [raw|vhd]  -> claim id
  *   pgctl grow <claim>
  *   pgctl crosscheck <claim> <file-on-ntfs3>               (FIEMAP -> module)
+ *   pgctl crosscheck-list <claim> <list|->     "<start> <len>" lines -> module
  *   pgctl release <claim>
  *   pgctl remove <volume>
  *   pgctl status
@@ -163,6 +164,35 @@ int main(int argc, char **argv)
 		struct pg_crosscheck x = { .claim_id = atoi(argv[2]) };
 		struct pg_uapi_range *e = fiemap(argv[3], &x.count);
 
+		x.ranges = (unsigned long)e;
+		r = ctl(PG_CROSSCHECK, &x);
+		if (r)
+			fail(r, 0);
+		printf("state %u\n", x.state);
+		return !(x.state & PG_CLAIM_CHECKED);
+	} else if (!strcmp(cmd, "crosscheck-list") && argc == 4) {
+		/* An extent list from elsewhere (the Rust reference, in the
+		 * replay test): the module says whether its map is exactly it. */
+		struct pg_crosscheck x = { .claim_id = atoi(argv[2]) };
+		struct pg_uapi_range *e = NULL;
+		unsigned long long st, ln;
+		unsigned int cap = 0;
+		FILE *f = strcmp(argv[3], "-") ? fopen(argv[3], "r") : stdin;
+
+		if (!f) {
+			perror(argv[3]);
+			return 2;
+		}
+		while (fscanf(f, "%llu %llu", &st, &ln) == 2) {
+			if (x.count == cap) {
+				cap = cap ? cap * 2 : 64;
+				e = realloc(e, cap * sizeof(*e));
+				if (!e)
+					return 2;
+			}
+			e[x.count].start = st;
+			e[x.count++].len = ln;
+		}
 		x.ranges = (unsigned long)e;
 		r = ctl(PG_CROSSCHECK, &x);
 		if (r)
