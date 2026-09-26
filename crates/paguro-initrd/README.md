@@ -19,12 +19,13 @@ tables and `/dev/paguro`.
 it; builds the decrypted volume with BitLocker's own segment table
 (`dm-crypt` keyed through a kernel `logon` key, never a table string) or
 passes an unencrypted volume through; registers it with `dm-paguro`
-(`PG_VOLUME_ADD`); probes the boot entry's disks read-only
-(`ntfs3`), claims and cross-checks them (`PG_CLAIM`/`PG_CROSSCHECK`, which can
-only refuse); loads view A; and on the ESP writes `recorded.bin` every boot,
+(`PG_VOLUME_ADD`); probes the boot entry's disks read-only (`ntfs3`, the same
+mount also used to read `tpm-auth.bin` off `C:`, below), claims and
+cross-checks them (`PG_CLAIM`/`PG_CROSSCHECK`, which can only refuse); loads
+view A; and on the ESP writes `recorded.bin` every boot,
 `paguro.ini`/`PaguroConfigHash`/`tpm_seal.bin` on a provisioning boot, and —
-after a boot on the `passphrase` rung with `PaguroTpmBroken` set and every
-secret it needs — a fresh `tpm_seal.bin` (`reseal`, below). Depends on
+with `PaguroTpmBroken` set and every secret it needs — a fresh `tpm_seal.bin`
+(`reseal`, below). Depends on
 [`paguro-core`](../paguro-core), [`paguro-crypto`](../paguro-crypto) and
 [`paguro-boot`](../paguro-boot) (its TPM client, reused rather than
 reimplemented — see `reseal` below) for formats and key derivation; talks to
@@ -44,23 +45,27 @@ reimplemented — see `reseal` below) for formats and key derivation; talks to
 | `pg` | `/dev/paguro` control-device ioctls |
 | `sys` | thin system-call glue (everything not pure) |
 
-### Re-sealing the `tpm` rung (`reseal`, INTERFACES.md §5, §8.3)
+### Re-sealing the `tpm` rung (`reseal`, INTERFACES.md §5, §8.3, §8.4)
 
 A firmware update, `dbx` change or MOK enrolment moves the PCR values the old
 `tpm_seal.bin` was sealed against; the loader notices (`PolicyPCR` fails) and
-sets `PaguroTpmBroken`. A later boot on the `passphrase` rung carries
-everything a re-seal needs — this boot's recorded PCR 0/2/4/7 (handoff
-`PCRS`), `B` (handoff `B`), the BitLocker Volume Master Key (handoff `VMK`)
-and, only on this rung, the Linux password's fast hash (handoff `USER_HASH` —
-safe to forward only here, since the `passphrase` rung's own `env` is already
-a public constant: DESIGN.md §6) — so `esp::maybe_reseal` seals a fresh `D'`
-under a policy over those values, with the `auth` a future `tpm`-rung boot
-will re-derive from the same passphrase, and rewrites `tpm_seal.bin`
-(`esp::replace`'s atomic write, fsyncing the file and then the directory)
-before clearing the flag — never the other way round, and never on a
-failure. A `recovery`-rung boot (no PIN typed, so no `USER_HASH` anywhere)
-cannot do this automatically; it logs why and leaves the flag for a
-`passphrase`- or `tpm`-rung boot to clear instead.
+sets `PaguroTpmBroken`. A later `passphrase`- or `recovery`-rung boot carries
+or can read everything a re-seal needs: this boot's recorded PCR 0/2/4/7
+(handoff `PCRS`), `B` (handoff `B`), the BitLocker Volume Master Key (handoff
+`VMK`), and — read from `tpm-auth.bin` on `C:` through the same read-only
+`ntfs3` mount `probe_ntfs` already opens, not from the handoff — the salted,
+stretched passphrase hash (`salt` and `value`, `paguro_core::tpm_auth`) the
+Windows tool wrote there (INTERFACES.md §8.4). No PIN is typed for any of
+this any more, so a `recovery`-rung boot is exactly as able to re-seal as a
+`passphrase`-rung one. `esp::maybe_reseal` seals a fresh `D'` under a policy
+over the recorded PCR values, with the `auth` a future `tpm`-rung boot will
+re-derive from the same passphrase and the same salt, and rewrites
+`tpm_seal.bin` (`esp::replace`'s atomic write, fsyncing the file and then the
+directory) before clearing the flag — never the other way round, and never
+on a failure. A boot that cannot read `tpm-auth.bin` (Windows never wrote
+one, the file is malformed, or the volume is not BitLocker-encrypted) cannot
+do this automatically; it logs why and leaves the flag for a later boot to
+clear instead.
 
 `reseal::LinuxTpm` adapts `/dev/tpmrm0` (the kernel's TPM resource manager) to
 `paguro_boot::platform::Platform`, exactly as `paguro-win`'s `TbsPlatform`
@@ -86,10 +91,11 @@ secret: logged, `PaguroTpmBroken` left set.
   reaches `dm-crypt` through a kernel `logon` key, never a table string. `B`
   is additionally kept in a root-only *session* `logon` key
   (`sys::add_session_logon_key`), for a re-seal after this process exits
-  (INTERFACES.md §8.3). `B`, the VMK and `USER_HASH` in `setup::Taken` are
-  `setup::Secret32` (zeroize-on-drop, deliberately not `Debug` — adding
-  `#[derive(Debug)]` to `Taken` fails to compile rather than printing them);
-  `esp::maybe_reseal` drops its VMK/`USER_HASH` copies right after the
+  (INTERFACES.md §8.3). `B` and the VMK in `setup::Taken`, and the stretched
+  hash in `setup::Taken::win_auth` (`setup::WinAuth`), are `setup::Secret32`
+  (zeroize-on-drop, deliberately not `Debug` — adding `#[derive(Debug)]` to
+  `Taken` or `WinAuth` fails to compile rather than printing them);
+  `esp::maybe_reseal` drops its VMK/`win_auth` copies right after the
   attempt, not at process exit.
 - View A is loaded only after the module has asserted the payload's
   structure, and only read-only when the volume is dirty or hibernated.
@@ -143,7 +149,15 @@ missing:
    needed to build it (`env_passphrase()` is a public constant), only the
    volume's VMK and encrypted FVEK blob, both already in the test harness's
    hands the way `bde_case`/`stage4::bootstrap` compute similar seals inline.
-4. New serial-log assertions for the second boot (`esp::maybe_reseal`'s own
+4. `tpm-auth.bin` written onto the NTFS volume itself, at
+   `ProgramData\paguro\<volume-guid>\tpm-auth.bin` — the re-seal no longer
+   reads anything from the handoff for this (INTERFACES.md §8.4); a small
+   helper computing `paguro_crypto::bitlocker_stretch(user_password_hash(pw),
+   salt, STRETCH_ITERATIONS)` and `paguro_core::tpm_auth::write` and placing
+   it on the test volume's NTFS file system (the harness already builds that
+   volume's contents elsewhere) covers both this and item 3's need for the
+   same `salt`/stretched hash.
+5. New serial-log assertions for the second boot (`esp::maybe_reseal`'s own
    log lines are already there to match against) and a third boot proving
    the `tpm` rung now succeeds and `PaguroTpmBroken` reads back cleared from
    the VARS file (`vars::read`, already used elsewhere in

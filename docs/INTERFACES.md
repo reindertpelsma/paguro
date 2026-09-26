@@ -379,7 +379,7 @@ this machine any more", and whoever makes it match again clears it:
 |---|---|---|
 | TPM rung fails its policy (PCRs moved) | loader | set |
 | Windows sees the flag, stages `setupTPM`, reboots into Linux | Windows tool | cleared when staging |
-| a `passphrase`-rung boot whose initrd re-seals against this boot's PCR values (handoff `PCRS`) and writes the new `tpm_seal.bin` (§8.3; a `recovery`-rung boot never types a PIN, so it has nothing to re-derive the `tpm` rung's `auth` from and cannot clear it by itself) | initrd | cleared after the file is written |
+| a `passphrase`- or `recovery`-rung boot whose initrd reads `tpm-auth.bin` (§8.4) off the NTFS volume, re-seals against this boot's PCR values (handoff `PCRS`) and writes the new `tpm_seal.bin` (§8.3) — no PIN is typed for this any more, so `recovery` clears it exactly as `passphrase` does; a boot that cannot read the file (Windows never wrote one, or it is malformed) leaves the flag set | initrd | cleared after the file is written |
 | a boot whose TPM rung succeeds **and its key opens the volume** (the FVEK unwrap confirms it; a successful unseal alone does not) | loader | cleared, read first so a normal boot writes nothing |
 
 A successful boot alone does not clear it: only a seal that matches again
@@ -451,19 +451,8 @@ record   type u16 | len u32 | value[len]        (no padding)
 | 9 | `STATE` | flags u32: 1 = hibernation image, 2 = dirty bit, 4 = config unverified (also: Secure Boot off, first boot), 8 = recovery path | 1 |
 | 10 | `RUNG` | u8: 1 tpm, 2 setuptpm, 3 passphrase, 4 recovery, 5 pin bypass, 6 bootstrap, 7 clear key (BitLocker suspended), 8 unencrypted volume, 9 BitLocker password protector | 1 |
 | 11 | `PROVISION` | sealed object, wrapped VMK, salt (as the tpm seal body), sealed against the load taint of the `CONFIG` the loader authored on this boot | 0–1 |
-| 12 | `USER_HASH` | `kdf::user_password_hash(pw)`, 32 bytes | 0–1: only on a `passphrase`-rung boot |
 
 Unknown type → refuse. Duplicate of a type that occurs at most once → refuse.
-
-`USER_HASH` lets Linux re-seal the `tpm` rung after `PaguroTpmBroken` (§5,
-§8.3) with the same `auth` a future `tpm`-rung boot will derive from the same
-passphrase. Forwarded **only** on the `passphrase` rung: that rung's own
-`env` is already a public constant (DESIGN.md §6), so a compromised Linux
-process reading the handoff learns nothing an attacker with ESP + raw-disk
-access could not already use for the same offline dictionary attack. Never
-forwarded on `tpm`, `recovery` or any other rung — `recovery` in particular
-never types a PIN, so there is no value to forward and no re-seal it can
-trigger by itself (§5).
 
 `IMAGE` gives the file's identity; it never gives its location. Only the chosen
 entry's files are forwarded; the whole verified configuration travels in
@@ -533,11 +522,70 @@ A re-seal also needs the encrypted FVEK blob (DESIGN.md §6, "The Linux-side
 seal" — an input to `root_gate`, unchanged by a re-seal): read from the raw
 BitLocker FVE metadata, not carried in the handoff (it is not a secret, and
 Linux can read it directly off the volume — DESIGN.md §6, "Reading a
-BitLocker volume"). As of this writing the parser that reads it
-(`paguro-boot::bde`) is private to the loader crate; `paguro-initrd` does not
-yet have its own reader, so it skips a re-seal it cannot complete rather than
-duplicate that parser's offsets unverified (`crates/paguro-initrd/README.md`
-has the fuller account).
+BitLocker volume"), over `paguro_core::bde` — the pure, already
+libbde/dislocker-verified parser both `paguro-boot` and `paguro-initrd` share
+(`paguro-boot`'s own `bde.rs` is a `Platform`-coupled crypto/join layer over
+it, not the parser itself, so this reuses the parser without duplicating its
+offsets).
+
+A re-seal's last input, the salted, stretched passphrase hash (`auth`
+material), no longer comes from the handoff at all: see §8.4.
+
+### 8.4 The Windows-written TPM auth file
+
+`%ProgramData%\paguro\<volume-guid>\tpm-auth.bin` — not part of the handoff,
+not on the ESP; a small file on `C:` itself, read by Linux through the same
+read-only ntfs3 mount `paguro-initrd` already opens to probe the boot
+images (`crates/paguro-initrd/src/setup.rs`'s `probe_ntfs`). It carries what
+a `PaguroTpmBroken` re-seal (§5, §8.3) needs
+from the passphrase, without either typing a PIN at that boot or handing
+Linux the passphrase's raw hash:
+
+```text
+magic "PGTPMA\0\x01" | salt[16] | value[32]
+```
+
+`value` is `bitlocker_stretch(user_password_hash(pw), salt,
+STRETCH_ITERATIONS)` — `paguro-win`'s `keys::pass_hash`, exactly the value
+`Machine::stretch` computes on the loader side (§7) — never the raw
+`user_password_hash(pw)`. `salt` is carried unchanged into the new
+`tpm_seal.bin`, so a later `tpm`-rung boot reproduces `value` by stretching
+the same passphrase with that same salt; a re-seal derives the TPM object's
+`authValue` from `value` (`paguro_crypto::tpm_auth`) and reuses `value`
+directly as `derive_vmk`'s wrapping key, without stretching anything itself.
+
+**Why the stretched value, not the raw hash:** `C:` is BitLocker-encrypted
+at rest, so a stolen, powered-off machine cannot read this file at all.
+Restricting even an *unlocked* machine's Administrators to read costs a
+live-admin reader the same 2^20-round stretch an offline attacker already
+pays against `tpm_seal.bin`'s own salt — the file buys no cheaper
+dictionary attack against the passphrase than the seal it sits beside
+already exposes.
+
+**Written by:** the Windows tool, whenever it re-prepares the loader's seal
+material from a freshly typed passphrase (`paguro stage-setup`, called by
+`restart-linux`/`repair` when a TPM failure is predicted or reported —
+DESIGN.md §4.6, INTERFACES.md §11.2) — the same passphrase entry and salt draw that produce the
+one-shot `setuptpm_seal.bin`, so a standing `tpm`-rung re-seal is prepared
+alongside the fallback rung, not only after it. **ACL:** SYSTEM full
+control; Administrators read and delete only (not write); nobody else; not
+inherited. Administrators keep delete so uninstall's ordinary recursive
+`%ProgramData%\paguro` sweep (`crates/paguro-win/src/cmd/uninstall.rs`,
+`remove_tree_or_later`) still removes it — no special-cased removal step
+exists or is needed.
+
+**Read by:** `paguro-initrd`'s `esp::maybe_reseal`, only on a `passphrase`-
+or `recovery`-rung boot (§5's lifecycle row); absent or malformed (parse
+error, wrong magic or length) is logged and skipped, never a boot failure —
+`PaguroTpmBroken` stays set for a later boot to retry. `salt` and `value`
+are copied into a zeroize-on-drop `Secret32` (`crate::setup::Taken::win_auth`,
+matching `B` and the VMK's own discipline) and dropped as soon as the
+re-seal attempt, successful or not, is over.
+
+**Rewritten:** every time `stage-setup` runs (a fresh salt each time, since
+`setuptpm_seal.bin` also gets one). **Deleted:** by uninstall, as part of
+the existing `%ProgramData%\paguro` sweep — nothing paguro-specific to wire
+in beyond the ACL letting that sweep succeed.
 
 ## 9. Bootstrap — DRAFT
 

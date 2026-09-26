@@ -280,6 +280,11 @@ pub trait WinApi {
     fn read_file_at(&self, path: &str, offset: u64, len: usize) -> ApiResult<Vec<u8>>;
     /// Create or truncate, write, flush to disk.
     fn write_file(&self, path: &str, data: &[u8]) -> ApiResult<()>;
+    /// Like [`WinApi::write_file`], but the file is created (or replaced)
+    /// with `sddl` as its security descriptor instead of inheriting the
+    /// parent directory's — for a file the tool wants readable by fewer
+    /// principals than everything else it writes (`tpm_auth`).
+    fn write_protected_file(&self, path: &str, data: &[u8], sddl: &str) -> ApiResult<()>;
     /// Replace `to` if it exists, write-through.
     fn rename(&self, from: &str, to: &str) -> ApiResult<()>;
     /// `Ok(false)`: was not there.

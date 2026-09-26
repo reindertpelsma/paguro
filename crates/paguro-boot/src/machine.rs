@@ -1869,13 +1869,6 @@ impl<P: Platform, V: Volume<P>> Machine<'_, P, V> {
             state: self.st.flags,
             rung,
             provision,
-            // Only the passphrase rung: its own `env` is already a public
-            // constant, so this adds no exposure beyond what that rung
-            // already accepts (DESIGN.md §6). Lets Linux re-seal the `tpm`
-            // rung after `PaguroTpmBroken` (INTERFACES.md §5, §8.3).
-            user_hash: (rung == Rung::Passphrase)
-                .then_some(self.st.user_hash.as_ref())
-                .flatten(),
         };
         handoff::encode(&h, out).map_err(BootError::Handoff)
     }

@@ -16,7 +16,7 @@ use std::ffi::c_void;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::windows::fs::{FileExt, MetadataExt, OpenOptionsExt};
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 
@@ -30,17 +30,23 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_CALL_NOT_IMPLEMENTED, ERROR_ENVVAR_NOT_FOUND,
     ERROR_FILE_NOT_FOUND, ERROR_HANDLE_EOF, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_FUNCTION,
     ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND,
-    ERROR_PRIVILEGE_NOT_HELD, ERROR_SUCCESS, GetLastError, HANDLE, LUID, MAX_PATH, WIN32_ERROR,
+    ERROR_PRIVILEGE_NOT_HELD, ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL, LUID, LocalFree,
+    MAX_PATH, WIN32_ERROR,
+};
+use windows::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
 use windows::Win32::Security::{
-    AdjustTokenPrivileges, GetTokenInformation, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
-    TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenElevation,
+    AdjustTokenPrivileges, GetTokenInformation, LookupPrivilegeValueW, PSECURITY_DESCRIPTOR,
+    SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION,
+    TOKEN_PRIVILEGES, TOKEN_QUERY, TokenElevation,
 };
 use windows::Win32::Storage::FileSystem::{
     BusTypeAta, BusTypeFileBackedVirtual, BusTypeMmc, BusTypeNvme, BusTypeRAID, BusTypeSCM,
     BusTypeSas, BusTypeSata, BusTypeScsi, BusTypeSd, BusTypeSpaces, BusTypeUfs, BusTypeUsb,
-    BusTypeVirtual, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    BusTypeVirtual, CREATE_ALWAYS, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileIdInfo, FileStandardInfo, FindFirstVolumeW,
     FindNextVolumeW, FindVolumeClose, GetDiskFreeSpaceExW, GetDiskFreeSpaceW,
     GetFileInformationByHandleEx, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
@@ -569,6 +575,50 @@ impl WinApi for RealApi {
 
     fn write_file(&self, path: &str, data: &[u8]) -> ApiResult<()> {
         let mut f = fs::File::create(path).map_err(|e| io_err("CreateFileW", path, e))?;
+        f.write_all(data)
+            .map_err(|e| io_err("WriteFile", path, e))?;
+        f.sync_all()
+            .map_err(|e| io_err("FlushFileBuffers", path, e))
+    }
+
+    fn write_protected_file(&self, path: &str, data: &[u8], sddl: &str) -> ApiResult<()> {
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: out-pointer to a local; freed below, whichever way this
+        // function returns.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                &HSTRING::from(sddl),
+                SDDL_REVISION_1,
+                &mut sd,
+                None,
+            )
+        }
+        .map_err(|e| win_err("ConvertStringSecurityDescriptorToSecurityDescriptorW", e))?;
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd.0,
+            bInheritHandle: false.into(),
+        };
+        // SAFETY: `sa` is valid for the call; the handle it returns is ours,
+        // closed by `File` on drop.
+        let h = unsafe {
+            CreateFileW(
+                &wide(path),
+                (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+                FILE_SHARE_READ,
+                Some(&sa),
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+        };
+        // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
+        unsafe {
+            LocalFree(Some(HLOCAL(sd.0)));
+        }
+        let h = h.map_err(|e| win_err("CreateFileW", e))?;
+        // SAFETY: `h` is a valid, owned file handle; `File` closes it on drop.
+        let mut f = unsafe { fs::File::from_raw_handle(h.0) };
         f.write_all(data)
             .map_err(|e| io_err("WriteFile", path, e))?;
         f.sync_all()

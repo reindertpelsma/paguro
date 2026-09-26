@@ -19,11 +19,15 @@
 //! - `B` and this boot's recorded PCR 0/2/4/7 — already in the handoff.
 //! - the BitLocker Volume Master Key (`VMK`) — already in the handoff (§8,
 //!   type 2), just not previously retained by [`crate::setup::take`].
-//! - the Linux password's fast hash (`user_hash`) — added to the handoff
-//!   (type 12, `USER_HASH`), forwarded **only** on a `passphrase`-rung boot,
-//!   since that rung's own `env` is already a public constant (DESIGN.md
-//!   §6): a compromised Linux process able to read the handoff learns
-//!   nothing it could not already reach with ESP + raw-disk access alone.
+//! - the salted, stretched passphrase hash (`ph`) and the salt it was
+//!   stretched with — read from `tpm-auth.bin` on the NTFS volume
+//!   (`%ProgramData%\paguro\<volume-guid>\tpm-auth.bin`, INTERFACES.md
+//!   §8.4), written by the Windows tool whenever it re-prepares the
+//!   loader's seal material, through the read-only ntfs3 mount
+//!   [`crate::setup::probe_ntfs`] already opens. Never the raw password
+//!   hash: the file holds only what `bitlocker_stretch` already produces,
+//!   so reading it costs exactly the same 2^20-round stretch an offline
+//!   attacker already pays against `tpm_seal.bin`'s own salt.
 //! - the encrypted FVEK blob (BitLocker's own AES-CCM-wrapped key, an input
 //!   to `root_gate` that never changes on this volume) — read from the raw
 //!   partition's FVE metadata by `crate::esp::fvek_blob`, over the same
@@ -31,11 +35,13 @@
 //!   (`paguro_core::bde::{cross_check, Metadata}`), not a reimplementation
 //!   of its offsets.
 //!
-//! A boot with none of these (a `recovery`-rung boot: no PIN is typed, so
-//! there is no `user_hash` anywhere, and recovery never parses
-//! `paguro.ini`, so there is no PCR 12 either) cannot re-seal automatically;
+//! No PIN is typed for any of this any more, so a `recovery`-rung boot can
+//! re-seal exactly as a `passphrase`-rung one can. A boot that cannot read
+//! `tpm-auth.bin` (Windows never wrote one, the NTFS volume is not BitLocker
+//! at all, or the file is malformed), or whose `CONFIG` is missing so there
+//! is no PCR 12 to seal against, cannot re-seal automatically;
 //! [`crate::setup`] logs why and leaves `PaguroTpmBroken` set for a later
-//! `passphrase`- or `tpm`-rung boot to clear.
+//! boot to clear.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -137,7 +143,15 @@ pub enum ResealError {
 pub struct ResealInput<'a> {
     pub b: &'a [u8; 32],
     pub vmk: &'a [u8; 32],
-    pub user_hash: &'a [u8; 32],
+    /// The salted, stretched passphrase hash from `tpm-auth.bin`
+    /// (`bitlocker_stretch(user_password_hash(pw), salt, STRETCH_ITERATIONS)`,
+    /// exactly what `Machine::stretch` computes on the loader side) — not
+    /// the raw password hash, and not re-stretched here.
+    pub ph: &'a [u8; 32],
+    /// The same salt `ph` was stretched with; carried into the new seal
+    /// unchanged, so a future `tpm`-rung boot reproduces `ph` from the same
+    /// passphrase and this salt.
+    pub salt: &'a [u8; 16],
     /// BitLocker's encrypted FVEK blob (nonce ‖ tag ‖ ciphertext,
     /// `crate::esp::fvek_blob`): an input to `root_gate`, unchanged by this
     /// re-seal.
@@ -147,7 +161,7 @@ pub struct ResealInput<'a> {
 }
 
 /// Seal a fresh `D'` under a policy over `input`'s PCR values, with `auth`
-/// derived from `input.user_hash` exactly as the loader will at the next
+/// derived from `input.ph` exactly as the loader will at the next
 /// `tpm`-rung boot, and wrap the current `VMK` under the matching key.
 /// Returns the whole `tpm_seal.bin` file (magic included).
 pub fn reseal<P: Platform>(
@@ -163,23 +177,21 @@ pub fn reseal<P: Platform>(
     ];
     let policy = policy_digest(seal::PCR_MASK_V1, &pcrs, None);
 
-    let mut salt = [0u8; seal::SALT_LEN];
-    p.random(&mut salt)
-        .map_err(|e| ResealError::Tpm(TpmFail::Platform(e)))?;
+    // `ph` was stretched against `input.salt`, not drawn fresh here: the new
+    // seal must carry that same salt so a future `tpm`-rung boot's own
+    // `stretch(typed_pin, seal.salt)` reproduces `input.ph` exactly.
+    let salt = *input.salt;
     let mut d = [0u8; 32];
     p.random(&mut d)
         .map_err(|e| ResealError::Tpm(TpmFail::Platform(e)))?;
 
-    let mut ph =
-        paguro_crypto::bitlocker_stretch(input.user_hash, &salt, paguro_crypto::STRETCH_ITERATIONS);
-    let mut auth = paguro_crypto::tpm_auth(&ph);
+    let mut auth = paguro_crypto::tpm_auth(input.ph);
 
     let mut created = Box::new(CreatedObject::new());
     let r = Tpm::new(p).create_sealed(&auth, &d, &policy, &mut created);
     auth.zeroize();
     if let Err(e) = r {
         d.zeroize();
-        ph.zeroize();
         return Err(ResealError::Tpm(e));
     }
 
@@ -187,9 +199,8 @@ pub fn reseal<P: Platform>(
     d.zeroize();
     let mut root_gate = paguro_crypto::root_gate(&env, &salt, input.blob);
     env.zeroize();
-    let mut key = paguro_crypto::final_key(&root_gate, &ph);
+    let mut key = paguro_crypto::final_key(&root_gate, input.ph);
     root_gate.zeroize();
-    ph.zeroize();
     let mut wrapped = paguro_crypto::xor32(&key, input.vmk);
     key.zeroize();
 
@@ -417,7 +428,8 @@ mod tests {
         let input = ResealInput {
             b: &[0x11; 32],
             vmk: &[0x22; 32],
-            user_hash: &[0x33; 32],
+            ph: &[0x33; 32],
+            salt: &[0x44; 16],
             blob: b"encrypted-fvek-blob-stand-in",
             pcr0247: &pcr0247,
             pcr12: pcr12_after_load_taint(ini),
@@ -426,16 +438,16 @@ mod tests {
         let file = reseal(&mut t, &input).unwrap();
         let parsed = seal::read(Kind::Tpm, &file).unwrap();
         assert_eq!(parsed.pcrs, Some(SealPcrs::V1));
+        assert_eq!(
+            parsed.salt, input.salt,
+            "the new seal carries the salt `ph` was already stretched with, not a fresh one"
+        );
 
         // The loader's own unseal recomputes the policy internally
         // (PolicyPCR over the live registers): accepting the object proves
         // the template and policy match, without re-deriving it by hand.
         let sealed = parsed.sealed.unwrap();
-        let auth = paguro_crypto::tpm_auth(&paguro_crypto::bitlocker_stretch(
-            input.user_hash,
-            parsed.salt,
-            paguro_crypto::STRETCH_ITERATIONS,
-        ));
+        let auth = paguro_crypto::tpm_auth(input.ph);
         let mut d = [0u8; 32];
         paguro_boot::tpm::Tpm::new(&mut t)
             .unseal(
@@ -452,12 +464,7 @@ mod tests {
         // known (mirrors the loader's `derive_vmk`).
         let env = paguro_crypto::env_tpm(input.b, &d);
         let root_gate = paguro_crypto::root_gate(&env, parsed.salt, input.blob);
-        let ph = paguro_crypto::bitlocker_stretch(
-            input.user_hash,
-            parsed.salt,
-            paguro_crypto::STRETCH_ITERATIONS,
-        );
-        let key = paguro_crypto::final_key(&root_gate, &ph);
+        let key = paguro_crypto::final_key(&root_gate, input.ph);
         let vmk = paguro_crypto::xor32(&key, parsed.wrapped_vmk);
         assert_eq!(&vmk, input.vmk, "the loader's unseal path recovers our VMK");
     }
@@ -470,7 +477,8 @@ mod tests {
         let input = ResealInput {
             b: &[1; 32],
             vmk: &[2; 32],
-            user_hash: &[3; 32],
+            ph: &[3; 32],
+            salt: &[4; 16],
             blob: b"blob",
             pcr0247: &[[9; 32]; 4],
             pcr12: [9; 32],
@@ -478,11 +486,7 @@ mod tests {
         let file = reseal(&mut t, &input).unwrap();
         let parsed = seal::read(Kind::Tpm, &file).unwrap();
         let sealed = parsed.sealed.unwrap();
-        let auth = paguro_crypto::tpm_auth(&paguro_crypto::bitlocker_stretch(
-            input.user_hash,
-            parsed.salt,
-            paguro_crypto::STRETCH_ITERATIONS,
-        ));
+        let auth = paguro_crypto::tpm_auth(input.ph);
         let mut d = [0u8; 32];
         let e = paguro_boot::tpm::Tpm::new(&mut t)
             .unseal(

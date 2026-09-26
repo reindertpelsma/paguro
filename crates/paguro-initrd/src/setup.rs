@@ -105,13 +105,24 @@ impl core::ops::Deref for Secret32 {
     }
 }
 
+/// The salted, stretched passphrase hash Windows wrote to
+/// `%ProgramData%\paguro\<volume-guid>\tpm-auth.bin` (`paguro_core::tpm_auth`),
+/// read from the NTFS volume through the same read-only ntfs3 mount
+/// `probe_ntfs` already opens. Kept only for a possible re-seal
+/// (INTERFACES.md §8.3, §8.4; `crate::reseal`), zeroized once the attempt
+/// (successful or not) is over.
+pub struct WinAuth {
+    pub salt: [u8; 16],
+    pub value: Secret32,
+}
+
 /// What this boot needs from the handoff, copied out so the blob itself
 /// can be wiped at once. The FVEK is kept until the crypt table is loaded;
-/// `b`, `vmk` and `user_hash` are kept for a possible re-seal (INTERFACES.md
-/// §8.3, §5 `PaguroTpmBroken`; `crate::reseal`) and zeroized at the end of
-/// `run` either way — `esp::maybe_reseal` also drops its own borrows of them
-/// as soon as the attempt (successful or not) is over, rather than holding
-/// them for the rest of the process.
+/// `b` and `vmk` are kept for a possible re-seal (INTERFACES.md §8.3, §5
+/// `PaguroTpmBroken`; `crate::reseal`) and zeroized at the end of `run`
+/// either way — `esp::maybe_reseal` also drops its own borrows of them (and
+/// of `win_auth`) as soon as the attempt (successful or not) is over, rather
+/// than holding them for the rest of the process.
 pub struct Taken {
     pub volume: handoff::Volume,
     pub fvek: Option<(u16, Zeroizing<Vec<u8>>)>,
@@ -130,9 +141,10 @@ pub struct Taken {
     /// BitLocker's Volume Master Key (handoff `VMK`), absent for an
     /// unencrypted volume.
     pub vmk: Option<Secret32>,
-    /// `kdf::user_password_hash(pw)` (handoff `USER_HASH`), present only on
-    /// a `passphrase`-rung boot.
-    pub user_hash: Option<Secret32>,
+    /// Read from `tpm-auth.bin` on the NTFS volume during `boot`'s ntfs3
+    /// mount (`probe_ntfs`); `None` until then, and also when the file is
+    /// absent, malformed, or the volume is not BitLocker-encrypted.
+    pub win_auth: Option<WinAuth>,
 }
 
 /// Read the handoff once, decode it, copy out what is needed, wipe it.
@@ -188,7 +200,7 @@ pub fn take(path: &Path) -> R<Taken> {
         provision,
         b: Secret32::new(*h.b),
         vmk: h.vmk.map(|k| Secret32::new(*k)),
-        user_hash: h.user_hash.map(|k| Secret32::new(*k)),
+        win_auth: None,
     };
     if let Some((_, k)) = &t.fvek {
         sys::mlock(k);
@@ -410,7 +422,8 @@ fn boot(t: &mut Taken, opts: &Opts) -> R<()> {
         .iter()
         .filter(|i| i.role != Role::EfiFile)
         .collect();
-    let probes = probe_ntfs(&dm, &plain, &claimable)?;
+    let (probes, win_auth) = probe_ntfs(&dm, &plain, &claimable, &t.volume.partition)?;
+    t.win_auth = win_auth;
 
     // 4. Claims and cross-checks: FIEMAP can only subtract.
     let mut root_view = None;
@@ -510,7 +523,12 @@ struct Probe {
     extents: Vec<(u64, u64)>,
 }
 
-fn probe_ntfs(dm: &Dm, plain: &Path, imgs: &[&Image]) -> R<Vec<Probe>> {
+fn probe_ntfs(
+    dm: &Dm,
+    plain: &Path,
+    imgs: &[&Image],
+    volume: &Guid,
+) -> R<(Vec<Probe>, Option<WinAuth>)> {
     let f = File::open(plain).map_err(|e| format!("{}: {e}", plain.display()))?;
     let (bytes, _) = sys::blk_geometry(&f)?;
     drop(f);
@@ -540,13 +558,45 @@ fn probe_ntfs(dm: &Dm, plain: &Path, imgs: &[&Image]) -> R<Vec<Probe>> {
             for img in imgs {
                 out.push(probe_file(&root, &mnt, img)?);
             }
-            Ok(out)
+            let auth = read_win_auth(&mnt, volume);
+            Ok((out, auth))
         })();
         let _ = sys::umount(&mnt);
         r
     })();
     let _ = dm.remove(&alias.name);
     r
+}
+
+/// `%ProgramData%\paguro\<volume-guid>\tpm-auth.bin` (INTERFACES.md §8.4),
+/// read while `mnt` (the read-only ntfs3 mount) is still up. Absent or
+/// malformed: logs why and returns `None` — never fails the boot, and never
+/// the whole `probe_ntfs` (a missing file is the common case: most boots
+/// carry no `PaguroTpmBroken` re-seal to do).
+fn read_win_auth(mnt: &Path, volume: &Guid) -> Option<WinAuth> {
+    let path = mnt
+        .join("ProgramData")
+        .join("paguro")
+        .join(volume.to_string())
+        .join(paguro_core::tpm_auth::FILE_NAME);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            log(&format!("{}: {e}", path.display()));
+            return None;
+        }
+    };
+    match paguro_core::tpm_auth::parse(&bytes) {
+        Ok(a) => Some(WinAuth {
+            salt: a.salt,
+            value: Secret32::new(a.value),
+        }),
+        Err(e) => {
+            log(&format!("{}: malformed ({e:?})", path.display()));
+            None
+        }
+    }
 }
 
 fn probe_file(root: &File, mnt: &Path, img: &Image) -> R<Probe> {
@@ -727,7 +777,8 @@ pub fn systab() -> R<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::Secret32;
+    use super::{Secret32, read_win_auth};
+    use paguro_core::guid::Guid;
 
     /// `Secret32` really does zero its bytes when dropped, not only when
     /// asked (INTERFACES.md §8.3, "nothing is written ... in the clear" —
@@ -747,5 +798,78 @@ mod tests {
         // `zeroize` crate's own tests use the same pattern).
         let after = unsafe { std::slice::from_raw_parts(ptr, 32) };
         assert_eq!(after, [0u8; 32], "Secret32 must zeroize on drop");
+    }
+
+    /// A scratch directory standing in for the ntfs3 mount root
+    /// (`read_win_auth` only ever takes a `&Path`, so a plain temp dir
+    /// exercises it exactly as the real mount would).
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "paguro-initrd-winauth-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A well-formed `tpm-auth.bin` at the path Windows writes it to is
+    /// read back with the same salt and value.
+    #[test]
+    fn present_and_well_formed_is_read() {
+        let mnt = scratch("ok");
+        let volume = Guid([7; 16]);
+        let dir = mnt
+            .join("ProgramData")
+            .join("paguro")
+            .join(volume.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = paguro_core::tpm_auth::TpmAuth {
+            salt: [0x11; 16],
+            value: [0x22; 32],
+        };
+        let mut buf = [0u8; paguro_core::tpm_auth::LEN];
+        let n = paguro_core::tpm_auth::write(&a, &mut buf).unwrap();
+        std::fs::write(
+            dir.join(paguro_core::tpm_auth::FILE_NAME),
+            buf.get(..n).unwrap_or(&[]),
+        )
+        .unwrap();
+
+        let got = read_win_auth(&mnt, &volume).expect("file present and well-formed");
+        assert_eq!(got.salt, a.salt);
+        assert_eq!(*got.value, a.value);
+        let _ = std::fs::remove_dir_all(&mnt);
+    }
+
+    /// No file at all (the common case: most boots carry no
+    /// `PaguroTpmBroken` re-seal to do) is `None`, not an error.
+    #[test]
+    fn absent_is_none() {
+        let mnt = scratch("absent");
+        let volume = Guid([8; 16]);
+        assert!(read_win_auth(&mnt, &volume).is_none());
+        let _ = std::fs::remove_dir_all(&mnt);
+    }
+
+    /// Garbage in place of the file is also `None` (logged, never a panic
+    /// or a boot failure).
+    #[test]
+    fn malformed_is_none() {
+        let mnt = scratch("malformed");
+        let volume = Guid([9; 16]);
+        let dir = mnt
+            .join("ProgramData")
+            .join("paguro")
+            .join(volume.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(paguro_core::tpm_auth::FILE_NAME),
+            b"not a tpm-auth file",
+        )
+        .unwrap();
+        assert!(read_win_auth(&mnt, &volume).is_none());
+        let _ = std::fs::remove_dir_all(&mnt);
     }
 }

@@ -237,19 +237,22 @@ fn fvek_blob(part: &Path, layout: &FveLayout) -> R<Vec<u8>> {
 }
 
 /// Whether this boot can even attempt a re-seal, and why not otherwise
-/// (INTERFACES.md §5, §8.3). Only a `passphrase`-rung boot carries the
-/// passphrase-derived material (`USER_HASH`) a re-seal needs; `recovery`
-/// never does (no PIN is typed), so it always falls through to the second
-/// arm — pure, so it is tested without a handoff or a TPM.
+/// (INTERFACES.md §5, §8.3). No PIN is typed for this any more — the `tpm`
+/// rung's auth material comes from `tpm-auth.bin` on the NTFS volume
+/// (§8.4), not from anything the loader forwards — so a `recovery`-rung
+/// boot is as able to re-seal as a `passphrase`-rung one; only rungs that
+/// never reach a normal Linux boot with that file readable are excluded
+/// (`tpm` itself would have cleared the flag on success; the one-shot rungs
+/// exist for a single provisioning or repair boot, not standing use). Pure,
+/// so it is tested without a handoff, a TPM or a real NTFS mount.
 fn reseal_readiness(rung: Rung, have_secrets: bool, have_layout: bool) -> Result<(), &'static str> {
-    if rung != Rung::Passphrase {
+    if !matches!(rung, Rung::Passphrase | Rung::RecoveryKey) {
         return Err(
-            "this boot's rung carries no passphrase to re-derive the tpm rung's auth from \
-             (needs a passphrase-rung boot)",
+            "this boot's rung is not one that re-seals (needs a passphrase- or recovery-rung boot)",
         );
     }
     if !have_secrets {
-        return Err("VMK/USER_HASH/CONFIG are not all present in the handoff");
+        return Err("VMK/tpm-auth.bin/CONFIG are not all present");
     }
     if !have_layout {
         return Err("no FVE_LAYOUT in the handoff (an unencrypted volume takes no tpm seal)");
@@ -269,14 +272,14 @@ fn finish_reseal(file: &[u8], write: impl FnOnce(&[u8]) -> R<bool>, clear: impl 
 }
 
 /// [`maybe_reseal_attempt`], then drops this boot's copies of the VMK and
-/// `USER_HASH` regardless of the outcome: `maybe_reseal` runs at most once a
-/// boot, so there is no reason to hold them any longer, let alone to
-/// process exit (`B` stays — §8.3 keeps it for the session, in case a later
-/// process needs it).
+/// the Windows-written auth material regardless of the outcome:
+/// `maybe_reseal` runs at most once a boot, so there is no reason to hold
+/// them any longer, let alone to process exit (`B` stays — §8.3 keeps it for
+/// the session, in case a later process needs it).
 fn maybe_reseal(t: &mut Taken, vol: &Path, rec: &Recorded, part: &Path) {
     maybe_reseal_attempt(t, vol, rec, part);
     t.vmk = None;
-    t.user_hash = None;
+    t.win_auth = None;
 }
 
 /// Re-seal the `tpm` rung after `PaguroTpmBroken` (INTERFACES.md §5, §8.3),
@@ -288,14 +291,14 @@ fn maybe_reseal_attempt(t: &Taken, vol: &Path, rec: &Recorded, part: &Path) {
     if !tpm_broken() {
         return;
     }
-    let have_secrets = t.vmk.is_some() && t.user_hash.is_some() && t.config.is_some();
+    let have_secrets = t.vmk.is_some() && t.win_auth.is_some() && t.config.is_some();
     if let Err(why) = reseal_readiness(t.rung, have_secrets, t.layout.is_some()) {
         log(&format!("PaguroTpmBroken set, but {why}; skipping"));
         return;
     }
     // `reseal_readiness` just confirmed all four are present.
-    let (Some(vmk), Some(user_hash), Some(cfg), Some(layout)) =
-        (&t.vmk, &t.user_hash, &t.config, t.layout)
+    let (Some(vmk), Some(win_auth), Some(cfg), Some(layout)) =
+        (&t.vmk, &t.win_auth, &t.config, t.layout)
     else {
         return;
     };
@@ -309,7 +312,8 @@ fn maybe_reseal_attempt(t: &Taken, vol: &Path, rec: &Recorded, part: &Path) {
     let input = ResealInput {
         b: t.b.as_bytes(),
         vmk: vmk.as_bytes(),
-        user_hash: user_hash.as_bytes(),
+        ph: win_auth.value.as_bytes(),
+        salt: &win_auth.salt,
         blob: &blob,
         pcr0247: &rec.pcrs,
         pcr12: pcr12_after_load_taint(cfg),
@@ -409,16 +413,17 @@ mod tests {
     use std::cell::RefCell;
 
     #[test]
-    fn only_a_passphrase_rung_with_every_secret_is_ready() {
-        assert_eq!(
-            reseal_readiness(Rung::Passphrase, true, true),
-            Ok(()),
-            "the one case a re-seal can proceed"
-        );
+    fn passphrase_and_recovery_rungs_with_every_secret_are_ready() {
+        for rung in [Rung::Passphrase, Rung::RecoveryKey] {
+            assert_eq!(
+                reseal_readiness(rung, true, true),
+                Ok(()),
+                "{rung:?}: no PIN is needed any more, so this rung can re-seal too"
+            );
+        }
         for rung in [
             Rung::Tpm,
             Rung::SetupTpm,
-            Rung::RecoveryKey,
             Rung::PinBypass,
             Rung::Bootstrap,
             Rung::ClearKey,
@@ -427,7 +432,7 @@ mod tests {
         ] {
             assert!(
                 reseal_readiness(rung, true, true).is_err(),
-                "{rung:?} carries no passphrase"
+                "{rung:?} does not reach a standing re-seal"
             );
         }
         assert!(reseal_readiness(Rung::Passphrase, false, true).is_err());
