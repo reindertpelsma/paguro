@@ -30,6 +30,10 @@
 //! paguro-vm identity [--system-partition NAME]      what would be passed through
 //! paguro-vm qmp --socket S JSON...                  QMP commands (tests, diagnostics)
 //! paguro-vm windows-provision [--mac MAC]           the guest's link script
+//! paguro-vm windows-rdp-setup                        the guest's RDP/RemoteApp script
+//! paguro-vm rdp --user U --cert-fingerprint FP [--app PROGRAM] [--home DIR]
+//!              [--addr HOST[:PORT]] [--client EXE] [--password-stdin]
+//!     FreeRDP to the VM (desktop, or one program as RemoteApp)
 //! paguro-vm smb-conf --root DIR --state DIR         the netns Samba's smb.conf
 //! paguro-vm samba --root DIR --state DIR --secret-file F   L: over the link
 //! paguro-vm mount-c --target DIR --secret-file F [--uid N --gid N]
@@ -329,6 +333,63 @@ fn main() {
                 }
             }
             print!("{}", net::windows_provision_ps1(&mac));
+        }
+        "windows-rdp-setup" => print!("{}", paguro_vm::rdp::windows_setup()),
+        "rdp" => {
+            // FreeRDP to the VM, as the desktop or one program (RemoteApp).
+            // The password comes from the keyring, or stdin with
+            // --password-stdin (tests); never from the command line.
+            let (mut user, mut app, mut fp, mut home) = (None, None, None, None);
+            let mut addr = paguro_vm::rdp::default_addr();
+            let mut from_stdin = false;
+            let mut client = "xfreerdp3".to_string();
+            while let Some(k) = a.it.next() {
+                match k.as_str() {
+                    "--user" => user = Some(a.val(&k)),
+                    "--app" => app = Some(a.val(&k)),
+                    "--cert-fingerprint" => fp = Some(a.val(&k)),
+                    "--home" => home = Some(a.val(&k)),
+                    "--addr" => addr = a.val(&k),
+                    "--client" => client = a.val(&k),
+                    "--password-stdin" => from_stdin = true,
+                    _ => usage(),
+                }
+            }
+            let user = user.unwrap_or_else(|| usage());
+            let fp = fp.unwrap_or_else(|| {
+                fail("--cert-fingerprint is required: RDP is never trusted on first use".into())
+            });
+            let view = match app {
+                Some(p) => {
+                    let name = std::path::Path::new(&p)
+                        .file_stem()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| p.clone());
+                    paguro_vm::rdp::View::RemoteApp { program: p, name }
+                }
+                None => paguro_vm::rdp::View::Desktop,
+            };
+            let secret = if from_stdin {
+                let mut s = String::new();
+                std::io::stdin()
+                    .read_line(&mut s)
+                    .unwrap_or_else(|e| fail(e.to_string()));
+                s.trim_end_matches(['\r', '\n']).to_string()
+            } else {
+                paguro_vm::rdp::lookup(&user, "rdp").unwrap_or_else(|e| fail(e))
+            };
+            let args = paguro_vm::rdp::freerdp_args(&addr, &user, &view, home.as_deref(), &fp);
+            let mut c = std::process::Command::new(&client)
+                .args(&args)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|e| fail(format!("{client}: {e}")));
+            if let Some(mut i) = c.stdin.take() {
+                use std::io::Write as _;
+                let _ = writeln!(i, "{secret}");
+            }
+            let st = c.wait().unwrap_or_else(|e| fail(e.to_string()));
+            std::process::exit(st.code().unwrap_or(1));
         }
         "smb-conf" => {
             let (mut root, mut state) = (None, None);

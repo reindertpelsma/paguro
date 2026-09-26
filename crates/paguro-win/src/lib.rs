@@ -30,4 +30,5 @@ pub mod preflight;
 #[cfg(windows)]
 pub mod real;
 pub mod rpc;
+pub mod tpm_auth;
 pub mod tpmwin;

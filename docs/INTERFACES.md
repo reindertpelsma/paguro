@@ -379,7 +379,7 @@ this machine any more", and whoever makes it match again clears it:
 |---|---|---|
 | TPM rung fails its policy (PCRs moved) | loader | set |
 | Windows sees the flag, stages `setupTPM`, reboots into Linux | Windows tool | cleared when staging |
-| a boot on another rung (passphrase, recovery) whose initrd re-seals against this boot's PCR values (handoff `PCRS`) and writes the new `tpm_seal.bin` | initrd | cleared after the file is written |
+| a `passphrase`- or `recovery`-rung boot whose initrd reads `tpm-auth.bin` (§8.4) off the NTFS volume, re-seals against this boot's PCR values (handoff `PCRS`) and writes the new `tpm_seal.bin` (§8.3) — no PIN is typed for this any more, so `recovery` clears it exactly as `passphrase` does; a boot that cannot read the file (Windows never wrote one, or it is malformed) leaves the flag set | initrd | cleared after the file is written |
 | a boot whose TPM rung succeeds **and its key opens the volume** (the FVEK unwrap confirms it; a successful unseal alone does not) | loader | cleared, read first so a normal boot writes nothing |
 
 A successful boot alone does not clear it: only a seal that matches again
@@ -490,6 +490,16 @@ module reads the extents itself (§10).
   `BootOrder` (kept if `BootOrder` cannot be read).
 - **Hash variable missing with Secure Boot on:** straight to recovery.
 - **GPT:** primary header only; entry array ≤ 16 KiB.
+- **Linux re-seal, PCR values:** the *recorded* ones (handoff `PCRS`, PCR
+  0/2/4/7) plus PCR 12 computed from the `CONFIG` the same handoff carried
+  (`pcr12_after_load_taint`) — never a live PCR read, which by the time
+  Linux runs no longer matches what the loader saw (DESIGN.md §6, "Changing
+  the PIN and firmware updates").
+- **Linux re-seal, the TPM conversation:** `paguro-initrd` reuses
+  `paguro-boot`'s own TPM client (`crates/paguro-boot/src/tpm.rs`) over
+  `/dev/tpmrm0`, the same way `paguro-win` reuses it over Windows' TBS — so
+  the object template, policy digest and session salting are the loader's,
+  not a second implementation of them.
 
 ### 8.2 Handoff driver — OPEN
 
@@ -498,12 +508,84 @@ exposes to the initrd (e.g. a read-once `/dev/paguro-handoff`).
 
 ### 8.3 What Linux keeps after the handoff
 
-The initrd zeroes the VMK and FVEK once dm-crypt is set up (the FVEK through a
-`logon` key invalidated after the table loads). **`B` and the PCR values are
-kept for re-sealing** (a PIN change from Linux, or re-sealing after a TPM
-failure — §5): `B` goes into a root-only `logon` key in the kernel keyring that
-lives for the session, read only by the re-seal tool; the PCR values are
-public and go into `recorded.bin`. Nothing is written to disk in the clear.
+The initrd zeroes the FVEK once dm-crypt is set up (through a `logon` key
+invalidated after the table loads). **`B`, the VMK and the PCR values are kept
+for re-sealing** (a PIN change from Linux, or re-sealing after a TPM failure —
+§5): `B` goes into a root-only, *session*-scoped `logon` key in the kernel
+keyring, so a re-seal tool started later in the same login session (not only
+`paguro-initrd` itself) can still reach it; the VMK is kept in process memory
+for the same boot's own re-seal attempt and zeroized when that process exits;
+the PCR values are public and go into `recorded.bin`. Nothing is written to
+disk in the clear.
+
+A re-seal also needs the encrypted FVEK blob (DESIGN.md §6, "The Linux-side
+seal" — an input to `root_gate`, unchanged by a re-seal): read from the raw
+BitLocker FVE metadata, not carried in the handoff (it is not a secret, and
+Linux can read it directly off the volume — DESIGN.md §6, "Reading a
+BitLocker volume"), over `paguro_core::bde` — the pure, already
+libbde/dislocker-verified parser both `paguro-boot` and `paguro-initrd` share
+(`paguro-boot`'s own `bde.rs` is a `Platform`-coupled crypto/join layer over
+it, not the parser itself, so this reuses the parser without duplicating its
+offsets).
+
+A re-seal's last input, the salted, stretched passphrase hash (`auth`
+material), no longer comes from the handoff at all: see §8.4.
+
+### 8.4 The Windows-written TPM auth file
+
+`%ProgramData%\paguro\<volume-guid>\tpm-auth.bin` — not part of the handoff,
+not on the ESP; a small file on `C:` itself, read by Linux through the same
+read-only ntfs3 mount `paguro-initrd` already opens to probe the boot
+images (`crates/paguro-initrd/src/setup.rs`'s `probe_ntfs`). It carries what
+a `PaguroTpmBroken` re-seal (§5, §8.3) needs
+from the passphrase, without either typing a PIN at that boot or handing
+Linux the passphrase's raw hash:
+
+```text
+magic "PGTPMA\0\x01" | salt[16] | value[32]
+```
+
+`value` is `bitlocker_stretch(user_password_hash(pw), salt,
+STRETCH_ITERATIONS)` — `paguro-win`'s `keys::pass_hash`, exactly the value
+`Machine::stretch` computes on the loader side (§7) — never the raw
+`user_password_hash(pw)`. `salt` is carried unchanged into the new
+`tpm_seal.bin`, so a later `tpm`-rung boot reproduces `value` by stretching
+the same passphrase with that same salt; a re-seal derives the TPM object's
+`authValue` from `value` (`paguro_crypto::tpm_auth`) and reuses `value`
+directly as `derive_vmk`'s wrapping key, without stretching anything itself.
+
+**Why the stretched value, not the raw hash:** `C:` is BitLocker-encrypted
+at rest, so a stolen, powered-off machine cannot read this file at all.
+Restricting even an *unlocked* machine's Administrators to read costs a
+live-admin reader the same 2^20-round stretch an offline attacker already
+pays against `tpm_seal.bin`'s own salt — the file buys no cheaper
+dictionary attack against the passphrase than the seal it sits beside
+already exposes.
+
+**Written by:** the Windows tool, whenever it re-prepares the loader's seal
+material from a freshly typed passphrase (`paguro stage-setup`, called by
+`restart-linux`/`repair` when a TPM failure is predicted or reported —
+DESIGN.md §4.6, INTERFACES.md §11.2) — the same passphrase entry and salt draw that produce the
+one-shot `setuptpm_seal.bin`, so a standing `tpm`-rung re-seal is prepared
+alongside the fallback rung, not only after it. **ACL:** SYSTEM full
+control; Administrators read and delete only (not write); nobody else; not
+inherited. Administrators keep delete so uninstall's ordinary recursive
+`%ProgramData%\paguro` sweep (`crates/paguro-win/src/cmd/uninstall.rs`,
+`remove_tree_or_later`) still removes it — no special-cased removal step
+exists or is needed.
+
+**Read by:** `paguro-initrd`'s `esp::maybe_reseal`, only on a `passphrase`-
+or `recovery`-rung boot (§5's lifecycle row); absent or malformed (parse
+error, wrong magic or length) is logged and skipped, never a boot failure —
+`PaguroTpmBroken` stays set for a later boot to retry. `salt` and `value`
+are copied into a zeroize-on-drop `Secret32` (`crate::setup::Taken::win_auth`,
+matching `B` and the VMK's own discipline) and dropped as soon as the
+re-seal attempt, successful or not, is over.
+
+**Rewritten:** every time `stage-setup` runs (a fresh salt each time, since
+`setuptpm_seal.bin` also gets one). **Deleted:** by uninstall, as part of
+the existing `%ProgramData%\paguro` sweep — nothing paguro-specific to wire
+in beyond the ACL letting that sweep succeed.
 
 ## 9. Bootstrap — DRAFT
 

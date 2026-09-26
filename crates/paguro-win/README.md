@@ -21,7 +21,7 @@ method of the Windows API (`rpc`, INTERFACES §11.7; the contract is
 [`paguro-service`](../paguro-service) serves it over `\\.\pipe\paguro`, and
 `paguro.exe` is a thin client of that service when it is installed, running
 the same method in-process otherwise (`--direct`). The PowerShell module and
-the GUI call the pipe too; nobody parses `--json` text. See [`docs/INTERFACES.md`](../../docs/INTERFACES.md) §11 and
+the GUI call the pipe too; nobody parses `--json` text. See [`docs/INTERFACES.md`](../../docs/INTERFACES.md) §8.4, §11 and
 [`docs/DESIGN.md`](../../docs/DESIGN.md) §4.6, §6b, §7.
 
 ## Modules
@@ -31,7 +31,7 @@ the GUI call the pipe too; nobody parses `--json` text. See [`docs/INTERFACES.md
 | OS boundary | `api`, `real`, `mock` | `WinApi` trait; Win32 implementation (Windows only); in-memory mock for any host |
 | API | `rpc`, `client` | the methods, their access and parameters, JSON-RPC shapes; the front end's stream transport |
 | CLI | `cli`, `cmd`, `ctx`, `out` | command line → request (direct or through the service), command logic, shared context, the `--json` envelope/exit codes |
-| on-disk state | `bootent`, `cfgfile`, `esp`, `journal` | `Boot####`/`BootNext`; `paguro.ini` read/edit/write with its hash; ESP files; resumable install/uninstall steps |
+| on-disk state | `bootent`, `cfgfile`, `esp`, `journal`, `tpm_auth` | `Boot####`/`BootNext`; `paguro.ini` read/edit/write with its hash; ESP files; resumable install/uninstall steps; `%ProgramData%\paguro\<volume-guid>\tpm-auth.bin` (INTERFACES.md §8.4) — the salted, stretched passphrase hash Linux needs to re-seal the `tpm` rung after `PaguroTpmBroken`, written by `stage-setup`, SYSTEM-owned with Administrators read/delete only |
 | keys & TPM | `keys`, `tpmwin` | key material from a logged-in session; the TPM via TBS, through the loader's own client |
 | WSL2/pre-flight | `hw`, `preflight` | `host-hardware.json` for the WSL2 installer; the check before "Restart into Linux" |
 | driver IPC | `fltmsg` | `\PaguroPort` messages, checked against the minifilter's own header so they can't drift |

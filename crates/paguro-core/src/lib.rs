@@ -52,4 +52,5 @@ pub mod seal;
 pub mod smbios;
 pub mod tcglog;
 pub mod tpm;
+pub mod tpm_auth;
 pub mod vhd;

@@ -24,6 +24,7 @@ use crate::esp::{self, FileState};
 use crate::keys;
 use crate::out::{At, CmdError, CmdResult, Exit, Report, guid_text, to_hex};
 use crate::preflight::{self, Action, Reason};
+use crate::tpm_auth;
 use crate::tpmwin;
 
 /// The setup secret S `env_setup` binds (INTERFACES.md §8.1): 256 bits.
@@ -462,11 +463,13 @@ pub fn stage(
         &esp::volume_dir(esp_vol, &e.volume),
         Kind::SetupTpm.file_name(),
     );
+    let auth_path = tpm_auth::path(ctx, &e.volume);
     let plan = json!({
         "volume": guid_text(&e.volume),
         "seal": seal_path,
         "variable": SETUP_VAR,
         "vmk_source": keys.source,
+        "tpm_auth": auth_path,
     });
     if ctx.dry_run {
         return Ok(plan);
@@ -491,6 +494,11 @@ pub fn stage(
     ctx.api
         .create_dir_all(&esp::volume_dir(esp_vol, &e.volume))?;
     esp::write_atomic(ctx.api, &seal_path, buf.get(..n).unwrap_or(&[]))?;
+    // The material a Linux re-seal of the *standing* `tpm` rung needs
+    // (INTERFACES.md §8.4), independent of the one-shot `setupTPM` seal
+    // above: the same freshly typed passphrase and salt, so
+    // `paguro-initrd` can rebuild `tpm_seal.bin` without a PIN of its own.
+    tpm_auth::write(ctx, &e.volume, &salt, &ph)?;
     // S last: a seal without S is inert, S without its seal is useless.
     ctx.api
         .fw_set(SETUP_VAR, &PAGURO_VENDOR, &s[..], attr::NV_BS_RT)?;

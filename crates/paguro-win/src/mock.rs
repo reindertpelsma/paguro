@@ -28,6 +28,9 @@ pub struct MockFile {
     /// `None`: one contiguous extent is synthesised.
     pub extents: Option<Extents>,
     pub file_id: [u8; 16],
+    /// `Some`: written through [`WinApi::write_protected_file`], the SDDL it
+    /// was given. `None`: an ordinary [`WinApi::write_file`].
+    pub acl: Option<String>,
 }
 
 impl MockFile {
@@ -557,6 +560,25 @@ impl WinApi for MockApi {
         self.files
             .borrow_mut()
             .insert(key(path), MockFile::new(data));
+        Ok(())
+    }
+
+    fn write_protected_file(&self, path: &str, data: &[u8], sddl: &str) -> ApiResult<()> {
+        let p = parent(path).unwrap_or_default();
+        if !self.dirs.borrow().contains(&p) {
+            return Err(ApiError::not_found(
+                "CreateFileW",
+                format!("{path}: no parent directory"),
+            ));
+        }
+        self.mutated(format!(
+            "write_protected {} {} ({sddl})",
+            key(path),
+            data.len()
+        ));
+        let mut f = MockFile::new(data);
+        f.acl = Some(sddl.to_string());
+        self.files.borrow_mut().insert(key(path), f);
         Ok(())
     }
 

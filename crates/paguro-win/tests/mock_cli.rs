@@ -864,6 +864,35 @@ fn stage_setup_wraps_the_real_vmk_the_way_the_loader_unwraps_it() {
         &k2,
         s.wrapped_vmk
     )));
+
+    // `tpm-auth.bin` (INTERFACES.md §8.4): the same salt and stretched
+    // passphrase hash as the setupTPM seal above, so `paguro-initrd` can
+    // re-seal the *standing* `tpm` rung too, restricted to SYSTEM (full) and
+    // Administrators (read/delete only).
+    let auth_path = format!(
+        "C:\\ProgramData\\paguro\\{}\\tpm-auth.bin",
+        paguro_win::mock::C_GUID
+    );
+    let auth_file = m.file(&auth_path).expect("tpm-auth.bin written");
+    let auth = paguro_core::tpm_auth::parse(&auth_file).unwrap();
+    assert_eq!(auth.salt, *s.salt);
+    assert_eq!(
+        auth.value, ph,
+        "must be the same stretched value the seal was wrapped with"
+    );
+    assert_eq!(
+        m.files
+            .borrow()
+            .get(&auth_path.to_lowercase())
+            .unwrap()
+            .acl
+            .as_deref(),
+        Some(paguro_win::tpm_auth::SDDL)
+    );
+    assert!(
+        !r.stdout.contains(&paguro_win::out::to_hex(&auth.value)),
+        "auth value leaked"
+    );
 }
 
 #[test]

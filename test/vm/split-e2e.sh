@@ -96,6 +96,9 @@ l2_build
 l2_root "$VMWORK/l2root" >/dev/null
 
 say "L2: the paguro host stack"
+# The RemoteApp phase reaches Windows' end of the private link through L2
+# (the link lives in L2's netns paguro): L2's port 3390 is forwarded here.
+export PAGURO_L2_EXTRA_FWD="hostfwd=tcp:127.0.0.1:${PAGURO_RDP_PORT:-3390}-:3390"
 l2_start "$WIN_DISK"
 cp "$RP_FILE" "$SHARE/rp.txt"
 l2 "set -e
@@ -240,6 +243,38 @@ out=$(wssh "net use \\\\169.254.244.1\\l /user:paguro $(cat "$SHARE/host-secret"
 echo "$out" >> "$VMWORK/samba.txt"
 expect "L: from Windows over the link" "$(tr '\n' ' ' <<<"$out")" 'hello from the Linux side'
 l2 "tail -30 /run/paguro/samba/log.smbd; dmesg | grep -i cifs | tail -5" >> "$VMWORK/samba.txt" 2>&1 || true
+
+if command -v xfreerdp3 >/dev/null && command -v xvfb-run >/dev/null; then
+    say "RemoteApp over the private link (§4.7, §5c)"
+    "$vm" windows-rdp-setup > "$VMWORK/rdp-setup.ps1"
+    wscp "$VMWORK/rdp-setup.ps1" paguro@127.0.0.1:C:/winvm/rdp-setup.ps1
+    out=$(wssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\winvm\rdp-setup.ps1' 2>&1 | tr -d '\r') || true
+    echo "$out" > "$VMWORK/rdp-setup.txt"
+    fp=$(grep -ao 'rdp fingerprint [0-9a-f:]*' <<<"$out" | awk '{print $3}')
+    expect "Windows reports its RDP certificate for pinning" "$fp" '^([0-9a-f]{2}:){31}[0-9a-f]{2}$'
+    # The host's side of the link is L2's netns: relay L2:3390 into it.
+    l2 "(setsid socat TCP-LISTEN:3390,fork,reuseaddr 'EXEC:/sbin/ip netns exec paguro socat STDIO TCP\\:169.254.244.2\\:3389' > /share/rdp-relay.log 2>&1 &); sleep 1" >/dev/null || true
+    rport=${PAGURO_RDP_PORT:-3390}
+    pwf=$(dirname "$WIN_KEY")/password
+    before=$(wssh 'tasklist /fi "imagename eq notepad.exe" /nh' 2>/dev/null | tr -d '\r' | grep -ac notepad || true)
+    # A wrong fingerprint is refused: nothing is trusted on first use.
+    timeout 60 xvfb-run -a -s "-screen 0 1280x800x24" "$vm" rdp --user paguro --addr "127.0.0.1:$rport" \
+        --cert-fingerprint "$(printf '00:%.0s' $(seq 31))00" --app notepad.exe --password-stdin < "$pwf" \
+        > "$VMWORK/rdp-wrongfp.log" 2>&1 && bad_fp=accepted || bad_fp=refused
+    expect "a wrong certificate fingerprint is refused" "$bad_fp" '^refused$'
+    # The real one: notepad as a RemoteApp window on the host's display.
+    xvfb-run -a -s "-screen 0 1280x800x24" sh -c "
+        \"$vm\" rdp --user paguro --addr 127.0.0.1:$rport --cert-fingerprint $fp --app notepad.exe \
+            --password-stdin < \"$pwf\" > \"$VMWORK/rdp.log\" 2>&1 & c=\$!
+        sleep 45; xwd -root -silent > \"$VMWORK/rdp-window.xwd\"; kill \$c" || true
+    procs=$(wssh 'tasklist /v /fi "imagename eq notepad.exe" /nh /fo csv' 2>/dev/null | tr -d '\r')
+    echo "$procs" > "$VMWORK/rdp-procs.txt"
+    expect "notepad runs as a RemoteApp in an RDP session" "$procs" 'RDP-Tcp#'
+    result "RemoteApp: notepad processes before/after" "$before / $(grep -ac notepad <<<"$procs")"
+    python3 -c "import sys
+d=open(sys.argv[1],'rb').read(); print('xwd', len(d), 'bytes')" "$VMWORK/rdp-window.xwd" 2>/dev/null | tee -a "$RES" || true
+    wssh 'taskkill /f /im notepad.exe' >/dev/null 2>&1 || true
+fi
 
 say "BitLocker in the guest (absorbed, §6; Q24)"
 phase link
