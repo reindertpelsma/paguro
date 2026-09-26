@@ -26,12 +26,10 @@
 //!   nothing it could not already reach with ESP + raw-disk access alone.
 //! - the encrypted FVEK blob (BitLocker's own AES-CCM-wrapped key, an input
 //!   to `root_gate` that never changes on this volume) — read from the raw
-//!   partition's FVE metadata. **Not yet wired up**: the parser that reads
-//!   it (`crates/paguro-boot/src/bde.rs`) is private to the loader crate, and
-//!   guessing at its private, security-critical offsets from here risks a
-//!   silently wrong key — worse than doing nothing. [`Reseal::blob`] takes it
-//!   as a parameter so the rest of this module is fully exercised (including
-//!   against a real software TPM, see the tests) once a shared reader exists.
+//!   partition's FVE metadata by `crate::esp::fvek_blob`, over the same
+//!   pure, already libbde/dislocker-verified parser the loader uses
+//!   (`paguro_core::bde::{cross_check, Metadata}`), not a reimplementation
+//!   of its offsets.
 //!
 //! A boot with none of these (a `recovery`-rung boot: no PIN is typed, so
 //! there is no `user_hash` anywhere, and recovery never parses
@@ -140,9 +138,9 @@ pub struct ResealInput<'a> {
     pub b: &'a [u8; 32],
     pub vmk: &'a [u8; 32],
     pub user_hash: &'a [u8; 32],
-    /// BitLocker's encrypted FVEK blob (nonce ‖ tag ‖ ciphertext): an input
-    /// to `root_gate`, unchanged by this re-seal. See the module doc: not
-    /// yet wired to a reader on the Linux side.
+    /// BitLocker's encrypted FVEK blob (nonce ‖ tag ‖ ciphertext,
+    /// `crate::esp::fvek_blob`): an input to `root_gate`, unchanged by this
+    /// re-seal.
     pub blob: &'a [u8],
     pub pcr0247: &'a [[u8; 32]; 4],
     pub pcr12: [u8; 32],

@@ -79,11 +79,39 @@ pub struct Image {
     pub seq: u16,
 }
 
+/// A 32-byte secret held only long enough to attempt a re-seal: zeroized on
+/// drop, and deliberately **not** `Debug` (unlike `Zeroizing<[u8; 32]>`
+/// alone, which still is). So `#[derive(Debug)]` ever landing on `Taken` — or
+/// any future struct holding one of these — fails to compile instead of
+/// silently printing `B`, the VMK or the password hash to a log
+/// (INTERFACES.md §8.3: "nothing is written to disk in the clear", which a
+/// log line would just as surely violate). `Deref` is implemented so call
+/// sites read like a plain `&[u8; 32]`; formatting does not go through it.
+pub struct Secret32(Zeroizing<[u8; 32]>);
+
+impl Secret32 {
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Secret32(Zeroizing::new(bytes))
+    }
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl core::ops::Deref for Secret32 {
+    type Target = [u8; 32];
+    fn deref(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// What this boot needs from the handoff, copied out so the blob itself
 /// can be wiped at once. The FVEK is kept until the crypt table is loaded;
 /// `b`, `vmk` and `user_hash` are kept for a possible re-seal (INTERFACES.md
 /// §8.3, §5 `PaguroTpmBroken`; `crate::reseal`) and zeroized at the end of
-/// `run` either way.
+/// `run` either way — `esp::maybe_reseal` also drops its own borrows of them
+/// as soon as the attempt (successful or not) is over, rather than holding
+/// them for the rest of the process.
 pub struct Taken {
     pub volume: handoff::Volume,
     pub fvek: Option<(u16, Zeroizing<Vec<u8>>)>,
@@ -98,13 +126,13 @@ pub struct Taken {
     pub provision: Option<Vec<u8>>,
     /// The boot-services-only firmware secret (handoff `B`), kept only for a
     /// possible re-seal.
-    pub b: Zeroizing<[u8; 32]>,
+    pub b: Secret32,
     /// BitLocker's Volume Master Key (handoff `VMK`), absent for an
     /// unencrypted volume.
-    pub vmk: Option<Zeroizing<[u8; 32]>>,
+    pub vmk: Option<Secret32>,
     /// `kdf::user_password_hash(pw)` (handoff `USER_HASH`), present only on
     /// a `passphrase`-rung boot.
-    pub user_hash: Option<Zeroizing<[u8; 32]>>,
+    pub user_hash: Option<Secret32>,
 }
 
 /// Read the handoff once, decode it, copy out what is needed, wipe it.
@@ -158,9 +186,9 @@ pub fn take(path: &Path) -> R<Taken> {
         state: h.state,
         rung: h.rung,
         provision,
-        b: Zeroizing::new(*h.b),
-        vmk: h.vmk.map(|k| Zeroizing::new(*k)),
-        user_hash: h.user_hash.map(|k| Zeroizing::new(*k)),
+        b: Secret32::new(*h.b),
+        vmk: h.vmk.map(|k| Secret32::new(*k)),
+        user_hash: h.user_hash.map(|k| Secret32::new(*k)),
     };
     if let Some((_, k)) = &t.fvek {
         sys::mlock(k);
@@ -185,7 +213,7 @@ fn read_sys(p: &Path) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-fn read_at(f: &File, off: u64, len: usize) -> R<Vec<u8>> {
+pub(crate) fn read_at(f: &File, off: u64, len: usize) -> R<Vec<u8>> {
     let mut b = vec![0u8; len];
     f.read_exact_at(&mut b, off)
         .map_err(|e| format!("read {len} bytes at {off}: {e}"))?;
@@ -467,9 +495,10 @@ fn boot(t: &mut Taken, opts: &Opts) -> R<()> {
     ));
 
     // 7. The ESP: recorded.bin, and a provisioning boot's files. Advisory;
-    //    a failure here never stops the boot.
+    //    a failure here never stops the boot. `part` (the raw, still-BitLocker
+    //    partition) is what a re-seal reads BitLocker's FVE metadata from.
     if opts.esp {
-        if let Err(e) = crate::esp::write(t) {
+        if let Err(e) = crate::esp::write(t, &part) {
             log(&format!("ESP: {e}"));
         }
     }
@@ -694,4 +723,29 @@ pub fn systab() -> R<u64> {
         return Err("no EFI system table in boot_params (not an EFI boot?)".into());
     }
     Ok(st)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Secret32;
+
+    /// `Secret32` really does zero its bytes when dropped, not only when
+    /// asked (INTERFACES.md §8.3, "nothing is written ... in the clear" —
+    /// the same must hold for what a process leaves behind in its own
+    /// memory once it is done with a secret).
+    #[test]
+    fn secret32_zeroizes_on_drop() {
+        let ptr;
+        {
+            let s = Secret32::new([0x42; 32]);
+            assert_eq!(*s, [0x42; 32]);
+            ptr = s.as_bytes().as_ptr();
+        } // `s` drops here.
+        // SAFETY: `Secret32` is not boxed, so its bytes live in this frame's
+        // stack slot; reading it immediately after drop, before anything
+        // else runs, is the standard way to observe zeroize-on-drop (the
+        // `zeroize` crate's own tests use the same pattern).
+        let after = unsafe { std::slice::from_raw_parts(ptr, 32) };
+        assert_eq!(after, [0u8; 32], "Secret32 must zeroize on drop");
+    }
 }

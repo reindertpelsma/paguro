@@ -69,12 +69,16 @@ policy digest are `paguro-boot`'s own, not reimplemented, and provably match
 what the loader's unseal path checks (`reseal`'s tests run the same code
 against a real `swtpm`).
 
-**Known gap**: `root_gate` also needs BitLocker's encrypted FVEK blob
-(unchanged by a re-seal, but still required as an input). The parser that
-reads it (`paguro_boot::bde`) is private to the loader crate; `esp::fvek_blob`
-is a deliberate stub returning `None` rather than duplicating those offsets
-without a test oracle. Until a shared reader exists, `maybe_reseal` logs why
-and leaves `PaguroTpmBroken` set.
+`root_gate` also needs BitLocker's encrypted FVEK blob (unchanged by a
+re-seal, but still required as an input): `esp::fvek_blob` reads the three
+FVE metadata copies straight off the raw partition, at the offsets
+`FVE_LAYOUT` already gives, and cross-checks them with
+`paguro_core::bde::cross_check` + `Metadata::parse` — the same pure,
+libbde/dislocker-verified parser `paguro-boot` uses, not a reimplementation
+of its offsets (`esp`'s tests run it against the same
+`test/fixtures/bde/windows/*.sparse` fixtures `paguro-boot/tests/bde.rs`
+does). A read or cross-check failure is treated the same as a missing
+secret: logged, `PaguroTpmBroken` left set.
 
 ## Invariants
 
@@ -82,7 +86,11 @@ and leaves `PaguroTpmBroken` set.
   reaches `dm-crypt` through a kernel `logon` key, never a table string. `B`
   is additionally kept in a root-only *session* `logon` key
   (`sys::add_session_logon_key`), for a re-seal after this process exits
-  (INTERFACES.md §8.3).
+  (INTERFACES.md §8.3). `B`, the VMK and `USER_HASH` in `setup::Taken` are
+  `setup::Secret32` (zeroize-on-drop, deliberately not `Debug` — adding
+  `#[derive(Debug)]` to `Taken` fails to compile rather than printing them);
+  `esp::maybe_reseal` drops its VMK/`USER_HASH` copies right after the
+  attempt, not at process exit.
 - View A is loaded only after the module has asserted the payload's
   structure, and only read-only when the volume is dirty or hibernated.
 - Everything pure (tables, layouts, root choice) lives in `plan`,
@@ -110,9 +118,38 @@ Exercised end to end — OVMF → `paguro.efi` → a UKI → `paguro-initrd` →
 root from `dm-paguro`'s view A → a marker service — by
 `.github/workflows/linux-e2e.yml`'s eight scenarios (plain, bare, dirty,
 hibernated, persist, BitLocker, BitLocker-partial, fragmented); see
-DESIGN.md §3a. No scenario yet exercises the `PaguroTpmBroken` re-seal (it
-needs the FVE-blob reader above); `test/qemu/runner` already stages
-`PaguroTpmBroken` for the loader-side test
-(`policy_failure_sets_tpm_broken_and_offers_the_rest` in
-`paguro-boot/tests/mock_boot.rs` is its mock-boot equivalent) and would be the
-place to add one.
+DESIGN.md §3a.
+
+**No `test/qemu` scenario yet exercises the `PaguroTpmBroken` re-seal.** It is
+buildable — every `Vm::launch_disks` (so every `linux-*` scenario too, not
+only the loader-only ones in `test/qemu/runner/src/main.rs`) already attaches
+a real `swtpm`, and the CI kernel has `CONFIG_TCG_TPM`/`CONFIG_TCG_TIS`/
+`CONFIG_TCG_CRB` built in, so `/dev/tpmrm0` needs no extra initramfs module —
+but it is more than a one-line addition to `linux.rs`. Precisely what is
+missing:
+
+1. A scenario that provisions a **real** `tpm_seal.bin` against that boot's
+   own `swtpm` (`stage4::bootstrap` already does this over a bootstrap
+   payload, but chains to the stub probe, not a real UKI/initrd; no
+   `linux.rs` scenario does a TPM-provisioning boot at all today).
+2. Between boots, an ini edit that both flips `[Passphrase] enabled` to `1`
+   and (because it changes PCR 12) invalidates the standing `tpm_seal.bin` —
+   the natural way to reach `PaguroTpmBroken`, needing no synthetic NVRAM
+   write (`try_tpm`'s `RcClass::PolicyFail` arm in
+   `paguro-boot/src/machine.rs` sets the flag itself, already covered by
+   `policy_failure_sets_tpm_broken_and_offers_the_rest` in
+   `paguro-boot/tests/mock_boot.rs`).
+3. A `passphrase_seal.bin` written onto the ESP for that same boot — no TPM
+   needed to build it (`env_passphrase()` is a public constant), only the
+   volume's VMK and encrypted FVEK blob, both already in the test harness's
+   hands the way `bde_case`/`stage4::bootstrap` compute similar seals inline.
+4. New serial-log assertions for the second boot (`esp::maybe_reseal`'s own
+   log lines are already there to match against) and a third boot proving
+   the `tpm` rung now succeeds and `PaguroTpmBroken` reads back cleared from
+   the VARS file (`vars::read`, already used elsewhere in
+   `test/qemu/runner`).
+
+None of this is a research gap — it is straightforward, if sizeable,
+`test/qemu/runner` engineering (a new `linux.rs` scenario function plus a
+small seal-writing helper), left for a follow-up rather than landed
+unverified under time pressure.
