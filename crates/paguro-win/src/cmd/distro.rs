@@ -10,13 +10,19 @@
 //!   shell is **for now** a root shell in the default WSL2 distribution
 //!   with the disk visible as a block device.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::api::join;
 use crate::cfgfile::{self, OwnedEfi};
 use crate::cmd::config;
 use crate::ctx::Ctx;
 use crate::out::{CmdError, CmdResult, Exit, Report, guid_text};
+
+/// The private link's host address (DESIGN.md §5c). Kept as its own literal
+/// rather than a dependency on `paguro-vm`: that crate is Linux-only (netns,
+/// `setns`) and does not build for Windows. Must match `paguro_vm::net::HOST_ADDR`.
+const LINK_HOST_ADDR: &str = "169.254.244.1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct WslDistro {
@@ -244,7 +250,91 @@ fn target(ctx: &Ctx<'_>, name: Option<&str>, path: Option<&str>) -> Result<Strin
 /// The shell `enter` names (run by the front end, attached to its console).
 pub const SHELL: [&str; 3] = ["wsl.exe", "--user", "root"];
 
+/// Where `paguro service` writes what forwarding needs, at the same time it
+/// runs the Windows-side SSH provisioning script
+/// (`paguro_vm::net::windows_ssh_provision_ps1`, DESIGN.md §The paguro
+/// service in the VM item 3): the private key generated for this
+/// installation's Windows → Linux direction, and the Linux account name the
+/// host's `sshd_config` restricts logins to (`AllowUsers`).
+pub const SSH_LINK_CONFIG_FILE: &str = "link\\ssh.json";
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct SshLinkConfig {
+    pub linux_user: String,
+    pub key_path: String,
+}
+
+fn read_ssh_link_config(ctx: &Ctx<'_>) -> Result<SshLinkConfig, CmdError> {
+    let path = join(&ctx.data_dir(), SSH_LINK_CONFIG_FILE);
+    let bytes = ctx.api.read_file(&path, 1 << 16)?.ok_or_else(|| {
+        CmdError::refused(format!(
+            "{path}: the private link's SSH is not provisioned yet (paguro service runs once per boot)"
+        ))
+    })?;
+    serde_json::from_slice(&bytes).map_err(|e| CmdError::refused(format!("{path}: {e}")))
+}
+
+/// `ssh -i <key> <user>@169.254.244.1 paguro distro enter <name>`
+/// (DESIGN.md §5c "Shells, the same command both ways"): from the Windows
+/// VM, paguro's own Linux images are refused to Windows at the block layer
+/// (§4.3), so entering one is always the host doing it on Windows' behalf,
+/// over the private link's SSH channel.
+pub fn ssh_forward_command(key_path: &str, user: &str, name: &str) -> Vec<String> {
+    [
+        "ssh",
+        "-i",
+        key_path,
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        &format!("{user}@{LINK_HOST_ADDR}"),
+        "paguro",
+        "distro",
+        "enter",
+        name,
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
+/// Pure: `distro enter <name>` forwards to the host instead of running
+/// locally exactly when this is paguro's Windows VM and `name` is one of
+/// paguro's own Linux images (never a plain WSL distribution, and never on
+/// native Windows — DESIGN.md §5c's table, "From the Windows VM" column).
+fn should_forward(in_vm: bool, all: &[Distribution], name: &str) -> bool {
+    in_vm && image(all, name).is_ok()
+}
+
+/// `distro enter`/`shell` of one of paguro's own Linux images, forwarded to
+/// the host over SSH when this process is running inside paguro's Windows
+/// VM (`ctx.in_vm()`); `None` when `name` is not one (native, or a `path`
+/// target, or a plain WSL distribution), which keeps the existing local
+/// WSL2 flow unchanged.
+fn forward_to_host(
+    ctx: &Ctx<'_>,
+    all: &[Distribution],
+    name: Option<&str>,
+) -> Result<Option<CmdResult>, CmdError> {
+    let Some(n) = name else { return Ok(None) };
+    if !should_forward(ctx.in_vm(), all, n) {
+        return Ok(None);
+    }
+    let cfg = read_ssh_link_config(ctx)?;
+    let cmd = ssh_forward_command(&cfg.key_path, &cfg.linux_user, n);
+    let data = json!({ "name": n, "forwarded": true, "command": cmd });
+    Ok(Some(if ctx.dry_run {
+        Ok(Report::new(data).line(format!("would forward over SSH: {}", cmd.join(" "))))
+    } else {
+        Ok(Report::new(data)
+            .line("forwarded to the host over the private link (paguro's images are never touched directly from the VM)")
+            .line(format!("shell: {}", cmd.join(" "))))
+    }))
+}
+
 pub fn enter(ctx: &Ctx<'_>, name: Option<&str>, path: Option<&str>) -> CmdResult {
+    let all = distributions(ctx)?;
+    if let Some(r) = forward_to_host(ctx, &all, name)? {
+        return r;
+    }
     let p = target(ctx, name, path)?;
     let lower = p.to_ascii_lowercase();
     if !(lower.ends_with(".vhd") || lower.ends_with(".vhdx")) {
@@ -318,5 +408,139 @@ mod tests {
             assert!(!l[1].default);
         }
         assert!(parse_wsl_list("no distributions").is_empty());
+    }
+
+    fn sample_distros() -> Vec<Distribution> {
+        vec![
+            Distribution {
+                name: "myimage".into(),
+                kind: "image",
+                default: true,
+                path: Some(r"C:\myimage.vhdx".into()),
+                size: Some(1 << 30),
+                exists: true,
+                bootable: true,
+                volume: None,
+                wsl_state: None,
+                wsl_version: None,
+            },
+            Distribution {
+                name: "Ubuntu".into(),
+                kind: "wsl",
+                default: false,
+                path: None,
+                size: None,
+                exists: true,
+                bootable: false,
+                volume: None,
+                wsl_state: Some("Running".into()),
+                wsl_version: Some(2),
+            },
+        ]
+    }
+
+    #[test]
+    fn should_forward_only_in_vm_and_only_for_images() {
+        let d = sample_distros();
+        assert!(should_forward(true, &d, "myimage"));
+        assert!(!should_forward(false, &d, "myimage"), "native: unchanged");
+        assert!(
+            !should_forward(true, &d, "Ubuntu"),
+            "a WSL distribution is not one of paguro's Linux images"
+        );
+        assert!(!should_forward(true, &d, "nope"));
+    }
+
+    #[test]
+    fn ssh_forward_command_shape() {
+        let c = ssh_forward_command(r"C:\key", "anna", "myimage");
+        assert_eq!(
+            c,
+            vec![
+                "ssh",
+                "-i",
+                r"C:\key",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "anna@169.254.244.1",
+                "paguro",
+                "distro",
+                "enter",
+                "myimage",
+            ]
+        );
+    }
+
+    /// A minimal `GetSystemFirmwareTable('RSMB', 0)`-shaped blob: an OEM
+    /// Strings (type 11) structure carrying `marker`, then end-of-table.
+    fn fake_smbios(marker: Option<&str>) -> Vec<u8> {
+        let mut table = Vec::new();
+        if let Some(m) = marker {
+            table.extend([11u8, 5, 0, 0, 1u8]);
+            table.extend(m.as_bytes());
+            table.extend([0, 0]);
+        }
+        table.extend([127u8, 4, 0, 0, 0, 0]);
+        let mut blob = vec![0u8, 3, 4, 0];
+        blob.extend((table.len() as u32).to_le_bytes());
+        blob.extend(table);
+        blob
+    }
+
+    #[test]
+    fn in_vm_reads_the_smbios_marker() {
+        let api = crate::mock::MockApi::empty();
+        let ctx = Ctx::new(&api);
+        assert!(!ctx.in_vm(), "no SMBIOS at all: native");
+        *api.smbios_blob.borrow_mut() = fake_smbios(None);
+        assert!(!ctx.in_vm(), "a table without the marker: native");
+        *api.smbios_blob.borrow_mut() = fake_smbios(Some("paguro-vm/1"));
+        assert!(ctx.in_vm());
+    }
+
+    #[test]
+    fn ssh_link_config_roundtrip_and_missing() {
+        let api = crate::mock::MockApi::empty();
+        let ctx = Ctx::new(&api);
+        assert!(read_ssh_link_config(&ctx).is_err(), "not provisioned yet");
+        api.put_file(
+            &join(&ctx.data_dir(), SSH_LINK_CONFIG_FILE),
+            br#"{"linux_user":"anna","key_path":"C:\\ProgramData\\paguro\\link\\id_ed25519"}"#,
+        );
+        let c = read_ssh_link_config(&ctx).unwrap();
+        assert_eq!(c.linux_user, "anna");
+        assert_eq!(c.key_path, r"C:\ProgramData\paguro\link\id_ed25519");
+    }
+
+    #[test]
+    fn enter_forwards_an_image_in_vm_and_stays_local_natively() {
+        let api = crate::mock::MockApi::empty();
+        *api.smbios_blob.borrow_mut() = fake_smbios(Some("paguro-vm/1"));
+        api.put_file(
+            &join("C:\\ProgramData", "paguro\\link\\ssh.json"),
+            br#"{"linux_user":"anna","key_path":"C:\\key"}"#,
+        );
+        let mut ctx = Ctx::new(&api);
+        ctx.dry_run = true;
+        let all = sample_distros();
+        assert!(should_forward(ctx.in_vm(), &all, "myimage"));
+        let r = forward_to_host(&ctx, &all, Some("myimage"))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.data["forwarded"], json!(true));
+        assert_eq!(
+            r.data["command"],
+            json!(ssh_forward_command("C:\\key", "anna", "myimage"))
+        );
+
+        // Native: forward_to_host stands aside (None), so `enter` would run
+        // its existing WSL2 path unchanged.
+        *api.smbios_blob.borrow_mut() = fake_smbios(None);
+        assert!(
+            forward_to_host(&ctx, &all, Some("myimage"))
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -192,6 +192,18 @@ impl<'a> Ctx<'a> {
         join(&self.api.program_data(), "paguro")
     }
 
+    /// The SMBIOS OEM string marker (DESIGN.md §4.4 "Until the driver
+    /// arms"): this process's own table carries it only inside paguro's
+    /// Windows VM, never on the physical machine. Unreadable SMBIOS (no
+    /// firmware table, or a parse refusal) is treated as native, the safer
+    /// default: a native machine must never be treated as the VM.
+    pub fn in_vm(&self) -> bool {
+        let Ok(b) = self.api.smbios() else {
+            return false;
+        };
+        paguro_core::smbios::parse(&b).is_ok_and(|d| d.is_paguro_vm)
+    }
+
     /// The user's Linux passphrase. It is never verified here — there is no
     /// oracle by design (DESIGN.md §6) — so interactive entry asks twice.
     pub fn passphrase(&self, what: &str) -> Result<Zeroizing<String>, CmdError> {

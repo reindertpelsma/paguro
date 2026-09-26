@@ -79,7 +79,14 @@ const _: () = assert!(offset_of!(BaseboardInformation, product) == 0x05);
 const TYPE_BIOS_INFORMATION: u8 = 0;
 const TYPE_SYSTEM_INFORMATION: u8 = 1;
 const TYPE_BASEBOARD_INFORMATION: u8 = 2;
+const TYPE_OEM_STRINGS: u8 = 11;
 const TYPE_END_OF_TABLE: u8 = 127;
+
+/// The OEM string paguro appends to a VM's SMBIOS table (DESIGN.md §4.4,
+/// §The paguro service in the VM; `paguro_vm::identity::MARKER`, which
+/// writes it — this is the one other reader, on the Windows side, so the
+/// text lives here once and both sides refer to it in their doc comments).
+pub const VM_MARKER: &[u8] = b"paguro-vm/1";
 
 /// The double NUL that ends a structure's string set (DSP0134 §6.1.3).
 const STRING_SET_END: [u8; 2] = [0, 0];
@@ -113,6 +120,10 @@ pub struct Dmi<'a> {
     pub product_name: Option<&'a [u8]>,
     pub board_vendor: Option<&'a [u8]>,
     pub board_name: Option<&'a [u8]>,
+    /// A type 11 (OEM Strings) structure carries [`VM_MARKER`]: this table
+    /// is a paguro Windows VM's own, not the physical machine's (§4.4 "Until
+    /// the driver arms" — Windows tells VM mode apart from native this way).
+    pub is_paguro_vm: bool,
 }
 
 struct Structure<'a> {
@@ -215,6 +226,11 @@ pub fn parse(blob: &[u8]) -> Result<Dmi<'_>, SmbiosError> {
                 dmi.board_vendor = s.string(offset_of!(BaseboardInformation, manufacturer));
                 dmi.board_name = s.string(offset_of!(BaseboardInformation, product));
             }
+            // Every OEM Strings structure is checked (paguro's is appended
+            // last, but nothing here relies on that).
+            TYPE_OEM_STRINGS if !dmi.is_paguro_vm => {
+                dmi.is_paguro_vm = s.strings.split(|&b| b == 0).any(|x| x == VM_MARKER);
+            }
             // End-of-table; anything after it is padding firmware leaves.
             TYPE_END_OF_TABLE => break,
             _ => {}
@@ -259,6 +275,32 @@ mod tests {
             structure(4, &[], &[]),
             structure(127, &[], &[]),
         ])
+    }
+
+    #[test]
+    fn vm_marker_detected_only_when_present() {
+        let native = sample();
+        assert!(!parse(&native).unwrap().is_paguro_vm);
+
+        let mut with_marker = sample();
+        // Drop the end-of-table structure, append an OEM Strings one
+        // carrying the marker, then a fresh end-of-table.
+        with_marker.truncate(with_marker.len() - structure(127, &[], &[]).len());
+        with_marker.extend(structure(11, &[1], &["paguro-vm/1"]));
+        with_marker.extend(structure(127, &[], &[]));
+        // The blob's own `Length` must still match.
+        let table_len = (with_marker.len() - 8) as u32;
+        with_marker[4..8].copy_from_slice(&table_len.to_le_bytes());
+        assert!(parse(&with_marker).unwrap().is_paguro_vm);
+
+        // A look-alike OEM string is not the marker.
+        let mut close = sample();
+        close.truncate(close.len() - structure(127, &[], &[]).len());
+        close.extend(structure(11, &[1], &["paguro-vm/2"]));
+        close.extend(structure(127, &[], &[]));
+        let table_len = (close.len() - 8) as u32;
+        close[4..8].copy_from_slice(&table_len.to_le_bytes());
+        assert!(!parse(&close).unwrap().is_paguro_vm);
     }
 
     #[test]

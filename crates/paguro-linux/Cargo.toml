@@ -1,0 +1,23 @@
+[package]
+name = "paguro-linux"
+license.workspace = true
+description = "The Linux-side `paguro` CLI (INTERFACES.md §11.2's Windows conventions, mirrored): shells both ways over the private link (DESIGN.md §5c), and its own SSH socket activation"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "paguro"
+path = "src/main.rs"
+
+[dependencies]
+paguro-core.workspace = true
+paguro-vm = { path = "../paguro-vm" }
+paguro-initrd = { path = "../paguro-initrd" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[lints]
+workspace = true

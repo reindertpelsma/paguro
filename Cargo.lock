@@ -666,6 +666,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "paguro-linux"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "paguro-core",
+ "paguro-initrd",
+ "paguro-vm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "paguro-probe"
 version = "0.0.0"
 dependencies = [

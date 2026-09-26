@@ -768,6 +768,21 @@ against the on-disk MFT after a guest volume flush.
 The host sends the ack only after `dmsetup message <view B> 0 tripwire off` has
 succeeded. The guest treats a missing ack as "not armed".
 
+**Provisioning the private link's SSH (DESIGN.md §5c "The control channel,
+and keeping the link to itself").** The agent port is the only place either
+side's SSH keys travel — never the network, never `known_hosts`/
+`authorized_keys` populated by trust-on-first-use:
+
+| Direction | Frame | Meaning |
+|---|---|---|
+| guest → host | `{"type":"ssh-keys","windows_user_pub":"ssh-ed25519 AAAA… paguro@windows","windows_host_pub":"ssh-ed25519 AAAA… "}` | Windows' own client key (for `authorized_keys` on the host, `from="169.254.244.2"`) and its sshd host key (for the host's `known_hosts`, pinned) |
+| host → guest | `{"type":"ssh-keys-ack","linux_user_pub":"ssh-ed25519 AAAA… paguro@host","linux_host_pub":"ssh-ed25519 AAAA… "}` | the host's own client key (for Windows' `authorized_keys`/`administrators_authorized_keys`) and the host's sshd host key (for Windows' `known_hosts`, pinned) |
+
+Both sides thus reach `StrictHostKeyChecking yes` with a pre-populated
+`known_hosts` from the very first connection — no TOFU on either end. A side
+that has not yet received its ack has no working shell in the other
+direction (INTERFACES §11.3's existing rule: no ack, no trust).
+
 **View B's tripwire** (dm-paguro `paguro-volume` 1.1.0, view `b` only):
 
 ```text
