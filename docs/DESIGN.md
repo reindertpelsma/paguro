@@ -3118,6 +3118,26 @@ researched (`rdp-auth-research`, 2026-09-26):
   out, which also takes away the VM's visible desktop. paguro's own server
   shares the existing session instead.
 
+**Built on FreeRDP 3's server libraries**, not Microsoft's Desktop Sharing API.
+That API (RDPSRAPI, `rdpencom.dll`, the engine behind Remote Assistance) was
+the first choice, but **it no longer exists on Windows 11 25H2**. Measured
+2026-09-26 on build 26200: the DLL is not anywhere under `C:\Windows`, the COM
+class is not registered, and creating it fails with `REGDB_E_CLASSNOTREG`.
+FreeRDP (Apache-2.0) supplies the protocol, a complete server-side RemoteApp
+channel (`channels/rail/server`), window orders, codecs and a DXGI capture
+path. paguro writes the Windows agent around them: window tracking into window
+orders, the client's activate/move/system-command requests applied to the real
+windows (keeping z-order in sync is how RemoteApp avoids overlap artefacts),
+input, and a SYSTEM-side helper for UAC and elevated windows.
+
+**The window-integration modes the user can select:**
+
+| Mode | Editions / sign-in | Windows as Linux windows |
+|---|---|---|
+| **paguro's server (default)** | every edition; token, so Windows Hello/PIN users work | per-window (RemoteApp) |
+| **Windows' own RemoteApp** (opt-in) | Pro+; the user's password in the Linux keyring; the console signed out while in use | per-window, Microsoft's shell |
+| the VM's own display (always) | every edition | one window with the whole desktop |
+
 Our server authenticates **the way paguro chooses**: a per-session token
 issued over the agent port (§The control channel), presented by the Linux
 client and checked by the server. There is no password, no NLA and no LSA
