@@ -80,6 +80,20 @@ result "nested boot to SSH" "$(( $(date +%s) - t0 )) s"
 # Two vCPUs two levels down: let the logon settle before asking anything.
 sleep 300
 shot nested-desktop.png
+# The facts on the guest's own screen too (typed through QMP: no SSH
+# needed): an elevated console with BitLocker, testsigning, the filters and
+# the virtio devices (vsock among them).
+S=/run/paguro/vm/qmp-test.sock
+T=$here/qmp-type.py
+{
+    printf 'paguro-vm qmp --socket %s' "$S"; python3 "$T" --combo meta_l-r | sed "s/.*/ '&'/" | tr -d '\n'; echo ' >/dev/null; sleep 8'
+    printf 'paguro-vm qmp --socket %s' "$S"
+    python3 "$T" --text 'cmd /k manage-bde -status C: & bcdedit /enum {current} | findstr testsigning & fltmc filters & powershell -nop -c "Get-PnpDevice -PresentOnly | ? FriendlyName -match VirtIO | ft -hide Status,FriendlyName"' |
+        sed "s/.*/ '&'/" | tr -d '\n'; echo ' >/dev/null'
+    printf 'paguro-vm qmp --socket %s' "$S"; python3 "$T" --combo ctrl-shift-ret | sed "s/.*/ '&'/" | tr -d '\n'; echo ' >/dev/null; sleep 90'
+} > "$SHARE/typecon.sh"
+l2 "sh /share/typecon.sh" >/dev/null 2>&1 || true
+shot nested-console.png
 out=$(wtry 'manage-bde -status C: & bcdedit /enum {current} | findstr testsigning & fltmc filters' 2>&1 | tr -d '\r') || true
 echo "$out" > "$VMWORK/nested-guest.txt"
 expect "nested: BitLocker on, the session's external key" "$(grep -a 'Protection Status' <<<"$out")" 'Protection On'

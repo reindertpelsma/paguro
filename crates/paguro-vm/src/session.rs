@@ -502,6 +502,11 @@ pub struct LaunchOpts {
     pub print_argv: bool,
     pub scope_memory_max: Option<String>,
     pub rtc_localtime: bool,
+    /// Hyper-V enlightenments (default on). `--no-hv-enlightenments` is for
+    /// labs where Windows runs under a hypervisor that is itself a guest:
+    /// enlightened, it froze after logon there; without, it booted too
+    /// slowly to be useful either (test/vm/README.md).
+    pub hv_enlightenments: bool,
     pub extra: Vec<String>,
 }
 
@@ -540,7 +545,7 @@ pub fn config(o: &LaunchOpts, gpu_args: Vec<String>) -> R<VmConfig> {
         pidfile: Some(o.work.join("qemu.pid")),
         gpu_args,
         rtc_localtime: o.rtc_localtime,
-        hv_enlightenments: true,
+        hv_enlightenments: o.hv_enlightenments,
         vnc: o.vnc.clone(),
         extra: o.extra.clone(),
     })

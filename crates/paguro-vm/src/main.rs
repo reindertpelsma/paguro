@@ -13,6 +13,7 @@
 //!                  [--ovmf-code F] [--ovmf-vars F] [--system-partition NAME]
 //!                  [--vnc ADDR] [--host-cgroup DIR] [--driver-timeout S]
 //!                  [--bek-unplug-after S] [--scope-memory-max SIZE] [--rtc utc]
+//!                  [--no-hv-enlightenments]
 //!                  [--print-argv]
 //!     QEMU with the host's identity; unplugs the .BEK once read
 //! paguro-vm teardown --work DIR
@@ -414,6 +415,7 @@ fn launch(mut a: Args) {
         print_argv: false,
         scope_memory_max: None,
         rtc_localtime: true,
+        hv_enlightenments: true,
         extra: Vec::new(),
     };
     let mut bus_set = false;
@@ -471,6 +473,7 @@ fn launch(mut a: Args) {
             "--bek-unplug-after" => o.bek_unplug_after = Duration::from_secs(a.num(&k)),
             "--scope-memory-max" => o.scope_memory_max = Some(a.val(&k)),
             "--rtc" => o.rtc_localtime = a.val(&k) != "utc",
+            "--no-hv-enlightenments" => o.hv_enlightenments = false,
             "--print-argv" => o.print_argv = true,
             "--" => o.extra.extend(a.it.by_ref()),
             _ => usage(),
