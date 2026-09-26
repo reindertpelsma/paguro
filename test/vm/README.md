@@ -57,7 +57,9 @@ paguro-vm launch --nbd ... ──── NBD ────── nbdkit /dev/mappe
    testsigning off natively), the file written in the VM is there.
 
 Inputs (never committed; see `test/winvm/README.md` for the evaluation
-image): a copy of the winvm image with BitLocker enabled on C:
+image), built by **`make-bde-image.sh`** from the winvm base (it writes
+`/var/tmp/paguro-vm/win-bde.env`, which `split-e2e.sh` reads, and makes the
+base and the disk immutable with `chattr +i`): a copy of the winvm image with BitLocker enabled on C:
 (`manage-bde -on C: -RecoveryPassword`, full encryption, C: shrunk first
 to keep the copy small), its recovery password, its native OVMF variables
 and swtpm state, the virtio-win NetKVM driver and the test-signed

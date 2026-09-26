@@ -41,6 +41,14 @@ here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=lib.sh
 . "$here/lib.sh"
 
+# What make-bde-image.sh built (its volume GUID, recovery password, TPM
+# state), unless set explicitly.
+BDE_ENV=${PAGURO_BDE_ENV:-/var/tmp/paguro-vm/win-bde.env}
+if [ -f "$BDE_ENV" ]; then
+    while IFS='=' read -r k v; do
+        case $k in PAGURO_*|WINVM_*) [ -z "${!k:-}" ] && export "$k=$v" ;; esac
+    done < <(grep -E '^[A-Z_]+=' "$BDE_ENV")
+fi
 WIN_DISK=${PAGURO_WIN_DISK:-/var/tmp/paguro-vm/win-bde.qcow2}
 RP_FILE=${PAGURO_WIN_RECOVERY:-/data/paguro-work/vm/recovery-password.txt}
 VOLUME_GUID=${PAGURO_WIN_VOLUME_GUID:-5241b9de-5ba4-4523-8a88-2253f46ef21f}
