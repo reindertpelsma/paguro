@@ -8,7 +8,10 @@
 //!     <work>/bek.img, <work>/session.json
 //! paguro-vm launch --work DIR [--disk-dev DEV | --nbd HOST:PORT/EXPORT]
 //!                  [--bek FILE] [--memory MIB] [--cpus N] [--bus nvme|ahci|virtio]
-//!                  [--nat-model M] [--nat-hostfwd RULE]... [--hostonly tap:IF|socket:PATH|none]
+//!                  [--nat-model M] [--net user|tap] [--nat-hostfwd RULE]...  (user mode only)
+//!                  [--lan-ifname IF] [--lan-subnet CIDR] [--lan-wan IF]      (tap mode; DESIGN.md §5c)
+//!                  [--dmz] [--pin-port PORT:linux|windows]...
+//!                  [--hostonly tap:IF|socket:PATH|none]
 //!                  [--vsock-cid N | --no-vsock] [--record-writes FILE]
 //!                  [--ovmf-code F] [--ovmf-vars F] [--system-partition NAME]
 //!                  [--vnc ADDR] [--host-cgroup DIR] [--driver-timeout S]
@@ -31,6 +34,13 @@
 //! paguro-vm samba --root DIR --state DIR --secret-file F   L: over the link
 //! paguro-vm mount-c --target DIR --secret-file F [--uid N --gid N]
 //! paguro-vm link --ifname IF                        IF into netns paguro as paguro0
+//! paguro-vm net-up --tap IF --wan IF --subnet CIDR [--mac MAC] [--dmz]
+//!                  [--pin-port PORT:linux|windows]...
+//!     hidden; test/vm/net-smoke.sh's entry point into the LAN's production
+//!     code (`lan.rs`/`dhcp.rs`) without a full Windows session: sets up the
+//!     tap, the nftables table, DNS and coexistence, serves the one DHCP
+//!     lease, and tears everything down on SIGINT/SIGTERM.
+//! paguro-vm net-down --tap IF                        a manual safety net for net-up
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -38,8 +48,9 @@ use std::process::exit;
 use std::time::Duration;
 
 use paguro_core::guid::Guid;
+use paguro_vm::lan;
 use paguro_vm::qemu::{Bus, DiskSource};
-use paguro_vm::session::{self, HostOnlyOpt, LaunchOpts, PrepareOpts, ViewB};
+use paguro_vm::session::{self, HostOnlyOpt, LaunchOpts, NetMode, PrepareOpts, ViewB};
 use paguro_vm::{identity, net};
 
 const OVMF_CODE: &str = "/usr/share/OVMF/OVMF_CODE_4M.fd";
@@ -384,8 +395,92 @@ fn main() {
             net::ensure_netns().unwrap_or_else(|e| fail(e));
             net::attach_link(&ifname.unwrap_or_else(|| usage())).unwrap_or_else(|e| fail(e));
         }
+        "net-up" => net_up(a),
+        "net-down" => {
+            let mut tap = None;
+            while let Some(k) = a.it.next() {
+                match k.as_str() {
+                    "--tap" => tap = Some(a.val(&k)),
+                    _ => usage(),
+                }
+            }
+            let tap = tap.unwrap_or_else(|| usage());
+            lan::coexistence_teardown(&tap);
+            let _ = lan::nft_delete_table();
+            lan::remove_tap_if_present(&tap);
+        }
         _ => usage(),
     }
+}
+
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_stop_signal(_: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn net_up(mut a: Args) {
+    let (mut tap, mut wan, mut subnet, mut mac) = (None, None, None, None);
+    let mut dmz = false;
+    let mut pins = Vec::new();
+    while let Some(k) = a.it.next() {
+        match k.as_str() {
+            "--tap" => tap = Some(a.val(&k)),
+            "--wan" => wan = Some(a.val(&k)),
+            "--subnet" => subnet = Some(a.val(&k)),
+            "--mac" => mac = Some(a.val(&k)),
+            "--dmz" => dmz = true,
+            "--pin-port" => pins.push(lan::parse_pin(&a.val(&k)).unwrap_or_else(|e| fail(e))),
+            _ => usage(),
+        }
+    }
+    let tap = tap.unwrap_or_else(|| usage());
+    let wan = wan.unwrap_or_else(|| usage());
+    let subnet = lan::Subnet::parse(&subnet.unwrap_or_else(|| usage())).unwrap_or_else(|e| fail(e));
+    let mac = mac.map(|m| lan::parse_mac(&m).unwrap_or_else(|e| fail(e)));
+    let pins = lan::DmzPins::from_pairs(pins);
+    let mut lines = Vec::new();
+    let sess = lan::LanSession::setup(&tap, &wan, &subnet, dmz, pins, &mut lines)
+        .unwrap_or_else(|e| fail(e));
+    for l in &lines {
+        session::log(l);
+    }
+    lan::configure_tap(&tap, &subnet).unwrap_or_else(|e| fail(e));
+    session::log(&format!(
+        "net-up: {tap} up, {}/{}",
+        subnet.host, subnet.prefix
+    ));
+    let dhcp_guard = mac.map(|m| {
+        let lease = paguro_vm::dhcp::LeaseConfig {
+            server_ip: subnet.host,
+            client_ip: subnet.guest,
+            client_mac: m,
+            prefix: subnet.prefix,
+            router: subnet.host,
+            dns: sess.dns_servers.clone(),
+            lease_secs: lan::DEFAULT_LEASE_SECS,
+        };
+        paguro_vm::dhcp::server::Guard::start(&tap, lease).unwrap_or_else(|e| fail(e))
+    });
+    // SAFETY: a plain signal(2) install of a static extern "C" handler that
+    // only stores to an atomic; async-signal-safe.
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            on_stop_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            on_stop_signal as *const () as libc::sighandler_t,
+        );
+    }
+    session::log("net-up: ready (SIGTERM/SIGINT to tear down)");
+    while !STOP.load(std::sync::atomic::Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    drop(dhcp_guard);
+    drop(sess);
+    session::log("net-up: torn down");
 }
 
 fn launch(mut a: Args) {
@@ -399,6 +494,14 @@ fn launch(mut a: Args) {
         bus: Bus::Nvme,
         nat_model: "virtio-net-pci".into(),
         nat_hostfwd: Vec::new(),
+        net: NetMode::Tap,
+        // Unique per launcher process: this host may run more than one
+        // session, and a tap name is a host-global resource.
+        lan_ifname: format!("pgtap{}", std::process::id() % 100_000),
+        lan_subnet: lan::DEFAULT_SUBNET.into(),
+        lan_wan: None,
+        dmz: false,
+        pin_ports: Vec::new(),
         hostonly: HostOnlyOpt::Tap(net::IFNAME.into()),
         hostonly_model: "virtio-net-pci".into(),
         vsock_cid: Some(DEFAULT_VSOCK_CID),
@@ -445,6 +548,22 @@ fn launch(mut a: Args) {
             }
             "--nat-model" => o.nat_model = a.val(&k),
             "--nat-hostfwd" => o.nat_hostfwd.push(a.val(&k)),
+            "--net" => {
+                o.net = match a.val(&k).as_str() {
+                    "user" => NetMode::User,
+                    "tap" => NetMode::Tap,
+                    _ => usage(),
+                }
+            }
+            "--lan-ifname" => o.lan_ifname = a.val(&k),
+            "--lan-subnet" => o.lan_subnet = a.val(&k),
+            "--lan-wan" => o.lan_wan = Some(a.val(&k)),
+            "--dmz" => o.dmz = true,
+            "--pin-port" => {
+                let v = a.val(&k);
+                o.pin_ports
+                    .push(lan::parse_pin(&v).unwrap_or_else(|e| fail(e)));
+            }
             "--hostonly" => {
                 let v = a.val(&k);
                 o.hostonly = if v == "none" {

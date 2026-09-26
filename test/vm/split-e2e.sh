@@ -164,7 +164,7 @@ rmdir "$HOSTCG" 2>/dev/null || true
 mkdir "$HOSTCG"
 rm -f "$WIN/vars.fd"
 (cd "$WIN" && "$vm" launch --work "$WIN" --nbd "127.0.0.1:$L2_NBD_PORT/vmdisk" --bek "$SHARE/bek.img" \
-    --bus ahci --nat-hostfwd "tcp:127.0.0.1:$SSH_PORT-:22" --hostonly "socket:$VMWORK/paguro0.sock" \
+    --bus ahci --net user --nat-hostfwd "tcp:127.0.0.1:$SSH_PORT-:22" --hostonly "socket:$VMWORK/paguro0.sock" \
     --no-vsock --record-writes "$VMWORK/writes.log" --memory 6144 --cpus 4 --scope-memory-max 8G \
     --driver-timeout 300 --bek-unplug-after "$BEK_UNPLUG" --host-cgroup "$HOSTCG" \
     --tripwire-hook "$here/tripwire-hook.sh" \

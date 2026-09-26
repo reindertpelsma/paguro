@@ -29,15 +29,17 @@ use paguro_initrd::plan::Target;
 use paguro_initrd::sys;
 use serde_json::{Value, json};
 
+use crate::dhcp;
 use crate::disk::{self, Part, Spec};
 use crate::esp;
 use crate::fve::{self, Params};
 use crate::gpu::{self, VmInfo};
 use crate::identity;
+use crate::lan::{self, DmzPins, LanSession, Subnet};
 use crate::loopdev::{self, Loop};
 use crate::mem;
 use crate::net;
-use crate::qemu::{self, Bus, DiskSource, HostOnly, VmConfig};
+use crate::qemu::{self, Bus, DiskSource, HostOnly, Lan, VmConfig};
 use crate::qmp::Qmp;
 
 pub type R<T> = Result<T, String>;
@@ -479,6 +481,15 @@ pub enum HostOnlyOpt {
     Socket(PathBuf),
 }
 
+/// `--net user|tap` (DESIGN.md §5c): `Tap` is the default (a tap with
+/// vhost-net, routed and nftables-NATed); `User` is the old slirp path,
+/// kept for tests and as an escape hatch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetMode {
+    User,
+    Tap,
+}
+
 pub struct LaunchOpts {
     pub work: PathBuf,
     pub disk: DiskSource,
@@ -489,6 +500,18 @@ pub struct LaunchOpts {
     pub bus: Bus,
     pub nat_model: String,
     pub nat_hostfwd: Vec<String>,
+    pub net: NetMode,
+    /// The LAN tap's name (generated per session unless given): must be
+    /// unique on a shared host, so the default includes the launcher's pid.
+    pub lan_ifname: String,
+    /// `A.B.C.D/N`, parsed at launch (so a bad `--lan-subnet` fails before
+    /// anything is created).
+    pub lan_subnet: String,
+    /// The interface masquerade goes out of and the DMZ watches; `None`
+    /// autodetects the host's current default route.
+    pub lan_wan: Option<String>,
+    pub dmz: bool,
+    pub pin_ports: Vec<(u16, lan::Pin)>,
     pub hostonly: HostOnlyOpt,
     pub hostonly_model: String,
     pub vsock_cid: Option<u32>,
@@ -584,7 +607,15 @@ pub fn config(o: &LaunchOpts, gpu_args: Vec<String>) -> R<VmConfig> {
         identity: id,
         smbios_file,
         nat_model: o.nat_model.clone(),
-        nat_hostfwd: o.nat_hostfwd.clone(),
+        lan: match o.net {
+            NetMode::User => Lan::User {
+                hostfwd: o.nat_hostfwd.clone(),
+            },
+            NetMode::Tap => Lan::Tap {
+                ifname: o.lan_ifname.clone(),
+                vhost: true,
+            },
+        },
         hostonly: match &o.hostonly {
             HostOnlyOpt::None => HostOnly::None,
             HostOnlyOpt::Tap(n) => HostOnly::Tap { ifname: n.clone() },
@@ -708,6 +739,25 @@ pub fn launch(o: &LaunchOpts) -> R<()> {
             "tripwire: NONE: a refusal before the driver arms reaches the guest as EIO (DESIGN.md §4.4)",
         ),
     }
+    // The LAN's session-scoped state (DESIGN.md §5c): the nftables table,
+    // ip_forward, DNS and Docker/firewalld coexistence. Built once, dropped
+    // once at the very end of this function however it returns — a tap, a
+    // sysctl flip or a coexistence rule never outlives this session.
+    let mut lan_session: Option<LanSession> = None;
+    if let Lan::Tap { ifname, .. } = &cfg.lan {
+        let subnet = Subnet::parse(&o.lan_subnet)?;
+        let wan = match &o.lan_wan {
+            Some(w) => w.clone(),
+            None => lan::default_route_iface()?,
+        };
+        let pins = DmzPins::from_pairs(o.pin_ports.iter().copied());
+        let mut lines = Vec::new();
+        let s = LanSession::setup(ifname, &wan, &subnet, o.dmz, pins, &mut lines)?;
+        for l in &lines {
+            log(l);
+        }
+        lan_session = Some(s);
+    }
     // One QEMU per guest boot: each starts paused, gets the tripwire, then
     // runs; a guest reboot ends it (-action reboot=shutdown).
     let mut boot = 0u32;
@@ -726,8 +776,42 @@ pub fn launch(o: &LaunchOpts) -> R<()> {
                 net::PREFIX
             ));
         }
+        // The LAN tap: QEMU creates it (script=no, an unheld name) the
+        // moment it opens the netdev, in the host's own namespace; address
+        // and DHCP are per-boot because a guest reboot gets a fresh tap.
+        let mut dhcp_guard: Option<dhcp::server::Guard> = None;
+        if let (Lan::Tap { ifname, .. }, Some(sess)) = (&cfg.lan, &lan_session) {
+            let subnet = Subnet::parse(&o.lan_subnet)?;
+            lan::configure_tap(ifname, &subnet)?;
+            log(&format!(
+                "lan: {ifname} up, {}/{}",
+                subnet.host, subnet.prefix
+            ));
+            match cfg.identity.mac.as_deref().map(lan::parse_mac) {
+                Some(Ok(mac)) => {
+                    let lease = dhcp::LeaseConfig {
+                        server_ip: subnet.host,
+                        client_ip: subnet.guest,
+                        client_mac: mac,
+                        prefix: subnet.prefix,
+                        router: subnet.host,
+                        dns: sess.dns_servers.clone(),
+                        lease_secs: lan::DEFAULT_LEASE_SECS,
+                    };
+                    match dhcp::server::Guard::start(ifname, lease) {
+                        Ok(g) => dhcp_guard = Some(g),
+                        Err(e) => log(&format!("lan: DHCP server not started on {ifname}: {e}")),
+                    }
+                }
+                Some(Err(e)) => log(&format!("lan: bad host MAC, no DHCP lease: {e}")),
+                None => {
+                    log("lan: no host MAC passed through, no DHCP lease (identity: mac missing)")
+                }
+            }
+        }
         let r = supervise(o, &o.work.join("qmp.sock"), &mut child, pid, boot);
         let st = child.wait().map_err(|e| e.to_string())?;
+        drop(dhcp_guard);
         log(&format!("QEMU exited: {st}"));
         let (r, armed) = match r {
             Ok((end, armed)) => (Ok(end), armed),

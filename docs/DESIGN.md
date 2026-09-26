@@ -3137,6 +3137,17 @@ at kernel speed and makes the DMZ below a plain DNAT.
   the classic libvirt-plus-Docker breakage. So the launcher detects Docker and
   firewalld and adds its accept where they will honour it (`DOCKER-USER`,
   firewalld's policy/zone). A preflight check says so plainly when it cannot.
+  **ufw needs the same treatment, for more than the DMZ**: its default-deny
+  INPUT policy blocks the tap's own DHCP and DNS traffic too (both arrive as
+  ordinary INPUT-chain packets addressed to the host, not forwarded ones,
+  so there is no other coexistence path for them at all) — confirmed live on
+  a ufw-protected host, where the DHCP server never saw a single packet until
+  `ufw allow in on <tap>` (INPUT) and `ufw route allow in|out on <tap>`
+  (FORWARD, the DMZ's path) were added alongside the Docker/firewalld rules,
+  all three torn down together at session end.
+- **The default subnet is `198.19.249.0/24`** — inside RFC 2544's
+  benchmarking range, chosen because nothing on a real LAN or Docker's
+  default bridges ever uses it (`--lan-subnet` overrides it).
 
 ### The network: Windows keeps its inbound services
 

@@ -60,7 +60,7 @@ paguro-vm prepare --disk /dev/vda --partition $PART --volume-guid $VOLUME_GUID \
     --volume-id \$(tail -1 /run/vol) --vmk-file /run/vmk --esp-dir /mnt/esp --work /run/paguro/vm > /dev/null
 umount /mnt/esp
 (setsid paguro-vm launch --work /run/paguro/vm --disk-dev /dev/mapper/paguro-vmdisk --bus ahci \
-    --nat-hostfwd tcp:0.0.0.0:$SSH_PORT-:22 --hostonly tap:paguro0 --vsock-cid 3 --memory 5120 --cpus 2 \
+    --net user --nat-hostfwd tcp:0.0.0.0:$SSH_PORT-:22 --hostonly tap:paguro0 --vsock-cid 3 --memory 5120 --cpus 2 \
     --driver-timeout 0 --bek-unplug-after 60 --ovmf-code /usr/share/OVMF/OVMF_CODE_4M.fd \
     --ovmf-vars-template /usr/share/OVMF/OVMF_VARS_4M.fd \
     -- -qmp unix:/run/paguro/vm/qmp-test.sock,server=on,wait=off > /share/nested-launch.log 2>&1 &)

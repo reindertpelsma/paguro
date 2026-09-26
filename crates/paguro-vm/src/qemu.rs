@@ -65,6 +65,23 @@ pub enum DiskSource {
     },
 }
 
+/// The VM's LAN adapter (DESIGN.md §5c "The VM's network"): `User` is the
+/// old slirp path (`--net user`, kept for tests and as an escape hatch),
+/// `Tap` is the default — a tap with vhost-net, routed and NATed/DMZ'd by
+/// `lan.rs` and paguro's own nftables table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Lan {
+    /// `hostfwd` rules only ever apply here (slirp is the only netdev that
+    /// understands them).
+    User {
+        hostfwd: Vec<String>,
+    },
+    Tap {
+        ifname: String,
+        vhost: bool,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostOnly {
     None,
@@ -108,8 +125,7 @@ pub struct VmConfig {
     /// Where the SMBIOS blob is written for `-smbios file=`.
     pub smbios_file: PathBuf,
     pub nat_model: String,
-    /// `hostfwd` rules on the NAT adapter (tests reach the guest's SSH).
-    pub nat_hostfwd: Vec<String>,
+    pub lan: Lan,
     pub hostonly: HostOnly,
     pub hostonly_model: String,
     pub vsock_cid: Option<u32>,
@@ -284,21 +300,27 @@ pub fn argv(c: &VmConfig) -> Vec<String> {
         ]);
     }
 
-    // Network: NAT with the host's MAC; the host-only link.
+    // Network: the LAN adapter carries the host's MAC (DESIGN.md §4.5); the
+    // host-only link (below) is separate and always paguro's own MAC.
     let mac = c
         .identity
         .mac
         .as_ref()
         .map(|m| format!(",mac={m}"))
         .unwrap_or_default();
-    let fwd: String = c
-        .nat_hostfwd
-        .iter()
-        .map(|f| format!(",hostfwd={f}"))
-        .collect();
+    let netdev = match &c.lan {
+        Lan::User { hostfwd } => {
+            let fwd: String = hostfwd.iter().map(|f| format!(",hostfwd={f}")).collect();
+            format!("user,id=nat{fwd}")
+        }
+        Lan::Tap { ifname, vhost } => format!(
+            "tap,id=nat,ifname={ifname},script=no,downscript=no,vhost={}",
+            if *vhost { "on" } else { "off" }
+        ),
+    };
     push(&[
         s("-netdev"),
-        format!("user,id=nat{fwd}"),
+        netdev,
         s("-device"),
         format!("{},netdev=nat,id=natdev{mac}", c.nat_model),
     ]);
@@ -381,7 +403,7 @@ mod tests {
             },
             smbios_file: "/run/paguro/vm/smbios.bin".into(),
             nat_model: "virtio-net-pci".into(),
-            nat_hostfwd: vec![],
+            lan: Lan::User { hostfwd: vec![] },
             hostonly: HostOnly::Tap {
                 ifname: "paguro0".into(),
             },
@@ -472,6 +494,37 @@ mod tests {
             let d = after(&a, "-device");
             assert!(d.iter().any(|d| d.contains("drive=disk0") && d.contains("werror=report,rerror=report")), "{bus:?}");
         }
+    }
+
+    #[test]
+    fn lan_user_hostfwd() {
+        let mut c = config();
+        c.lan = Lan::User {
+            hostfwd: vec!["tcp:127.0.0.1:2222-:22".into()],
+        };
+        let a = argv(&c);
+        assert!(after(&a, "-netdev").contains(&"user,id=nat,hostfwd=tcp:127.0.0.1:2222-:22"));
+    }
+
+    #[test]
+    fn lan_tap_with_vhost() {
+        let mut c = config();
+        c.lan = Lan::Tap {
+            ifname: "pgtap0".into(),
+            vhost: true,
+        };
+        let a = argv(&c);
+        assert!(
+            after(&a, "-netdev")
+                .contains(&"tap,id=nat,ifname=pgtap0,script=no,downscript=no,vhost=on")
+        );
+        // The LAN device still carries the host's MAC either way.
+        assert!(
+            after(&a, "-device")
+                .iter()
+                .any(|d| d.starts_with("virtio-net-pci,netdev=nat")
+                    && d.ends_with("mac=a4:b1:c1:00:11:22"))
+        );
     }
 
     #[test]

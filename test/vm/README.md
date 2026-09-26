@@ -12,6 +12,7 @@ volume without loading anything into the host's kernel.
 | `q1-probe.ps1` | §11 Q1–Q3 from inside the guest (`split-e2e.sh` with `PAGURO_Q1=1`; `PAGURO_Q1_KILL=1` ends the session with `kill -9`): writes into the image in every form, `FSCTL_MOVE_FILE` of it, the optimiser, with extents, dirty bit, bad-sector count and events before and after; a native scan afterwards |
 | `q1-chkdsk.ps1` | after `PAGURO_Q1_CHKDSK=1` schedules `chkdsk C: /r` and reboots the guest into it: autochk's own log (copied out of `System Volume Information` with backup semantics) and the image as NTFS then maps it |
 | `q24.py` | §11 Q24's instrument: which sectors the guest wrote where, from the disk's `dm-log-writes` log (QEMU `blklogwrites`) |
+| `net-smoke.sh` | §5c: the VM's LAN (no Windows) — a throwaway busybox guest with a tap exactly as `--net tap` configures it, `paguro-vm net-up`/`net-down` (the same `lan.rs`/`dhcp.rs` production code) standing in for `launch`'s network setup. See `crates/paguro-vm/README.md`'s "The VM's network" section |
 
 ## `split-e2e.sh`
 

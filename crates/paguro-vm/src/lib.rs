@@ -8,12 +8,14 @@
 //! unit tests; the rest (loop devices, device-mapper, QEMU, QMP) is thin
 //! glue in [`session`].
 
+pub mod dhcp;
 pub mod disk;
 pub mod esp;
 pub mod fat;
 pub mod fve;
 pub mod gpu;
 pub mod identity;
+pub mod lan;
 pub mod loopdev;
 pub mod mem;
 pub mod net;
