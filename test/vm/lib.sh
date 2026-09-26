@@ -37,6 +37,12 @@ l2_root() {
     rm -f "$r/bin/ip"
     vm_bin "$(command -v ip)" sbin/ip
     vm_bin "$(command -v qemu-nbd)" bin/qemu-nbd
+    # The split test's NBD server: nbdkit answers a failed read with an error
+    # on that request and keeps the connection (qemu-nbd drops it, which a
+    # client holding requests across reconnects then retries forever).
+    vm_bin "$(command -v nbdkit)" bin/nbdkit
+    vm_bin /usr/lib/x86_64-linux-gnu/nbdkit/plugins/nbdkit-file-plugin.so \
+        usr/lib/x86_64-linux-gnu/nbdkit/plugins/nbdkit-file-plugin.so
     vm_bin "$(command -v bdeinfo)" bin/bdeinfo
     vm_bin "$(command -v bdemount)" bin/bdemount
     vm_bin "$(command -v dislocker-metadata)" bin/dislocker-metadata

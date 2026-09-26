@@ -64,6 +64,7 @@ const CMD_CREATE: u8 = 3;
 const CMD_REMOVE: u8 = 4;
 const CMD_SUSPEND: u8 = 6;
 const CMD_LOAD: u8 = 9;
+const CMD_TARGET_MSG: u8 = 14;
 
 /// DM_READONLY_FLAG.
 pub const READONLY: u32 = 1;
@@ -275,6 +276,24 @@ impl Dm {
         let mut b = header(name, 0, HDR)?;
         self.call(CMD_SUSPEND, &mut b)
             .map_err(|e| format!("dm resume {name}: {e}"))
+    }
+
+    /// `dmsetup message <name> <sector> <msg>`: a message to the target
+    /// at `sector` of a live table (struct dm_target_msg after the header).
+    pub fn message(&self, name: &str, sector: u64, msg: &str) -> R<()> {
+        if msg.is_empty() || msg.contains('\0') {
+            return Err(format!("bad dm message {msg:?}"));
+        }
+        let mut body = sector.to_le_bytes().to_vec();
+        body.extend_from_slice(msg.as_bytes());
+        body.push(0);
+        while body.len() % SPEC_ALIGN != 0 {
+            body.push(0);
+        }
+        let mut b = header(name, 0, HDR + body.len())?;
+        put(&mut b, HDR, &body);
+        self.call(CMD_TARGET_MSG, &mut b)
+            .map_err(|e| format!("dm message {name} {msg:?}: {e}"))
     }
 
     pub fn remove(&self, name: &str) -> R<()> {

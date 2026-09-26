@@ -13,8 +13,9 @@
 //! real disk.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -48,6 +49,8 @@ pub const SESSION_FILE: &str = "session.json";
 pub const BEK_DEVICE: &str = "paguro-bek";
 /// Log every this many I/O errors reported to the guest.
 const IO_ERROR_LOG_EVERY: u64 = 100;
+/// Written to the work directory when the tripwire stopped the VM.
+pub const TRIPPED_FILE: &str = "tripped.json";
 
 /// A JSON object's field, `Null` when absent.
 fn field<'a>(v: &'a Value, k: &str) -> &'a Value {
@@ -508,6 +511,54 @@ pub struct LaunchOpts {
     /// slowly to be useful either (test/vm/README.md).
     pub hv_enlightenments: bool,
     pub extra: Vec<String>,
+    /// View B's tripwire (DESIGN.md §4.4 "Until the driver arms"): set on
+    /// every QEMU before it runs, cleared when the driver arms.
+    pub tripwire: Option<Tripwire>,
+}
+
+/// Who sets and clears the tripwire.
+#[derive(Clone, Debug)]
+pub enum Tripwire {
+    /// View B's device-mapper name: `message <name> 0 tripwire <pid|off>`.
+    Dm(String),
+    /// An executable run as `<hook> on <qemu-pid>` / `<hook> off` (the split
+    /// test, whose view B is in another VM).
+    Hook(PathBuf),
+}
+
+impl Tripwire {
+    fn set(&self, pid: u32) -> R<()> {
+        self.run(&format!("{pid}"))
+    }
+    fn off(&self) -> R<()> {
+        self.run("off")
+    }
+    fn run(&self, arg: &str) -> R<()> {
+        match self {
+            Tripwire::Dm(name) => Dm::open()?.message(name, 0, &format!("tripwire {arg}")),
+            Tripwire::Hook(h) => {
+                let mut c = Command::new(h);
+                if arg == "off" {
+                    c.arg("off");
+                } else {
+                    c.args(["on", arg]);
+                }
+                let st = c.status().map_err(|e| format!("{}: {e}", h.display()))?;
+                if st.success() {
+                    Ok(())
+                } else {
+                    Err(format!("{} {arg}: {st}", h.display()))
+                }
+            }
+        }
+    }
+}
+
+/// How one QEMU ended.
+enum End {
+    /// The guest rebooted (`-action reboot=shutdown`): start the next QEMU.
+    Reboot,
+    Exit,
 }
 
 /// The QEMU configuration `launch` runs.
@@ -528,6 +579,7 @@ pub fn config(o: &LaunchOpts, gpu_args: Vec<String>) -> R<VmConfig> {
         bus: o.bus,
         logical_block: o.block_size,
         record_writes: o.record_writes.clone(),
+        record_append: false,
         bek_image: o.bek_image.clone(),
         identity: id,
         smbios_file,
@@ -562,32 +614,6 @@ pub fn agent_frame(v: &Value) -> Vec<u8> {
 }
 
 /// Frames in `buf` (consumed from the front as they complete).
-/// Put the `.BEK` stick back (the same devices `qemu::argv` creates), for a
-/// boot inside the session that needs it again.
-fn bek_plug(q: &mut Qmp, img: &Path) {
-    let steps = [
-        (
-            "blockdev-add",
-            json!({"driver": "file", "filename": img.display().to_string(), "node-name": "bek-file", "read-only": true}),
-        ),
-        (
-            "blockdev-add",
-            json!({"driver": "raw", "file": "bek-file", "node-name": "bek", "read-only": true}),
-        ),
-        (
-            "device_add",
-            json!({"driver": "usb-storage", "bus": "xhci.0", "drive": "bek", "removable": true, "id": BEK_DEVICE}),
-        ),
-    ];
-    for (cmd, args) in steps {
-        if let Err(e) = q.cmd(cmd, args) {
-            log(&format!("BEK: re-plug: {cmd}: {e}"));
-            return;
-        }
-    }
-    log("BEK: plugged again for the new boot");
-}
-
 pub fn agent_frames(buf: &mut Vec<u8>) -> Vec<Value> {
     const MAX_FRAME: usize = 64 << 10;
     let mut out = Vec::new();
@@ -647,7 +673,7 @@ pub fn launch(o: &LaunchOpts) -> R<()> {
             "no .BEK stick (no session.json in the work directory, no --bek): a BitLocker C: stops at the recovery screen",
         );
     }
-    let cfg = config(o, backend.qemu_args(&info))?;
+    let mut cfg = config(o, backend.qemu_args(&info))?;
     let argv = qemu::argv(&cfg);
     if o.print_argv {
         println!("{}", serde_json::to_string(&argv).unwrap_or_default());
@@ -661,17 +687,107 @@ pub fn launch(o: &LaunchOpts) -> R<()> {
         // blklogwrites writes into an existing file.
         File::create(w).map_err(|e| format!("{}: {e}", w.display()))?;
     }
+    let _limit = match &o.host_cgroup {
+        Some(cg) => {
+            let total = fs::read_to_string("/proc/meminfo")
+                .ok()
+                .and_then(|m| mem::mem_total(&m))
+                .ok_or("MemTotal")?;
+            let l = mem::host_limit(total, o.memory_mib << 20)
+                .ok_or("not enough memory for the VM and the host")?;
+            let h = mem::HostLimit::apply(cg, l)?;
+            log(&format!("memory: {}/memory.max = {l}", cg.display()));
+            Some(h)
+        }
+        None => None,
+    };
+    let _ = fs::remove_file(o.work.join(TRIPPED_FILE));
+    match &o.tripwire {
+        Some(t) => log(&format!("tripwire: {t:?}")),
+        None => log(
+            "tripwire: NONE: a refusal before the driver arms reaches the guest as EIO (DESIGN.md §4.4)",
+        ),
+    }
+    // One QEMU per guest boot: each starts paused, gets the tripwire, then
+    // runs; a guest reboot ends it (-action reboot=shutdown).
+    let mut boot = 0u32;
+    loop {
+        boot += 1;
+        cfg.record_append = boot > 1;
+        let argv = qemu::argv(&cfg);
+        let (mut child, pid) = spawn_qemu(o, &argv)?;
+        if let HostOnlyOpt::Tap(name) = &o.hostonly {
+            net::ensure_netns()?;
+            net::attach_link(name)?;
+            log(&format!(
+                "link: {name} in netns {}, {}/{}",
+                net::NETNS,
+                net::HOST_ADDR,
+                net::PREFIX
+            ));
+        }
+        let r = supervise(o, &o.work.join("qmp.sock"), &mut child, pid, boot);
+        let st = child.wait().map_err(|e| e.to_string())?;
+        log(&format!("QEMU exited: {st}"));
+        let (r, armed) = match r {
+            Ok((end, armed)) => (Ok(end), armed),
+            Err(e) => (Err(e), false),
+        };
+        // Killed while under the tripwire: the module did it (a SIGKILL from
+        // anyone else before arming is reported the same way, and is as safe).
+        if st.signal() == Some(libc::SIGKILL) && o.tripwire.is_some() && !armed {
+            let msg = "tripwire: Windows read or wrote the Linux image before paguro's driver \
+                had armed, and the VM was stopped before Windows could see the refusal. \
+                This is usually a disk check scheduled in Windows (chkdsk /r): start Windows \
+                natively once to let it finish there, where it is harmless. Windows may \
+                first show Automatic Repair because this boot did not complete: choose \
+                Continue.";
+            log(msg);
+            let _ = fs::write(
+                o.work.join(TRIPPED_FILE),
+                json!({ "boot": boot, "qemu_pid": pid, "message": msg }).to_string(),
+            );
+            if let Some(t) = &o.tripwire {
+                let _ = t.off();
+            }
+            return Err("stopped by the tripwire".into());
+        }
+        match r {
+            Ok(End::Reboot) => {
+                log("guest rebooted: a new QEMU, paused until the tripwire is set");
+            }
+            Ok(End::Exit) => break,
+            Err(e) => {
+                if let Some(t) = &o.tripwire {
+                    let _ = t.off();
+                }
+                return Err(e);
+            }
+        }
+    }
+    if let Some(t) = &o.tripwire {
+        let _ = t.off();
+    }
+    Ok(())
+}
+
+/// Start QEMU (paused: `-S`) and wait for its QMP socket and pid.
+fn spawn_qemu(o: &LaunchOpts, argv: &[String]) -> R<(std::process::Child, u32)> {
     for f in ["qmp.sock", "agent.sock", "qemu.pid"] {
         let _ = fs::remove_file(o.work.join(f));
     }
-    let qlog = File::create(o.work.join("qemu.log")).map_err(|e| e.to_string())?;
+    let qlog = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(o.work.join("qemu.log"))
+        .map_err(|e| e.to_string())?;
     let mut cmd = match &o.scope_memory_max {
         Some(max) => {
             let mut c = Command::new("systemd-run");
             c.args(["--user", "--scope", "--collect", "-p"])
                 .arg(format!("MemoryMax={max}"))
                 .arg("--");
-            c.args(&argv);
+            c.args(argv);
             c
         }
         None => {
@@ -703,50 +819,36 @@ pub fn launch(o: &LaunchOpts) -> R<()> {
         Ok(()) => log("memory: QEMU oom_score_adj -1000"),
         Err(e) => log(&format!("memory: {e}")),
     }
-    let _limit = match &o.host_cgroup {
-        Some(cg) => {
-            let total = fs::read_to_string("/proc/meminfo")
-                .ok()
-                .and_then(|m| mem::mem_total(&m))
-                .ok_or("MemTotal")?;
-            let l = mem::host_limit(total, o.memory_mib << 20)
-                .ok_or("not enough memory for the VM and the host")?;
-            let h = mem::HostLimit::apply(cg, l)?;
-            log(&format!("memory: {}/memory.max = {l}", cg.display()));
-            Some(h)
-        }
-        None => None,
-    };
-    if let HostOnlyOpt::Tap(name) = &o.hostonly {
-        net::ensure_netns()?;
-        net::attach_link(name)?;
-        log(&format!(
-            "link: {name} in netns {}, {}/{}",
-            net::NETNS,
-            net::HOST_ADDR,
-            net::PREFIX
-        ));
-    }
-    let r = supervise(o, &qmp_path, &mut child);
-    let st = child.wait().map_err(|e| e.to_string())?;
-    log(&format!("QEMU exited: {st}"));
-    r
+    Ok((child, pid))
 }
 
-fn supervise(o: &LaunchOpts, qmp_path: &Path, child: &mut std::process::Child) -> R<()> {
+fn supervise(
+    o: &LaunchOpts,
+    qmp_path: &Path,
+    child: &mut std::process::Child,
+    pid: u32,
+    boot: u32,
+) -> R<(End, bool)> {
     let mut q = Qmp::connect(qmp_path)?;
+    // QEMU is paused (-S): nothing of the guest has run yet.
+    if let Some(t) = &o.tripwire {
+        if let Err(e) = t.set(pid) {
+            let _ = child.kill();
+            return Err(format!("tripwire: not set, so the VM does not run: {e}"));
+        }
+        log(&format!("tripwire: set on QEMU pid {pid} (boot {boot})"));
+    }
+    q.cmd("cont", json!({}))?;
     let start = Instant::now();
     let mut bek_first_read: Option<Instant> = None;
     let mut bek_gone = o.bek_image.is_none();
-    // device_del sent but DEVICE_DELETED not yet seen; and a reset that
-    // arrived in between, whose re-plug waits for it.
-    let mut bek_deleting = false;
-    let mut bek_replug = false;
-    let mut driver_seen = o.driver_timeout.is_none();
+    let mut armed = false;
+    let mut warned = false;
     let mut agent: Option<std::os::unix::net::UnixStream> = None;
     let mut abuf = Vec::new();
     let mut last_note = Instant::now();
     let mut io_errors = 0u64;
+    let mut end = End::Exit;
     loop {
         // QEMU (or systemd-run, which execs it) gone: reaped here, so an
         // exited QEMU is never mistaken for a running one.
@@ -756,10 +858,10 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, child: &mut std::process::Child) -
                     "disk: {io_errors} I/O error(s) reported to the guest in all"
                 ));
             }
-            return Ok(());
+            return Ok((end, armed));
         }
         // The .BEK: unplugged once bootmgr has read it and Windows has had
-        // time to start.
+        // time to start. Each boot is a new QEMU, with the stick in again.
         if !bek_gone {
             match q.reads(BEK_DEVICE) {
                 Ok(Some(n)) if n > 0 && bek_first_read.is_none() => {
@@ -772,7 +874,7 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, child: &mut std::process::Child) -
                 Ok(_) => {}
                 Err(e) => {
                     if e.contains("closed") {
-                        return Ok(());
+                        return Ok((end, armed));
                     }
                 }
             }
@@ -782,42 +884,56 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, child: &mut std::process::Child) -
                     Err(e) => log(&format!("BEK: {e}")),
                 }
                 bek_gone = true;
-                bek_deleting = true;
             }
         }
-        // The driver's report on the agent port.
-        if !driver_seen {
-            if agent.is_none() {
-                agent = std::os::unix::net::UnixStream::connect(o.work.join("agent.sock")).ok();
-                if let Some(a) = &agent {
-                    let _ = a.set_read_timeout(Some(Duration::from_millis(200)));
-                }
+        // The agent port: the driver asks to be armed; the tripwire comes
+        // off first, and only then is it told it is armed (INTERFACES.md
+        // §11.3). Without the ack it is not armed, and the tripwire stays.
+        if agent.is_none() {
+            agent = std::os::unix::net::UnixStream::connect(o.work.join("agent.sock")).ok();
+            if let Some(a) = &agent {
+                let _ = a.set_read_timeout(Some(Duration::from_millis(200)));
             }
-            if let Some(a) = agent.as_mut() {
-                let mut b = [0u8; 4096];
-                if let Ok(n) = a.read(&mut b) {
-                    abuf.extend_from_slice(b.get(..n).unwrap_or(&[]));
-                    for f in agent_frames(&mut abuf) {
-                        log(&format!("agent: {f}"));
-                        if driver_ok(&f) {
-                            driver_seen = true;
+        }
+        if let Some(a) = agent.as_mut() {
+            let mut b = [0u8; 4096];
+            if let Ok(n) = a.read(&mut b) {
+                abuf.extend_from_slice(b.get(..n).unwrap_or(&[]));
+                for f in agent_frames(&mut abuf) {
+                    log(&format!("agent: {f}"));
+                    if !driver_ok(&f) || armed {
+                        continue;
+                    }
+                    let r = o.tripwire.as_ref().map_or(Ok(()), Tripwire::off);
+                    let ack = match &r {
+                        Ok(()) => {
+                            armed = true;
                             log(&format!(
-                                "driver: reported after {:.1}s",
+                                "driver: reported after {:.1}s; armed: the tripwire is off, refusals reach Windows as EIO",
                                 start.elapsed().as_secs_f64()
                             ));
+                            json!({"type": "armed", "ok": true})
                         }
+                        Err(e) => {
+                            log(&format!(
+                                "driver: reported, but the tripwire could not be cleared ({e}): not armed"
+                            ));
+                            json!({"type": "armed", "ok": false, "error": e})
+                        }
+                    };
+                    if let Err(e) = a.write_all(&agent_frame(&ack)) {
+                        log(&format!("agent: ack: {e}"));
                     }
                 }
             }
-            if let Some(t) = o.driver_timeout {
-                if !driver_seen && start.elapsed() > t {
-                    log(&format!(
-                        "driver: no report within {}s: stopping the VM (DESIGN.md §4.4)",
-                        t.as_secs()
-                    ));
-                    let _ = q.cmd("system_powerdown", json!({}));
-                    driver_seen = true;
-                }
+        }
+        if let Some(t) = o.driver_timeout {
+            if !armed && !warned && start.elapsed() > t {
+                log(&format!(
+                    "driver: no report within {}s: Windows runs under the tripwire (DESIGN.md §4.4)",
+                    t.as_secs()
+                ));
+                warned = true;
             }
         }
         if let Err(e) = q.poll_events(Duration::from_millis(500)) {
@@ -837,35 +953,6 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, child: &mut std::process::Child) -
                     for n in ["bek", "bek-file"] {
                         let _ = q.cmd("blockdev-del", json!({ "node-name": n }));
                     }
-                    bek_deleting = false;
-                    if std::mem::take(&mut bek_replug) {
-                        if let Some(img) = &o.bek_image {
-                            bek_plug(&mut q, img);
-                            bek_gone = false;
-                            bek_first_read = None;
-                        }
-                    }
-                }
-                // A reboot inside the session (Windows Update, autochk): the
-                // new boot needs the .BEK again, or bootmgr stops at BitLocker
-                // recovery.
-                "RESET" => {
-                    log(&format!("qmp: {e}"));
-                    if let Some(img) = &o.bek_image {
-                        if !bek_gone {
-                            bek_first_read = None;
-                        } else if bek_deleting {
-                            bek_replug = true;
-                        } else {
-                            bek_plug(&mut q, img);
-                            bek_gone = false;
-                            bek_first_read = None;
-                        }
-                    }
-                    // The driver gate is not re-armed: a reset can lead into
-                    // autochk, which runs for minutes before any driver can
-                    // report, and a gate firing then would power the VM off
-                    // mid-repair (DESIGN.md §4.4, open).
                 }
                 // View B's EIO reaching the guest (DESIGN.md §4.3): counted,
                 // the first of each run logged.
@@ -883,7 +970,13 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, child: &mut std::process::Child) -
                         ));
                     }
                 }
-                "SHUTDOWN" | "SUSPEND" | "WAKEUP" | "STOP" | "RESUME" => {
+                "SHUTDOWN" => {
+                    log(&format!("qmp: {e}"));
+                    if e.pointer("/data/reason").and_then(Value::as_str) == Some("guest-reset") {
+                        end = End::Reboot;
+                    }
+                }
+                "SUSPEND" | "WAKEUP" | "STOP" | "RESUME" | "RESET" => {
                     log(&format!("qmp: {e}"));
                 }
                 _ => {}

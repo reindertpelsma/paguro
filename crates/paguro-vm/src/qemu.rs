@@ -101,6 +101,8 @@ pub struct VmConfig {
     /// Record every write to the disk (QEMU `blklogwrites`, the
     /// `dm-log-writes` format) — DESIGN.md §11 Q24's instrument.
     pub record_writes: Option<PathBuf>,
+    /// Append to it (every boot after the first: each boot is a new QEMU).
+    pub record_append: bool,
     pub bek_image: Option<PathBuf>,
     pub identity: HostIdentity,
     /// Where the SMBIOS blob is written for `-smbios file=`.
@@ -137,6 +139,12 @@ pub fn argv(c: &VmConfig) -> Vec<String> {
         format!("{},process={}", c.name, c.name),
         s("-nodefaults"),
         s("-no-user-config"),
+        // Paused until the launcher has set view B's tripwire; a guest
+        // reboot ends this QEMU so the next boot gets a fresh one, set
+        // the same way (DESIGN.md §4.4 "Until the driver arms").
+        s("-S"),
+        s("-action"),
+        s("reboot=shutdown"),
     ]);
     let mut machine = s("q35,accel=kvm,vmport=off");
     if c.identity.smbios3 {
@@ -194,7 +202,10 @@ pub fn argv(c: &VmConfig) -> Vec<String> {
         }),
         DiskSource::Nbd { host, port, export } => serde_json::json!({
             "driver": "nbd", "node-name": "disk0-file", "export": export,
-            "server": {"type": "inet", "host": host, "port": port.to_string()}
+            "server": {"type": "inet", "host": host, "port": port.to_string()},
+            // A server stopped by the tripwire must stall the guest's
+            // request, not fail it: a failure would reach Windows.
+            "reconnect-delay": 3600
         }),
     };
     push(&[s("-blockdev"), json(file)]);
@@ -209,10 +220,19 @@ pub fn argv(c: &VmConfig) -> Vec<String> {
                 serde_json::json!({"driver": "file", "filename": log.display().to_string(), "node-name": "wlog-file"}),
             ),
             s("-blockdev"),
-            json(serde_json::json!({
-                "driver": "blklogwrites", "file": "disk0-raw", "log": "wlog-file",
-                "log-sector-size": 512, "log-append": false, "node-name": "disk0"
-            })),
+            json(if c.record_append {
+                // An appended log keeps the sector size it was created with;
+                // QEMU refuses both options together.
+                serde_json::json!({
+                    "driver": "blklogwrites", "file": "disk0-raw", "log": "wlog-file",
+                    "log-append": true, "node-name": "disk0"
+                })
+            } else {
+                serde_json::json!({
+                    "driver": "blklogwrites", "file": "disk0-raw", "log": "wlog-file",
+                    "log-sector-size": 512, "log-append": false, "node-name": "disk0"
+                })
+            }),
         ]);
         "disk0"
     } else {
@@ -348,6 +368,7 @@ mod tests {
             bus: Bus::Nvme,
             logical_block: 512,
             record_writes: None,
+            record_append: false,
             bek_image: Some("/run/paguro/vm/bek.img".into()),
             identity: HostIdentity {
                 smbios: vec![],
@@ -403,6 +424,11 @@ mod tests {
             ["file=/sys/firmware/acpi/tables/MSDM"]
         );
         assert!(after(&a, "-machine")[0].contains("smbios-entry-point-type=64"));
+        assert!(
+            a.iter().any(|x| x == "-S"),
+            "starts paused, for the tripwire"
+        );
+        assert_eq!(after(&a, "-action"), vec!["reboot=shutdown"]);
         let devs = after(&a, "-device");
         assert!(
             devs.iter()
@@ -466,7 +492,22 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(b[0]).unwrap();
         assert_eq!(v["driver"], "nbd");
         assert_eq!(v["server"]["port"], "10809");
+        assert_eq!(
+            v["reconnect-delay"], 3600,
+            "a stopped server stalls, never fails, the guest"
+        );
         assert!(b.iter().any(|x| x.contains("\"blklogwrites\"")));
+        c.record_append = true;
+        let a2 = argv(&c);
+        let appended = after(&a2, "-blockdev");
+        let w = appended
+            .iter()
+            .find(|x| x.contains("blklogwrites"))
+            .unwrap();
+        assert!(
+            w.contains("\"log-append\":true") && !w.contains("log-sector-size"),
+            "{w}"
+        );
         assert!(after(&a, "-netdev").iter().any(|n| {
             n.starts_with("stream,id=hostonly,server=off,addr.type=unix,addr.path=/tmp/p0.sock")
         }));

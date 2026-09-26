@@ -13,7 +13,7 @@
 //!                  [--ovmf-code F] [--ovmf-vars F] [--system-partition NAME]
 //!                  [--vnc ADDR] [--host-cgroup DIR] [--driver-timeout S]
 //!                  [--bek-unplug-after S] [--scope-memory-max SIZE] [--rtc utc]
-//!                  [--no-hv-enlightenments]
+//!                  [--no-hv-enlightenments] [--tripwire-hook EXE | --no-tripwire]
 //!                  [--print-argv]
 //!     QEMU with the host's identity; unplugs the .BEK once read
 //! paguro-vm teardown --work DIR
@@ -417,7 +417,9 @@ fn launch(mut a: Args) {
         rtc_localtime: true,
         hv_enlightenments: true,
         extra: Vec::new(),
+        tripwire: None,
     };
+    let mut tripwire_set = false;
     let mut bus_set = false;
     let mut vars = None;
     while let Some(k) = a.it.next() {
@@ -474,6 +476,14 @@ fn launch(mut a: Args) {
             "--scope-memory-max" => o.scope_memory_max = Some(a.val(&k)),
             "--rtc" => o.rtc_localtime = a.val(&k) != "utc",
             "--no-hv-enlightenments" => o.hv_enlightenments = false,
+            "--tripwire-hook" => {
+                o.tripwire = Some(session::Tripwire::Hook(PathBuf::from(a.val(&k))));
+                tripwire_set = true;
+            }
+            "--no-tripwire" => {
+                o.tripwire = None;
+                tripwire_set = true;
+            }
             "--print-argv" => o.print_argv = true,
             "--" => o.extra.extend(a.it.by_ref()),
             _ => usage(),
@@ -492,6 +502,13 @@ fn launch(mut a: Args) {
         }
         if o.block_size == 0 {
             o.block_size = s.get("block_size").and_then(|v| v.as_u64()).unwrap_or(512) as u32;
+        }
+        // The tripwire goes on view B, which `prepare` made here.
+        if !tripwire_set && matches!(o.disk, DiskSource::Device(_)) {
+            o.tripwire = s
+                .get("view_b_name")
+                .and_then(|v| v.as_str())
+                .map(|n| session::Tripwire::Dm(n.to_string()));
         }
     }
     if o.block_size == 0 {

@@ -9,7 +9,7 @@
 #       pgctl claim                     the image file on C: (view B's EIO)
 #       paguro-vm prepare               substitute + .BEK, synthetic ESP,
 #                                       view B, /dev/mapper/paguro-vmdisk
-#       qemu-nbd                        exports it
+#       nbdkit                          exports it
 #   host: paguro-vm launch --nbd ...    Windows on it: host identity, the
 #                                       .BEK stick (unplugged once read),
 #                                       every write logged (Q24)
@@ -75,7 +75,7 @@ wscp() { scp -i "$WIN_KEY" -P "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKno
             -o LogLevel=ERROR "$@"; }
 check() { grep -a -m1 "^CHECK $1: " "$2" | sed "s/^CHECK $1: //" || true; }
 # The write log's entry count: a phase boundary for q24.py.
-phase() { echo "$1 $(python3 "$here/q24.py" --count "$VMWORK/writes.log")" >> "$PHASES"; }
+phase() { echo "$1 $(python3 "$here/q24.py" --count "$VMWORK/writes.log" 2>/dev/null)" >> "$PHASES"; }
 shim() { # winvm (screen, keys) against the launcher's second QMP socket
     [ -L "$VMWORK/winshim/run" ] && rm -f "$VMWORK/winshim/run"
     mkdir -p "$VMWORK/winshim/run"
@@ -151,13 +151,12 @@ dmsetup remove paguro-vmc; umount /mnt/bek" 2>&1) || true
 echo "$out" > "$VMWORK/oracles-real.txt"
 expect "libbde opens the real volume through the stack with the session's .BEK" "$(grep -a '^libbde' <<<"$out")" '^libbde NTFS$'
 expect "dislocker too" "$(grep -a '^dislocker' <<<"$out")" '^dislocker NTFS$'
-l2 "(setsid qemu-nbd --persistent --shared=4 --export-name=vmdisk --format=raw --cache=none --aio=native \
-    --bind=0.0.0.0 --port=10809 /dev/mapper/paguro-vmdisk > /share/qemu-nbd.log 2>&1 & echo \$! > /run/nbd.pid); sleep 1" >/dev/null
+l2 "nbdkit --pidfile /run/nbd.pid -p 10809 -i 0.0.0.0 file /dev/mapper/paguro-vmdisk; sleep 1" >/dev/null
 
 say "Windows: paguro-vm launch"
-# A reboot inside the session (PAGURO_Q1_CHKDSK) needs the .BEK again: the
-# launcher re-plugs it on the guest's reset, which that phase checks.
 BEK_UNPLUG=30
+# The tripwire hook reaches view B in L2 through the share.
+export PAGURO_SHARE="$SHARE"
 # The host workloads' memory.max (DESIGN.md §4.5), on a scratch cgroup
 # with nothing in it: the plumbing, without touching the real host's.
 HOSTCG=/sys/fs/cgroup/paguro-vm-e2e-host
@@ -168,6 +167,7 @@ rm -f "$WIN/vars.fd"
     --bus ahci --nat-hostfwd "tcp:127.0.0.1:$SSH_PORT-:22" --hostonly "socket:$VMWORK/paguro0.sock" \
     --no-vsock --record-writes "$VMWORK/writes.log" --memory 6144 --cpus 4 --scope-memory-max 8G \
     --driver-timeout 300 --bek-unplug-after "$BEK_UNPLUG" --host-cgroup "$HOSTCG" \
+    --tripwire-hook "$here/tripwire-hook.sh" \
     -- -qmp "unix:$WIN/qmp-test.sock,server=on,wait=off" > "$VMWORK/launch.log" 2>&1) &
 t0=$(date +%s)
 for i in $(seq 90); do
@@ -300,29 +300,33 @@ if [ "${PAGURO_Q1:-0}" = 1 ]; then
 fi
 
 if [ "${PAGURO_Q1_CHKDSK:-0}" = 1 ]; then
-    say "§11 Q1, firmest case: chkdsk /r in the session"
-    # The system volume is checked at the next boot (autochk). /r reads every
-    # cluster; the image's cannot be read, and the question is what it does
-    # about that: report, or take them out of the file.
+    say "§11 Q1, firmest case: chkdsk /r in the session, against the tripwire"
+    # The system volume is checked at the next boot (autochk), before the
+    # driver can arm; /r reads every cluster, the image's included. The
+    # reboot starts a new QEMU with the tripwire set (DESIGN §4.4): the
+    # first refused read must stop it before Windows sees the refusal, so
+    # autochk never gets to "replace bad clusters" in the image.
     # chkdsk exits 3 when it schedules the check for the next boot.
     { wssh 'echo Y| chkdsk C: /r' 2>&1 || true; } | tr -d '\r' | tail -3 | tee -a "$RES"
     wssh 'shutdown /r /t 0' >/dev/null 2>&1 || true
-    sleep 60
-    t0=$(date +%s)
-    for i in $(seq 360); do
+    t0=$(date +%s); trips=""
+    for i in $(seq 180); do
         sleep 10
-        [ $((i % 30)) = 1 ] && shim screenshot "$SHOTS/05-autochk-$i.png" >/dev/null 2>&1 || true
-        wssh 'echo up' 2>/dev/null | grep -aq up && break
+        [ $((i % 30)) = 3 ] && shim screenshot "$SHOTS/05-autochk-$i.png" >/dev/null 2>&1 || true
+        trips=$(l2 "dmsetup status paguro-vmdisk-b" 2>/dev/null | grep -o 'trips [0-9]*' || true)
+        [ -n "$trips" ] && [ "$trips" != "trips 0" ] && break
     done
-    result "chkdsk /r: back to SSH after" "$(( $(date +%s) - t0 )) s"
-    expect "a reboot in the session gets the .BEK again" "$(grep -a 'BEK: plugged again' "$VMWORK/launch.log")" 'plugged again'
-    wscp "$here/q1-chkdsk.ps1" paguro@127.0.0.1:C:/winvm/ || true
-    ck=$(WSSH_TIMEOUT=600 wssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\winvm\q1-chkdsk.ps1' 2>&1 | tr -d '\r') || true
-    echo "$ck" > "$VMWORK/q1-chkdsk.txt"
-    result "chkdsk /r: bad sectors" "$(grep -a -m1 -i 'bad sectors' <<<"$ck")"
-    result "chkdsk /r: what it did" "$(grep -a -i -E 'replac|bad cluster|removed|recover|correct|Windows has' <<<"$ck" | head -8 | tr '\n' '|')"
-    result "chkdsk /r: the image's extents in the guest" "$(check ck.extents <(echo "$ck"))"
-    result "chkdsk /r: dirty" "$(check ck.dirty <(echo "$ck"))"
+    result "chkdsk /r: the tripwire fired after" "$(( $(date +%s) - t0 )) s ($trips)"
+    expect "the reboot ran in a new QEMU, tripwire set before it ran" "$(grep -a -c 'tripwire: set on QEMU pid' "$VMWORK/launch.log")" '^2$'
+    expect "the tripwire fired in autochk's boot" "$trips" '^trips [1-9]'
+    # Standing in for the product, where the killed process is QEMU itself.
+    kill -9 "$(cat "$WIN/qemu.pid")" 2>/dev/null || true
+    for _ in $(seq 30); do grep -aq 'stopped by the tripwire\|tripwire: Windows read' "$VMWORK/launch.log" && break; sleep 1; done
+    expect "the launcher says why the VM stopped" "$(grep -a 'tripwire: Windows read' "$VMWORK/launch.log")" 'before paguro'
+    expect "... and records it" "$(cat "$WIN/tripped.json" 2>/dev/null)" '"boot":2'
+    # No refusal reached Windows in the boot that ran autochk.
+    after=$(sed -n '/guest rebooted/,$p' "$VMWORK/launch.log" | grep -a -c 'I/O error(s) reported to the guest' || true)
+    expect "Windows saw no refusal in that boot" "$after" '^0$'
     phase chkdsk
 fi
 
@@ -343,7 +347,7 @@ rmdir "$HOSTCG" 2>/dev/null || true
 phase shutdown
 
 say "Q24: what Windows wrote to BitLocker's sectors"
-python3 "$here/q24.py" "$VMWORK/writes.log" "$SHARE/session.json" --phases "$PHASES" | tee "$VMWORK/q24.txt"
+{ python3 "$here/q24.py" "$VMWORK/writes.log" "$SHARE/session.json" --phases "$PHASES" || echo "q24: the log could not be read"; } | tee "$VMWORK/q24.txt"
 
 say "L2: nothing reached the disk's BitLocker sectors or the image"
 l2 "kill \$(cat /run/nbd.pid); sleep 1; paguro-vm absorbed --work /run/paguro/vm" > "$VMWORK/absorbed.json" || true
@@ -372,10 +376,21 @@ ln -s "$(dirname "$WIN_KEY")" "$nat/keys"
 ntpm=$HOME/.cache/winvm-swtpm-e2e
 rm -rf "$ntpm" && mkdir -p "$ntpm" && cp -a "$NATIVE_TPM" "$ntpm/base-tpm"
 export WINVM_DIR=$nat WINVM_TPM_DIR=$ntpm WINVM_SSH_PORT=$NATIVE_SSH_PORT WINVM_MEM=6G
-"$W" start --timeout 600 >/dev/null
+# A chkdsk /r left scheduled by the tripwire's stop runs natively first.
+"$W" start --timeout $([ "${PAGURO_Q1_CHKDSK:-0}" = 1 ] && echo 2400 || echo 600) >/dev/null
 SSH_PORT=$NATIVE_SSH_PORT
 out=$(wssh 'manage-bde -protectors -get C: & manage-bde -status C: & bcdedit /enum {current} | findstr testsigning & fltmc filters & type C:\paguro\written-in-vm.txt' | tr -d '\r')
 echo "$out" > "$VMWORK/native.txt"
+if [ "${PAGURO_Q1_CHKDSK:-0}" = 1 ]; then
+    # The chkdsk /r the tripwire stopped in the VM ran natively on this boot,
+    # where the image reads normally: its own log.
+    wscp "$here/q1-chkdsk.ps1" paguro@127.0.0.1:C:/winvm/ || true
+    ck=$(WSSH_TIMEOUT=600 wssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\winvm\q1-chkdsk.ps1' 2>&1 | tr -d '\r') || true
+    echo "$ck" > "$VMWORK/q1-chkdsk-native.txt"
+    result "native autochk: stage 4" "$(grep -a -i -E 'Read failure|replace|bad clusters' <<<"$ck" | head -3 | tr '\n' '|')"
+    expect "native autochk found no problems" "$ck" 'found no problems'
+    expect "native: the image's extents unchanged" "$(check ck.extents <(echo "$ck"))" 'LCN: 0x8b521'
+fi
 if [ "${PAGURO_Q1:-0}" = 1 ]; then
     # Q3: native Windows after the refused writes (and, with PAGURO_Q1_KILL,
     # the interruption): the dirty bit, an online scan, the image's extents.

@@ -19,11 +19,11 @@ The paguro host stack must run under a kernel that may load `dm-paguro`,
 so it runs in a throwaway Linux VM ("L2", the host's own kernel, a busybox
 initramfs built by `lib.sh`); Windows runs in a second VM that
 `paguro-vm launch` starts on the host, its disk L2's
-`/dev/mapper/paguro-vmdisk` exported over NBD:
+`/dev/mapper/paguro-vmdisk` exported over NBD (nbdkit):
 
 ```text
 host                                       L2 (Linux)
-paguro-vm launch --nbd ... ──── NBD ────── qemu-nbd /dev/mapper/paguro-vmdisk
+paguro-vm launch --nbd ... ──── NBD ────── nbdkit /dev/mapper/paguro-vmdisk
   OVMF, no TPM, host SMBIOS/UUID/MAC,        dm-linear: GPT | ESP | MSR | C: | GPT
   .BEK on usb-storage (unplugged once read)    C: = view B (dm-paguro) except the
   blklogwrites → writes.log (Q24)                   FVE buffer (absorbs writes)

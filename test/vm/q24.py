@@ -54,8 +54,10 @@ def main():
     phases = []
     if "--phases" in sys.argv:
         for line in open(sys.argv[sys.argv.index("--phases") + 1]):
-            name, n = line.split()
-            phases.append((int(n), name))
+            parts = line.split()
+            # A phase recorded after QEMU was killed has no count: skip it.
+            if len(parts) == 2 and parts[1].isdigit():
+                phases.append((int(parts[1]), parts[0]))
 
     def phase(i):
         for n, name in phases:
