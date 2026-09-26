@@ -3124,8 +3124,14 @@ at kernel speed and makes the DMZ below a plain DNAT.
 - **Routed, not bridged:** a small private subnet on the tap, with
   masquerading out of whatever interface the host routes by. That works on
   Wi-Fi, where bridging does not.
-- **paguro's own nftables table** (`inet paguro`): masquerade, forward-accept
-  for the tap, and the DMZ's DNAT set. Created per session, deleted after.
+- **paguro's own nftables table** (`inet paguro`): masquerade; the VM's own
+  outbound forwarded unconditionally, but inbound-to-the-VM forwarding is
+  default-deny — accepted only as an established/related reply or a
+  DMZ'd (`ct status dnat`) connection, everything else `drop`ped — and the
+  DMZ's DNAT set. Otherwise a LAN or VPN host that simply routes the VM's
+  subnet through this machine would reach it directly, unNATed and
+  unDMZ'd, which is exactly what §5c "nothing of ours reachable from
+  LAN/Wi-Fi/VPN" forbids. Created per session, deleted after.
   `net.ipv4.ip_forward` is enabled for the session and restored. IPv6 starts
   as none and comes later as NAT66 if needed.
 - **DHCP and DNS,** which slirp used to provide: a single-lease DHCP server in

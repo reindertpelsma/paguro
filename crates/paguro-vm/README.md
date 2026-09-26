@@ -57,8 +57,13 @@ for what slirp used to provide.
 - **The nftables ruleset is one file, loaded whole with `nft -f` and deleted
   whole at teardown** (`lan::nft_ruleset`/`nft_apply`/`nft_delete_table`):
   masquerade out of the WAN interface (autodetected from the default route,
-  or `--lan-wan` to pin it), a forward-accept for the tap, and — with
-  `--dmz` — a `dmz` chain. The DMZ is a rule ladder over three named sets
+  or `--lan-wan` to pin it); the `forward` chain accepts the VM's own
+  outbound traffic and its replies (`ct state established,related`)
+  unconditionally, but anything *new* forwarded towards the tap is dropped
+  unless it is a DMZ'd connection (`ct status dnat`) — a routed LAN or VPN
+  host cannot reach the VM merely by adding a route for its subnet through
+  this machine, DMZ or not; and — with `--dmz` — a `dmz` chain. The DMZ is a
+  rule ladder over three named sets
   (`pinned_windows`, `pinned_linux`, `linux_ports`) plus a literal
   never-forward set (`lan::NEVER_FORWARD`: 22, 445, 3389, 5985, 5986) that
   only a `--pin-port PORT:windows` can override; `linux_ports` is reseeded

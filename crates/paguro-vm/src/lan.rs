@@ -264,10 +264,14 @@ pub fn nft_ruleset(i: &NftInputs) -> String {
          \tchain forward {{\n\
          \t\ttype filter hook forward priority filter; policy accept;\n\
          \t\tiifname \"{}\" accept\n\
-         \t\toifname \"{}\" accept\n\
+         \t\toifname \"{}\" ct state established,related accept\n\
+         \t\toifname \"{}\" ct status dnat accept\n\
+         \t\toifname \"{}\" drop\n\
          \t}}\n",
         i.subnet.cidr(),
         i.wan,
+        i.tap,
+        i.tap,
         i.tap,
         i.tap
     );
@@ -975,9 +979,22 @@ mod tests {
         assert!(text.contains("table inet paguro"));
         assert!(text.contains("masquerade"));
         assert!(text.contains("iifname \"pgtap0\" accept"));
-        assert!(text.contains("oifname \"pgtap0\" accept"));
+        // The VM's own outbound (and its replies) are unconditional; nothing
+        // new forwarded *towards* it ever is, DMZ or not — a LAN/VPN host
+        // that merely routes the VM's subnet through this machine must not
+        // reach it (DESIGN.md \u{a7}5c).
+        assert!(text.contains("oifname \"pgtap0\" ct state established,related accept"));
+        assert!(text.contains("oifname \"pgtap0\" ct status dnat accept"));
+        assert!(text.contains("oifname \"pgtap0\" drop"));
+        assert!(
+            !text.contains("oifname \"pgtap0\" accept"),
+            "no bare accept for the tap: {text}"
+        );
         assert!(text.contains("ip saddr 198.19.249.0/24 oifname \"eth0\""));
-        assert!(!text.contains("dnat"));
+        assert!(
+            !text.contains("dnat ip to"),
+            "no DMZ, so nothing ever gets DNAT'd: {text}"
+        );
         assert!(!text.contains("chain dmz"));
     }
 
