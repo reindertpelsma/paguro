@@ -611,6 +611,11 @@ pub fn launch(o: &LaunchOpts) -> R<()> {
         memory_mib: o.memory_mib,
         name: "paguro-windows".into(),
     };
+    if o.bek_image.is_none() {
+        log(
+            "no .BEK stick (no session.json in the work directory, no --bek): a BitLocker C: stops at the recovery screen",
+        );
+    }
     let cfg = config(o, backend.qemu_args(&info))?;
     let argv = qemu::argv(&cfg);
     if o.print_argv {
