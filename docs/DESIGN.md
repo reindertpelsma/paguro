@@ -461,6 +461,16 @@ and would work identically against an ordinary Linux install with an ordinary
 Windows VM. That separability is a staging strength, not a weakness: it ships and
 fails on its own schedule. It is not evidence for §2–§5.
 
+> **Updated 2026-09-26 (§5c "paguro's own RDP server"):** the control plane is
+> **paguro's own guest agent**, not Windows' RAIL: TermService serves neither
+> Home nor passwordless accounts. The pixel path is staged the same way this
+> section describes. First the Desktop Sharing API's encoded stream (no GPU
+> needed; the per-window split is ours). Then, with kayfabe, per-window
+> dma-bufs through the chain below, with the encoded stream kept as the
+> per-window fallback. Windows' RemoteApp remains an optional path on Pro+ for
+> users who opt in with a password. The RAIL wording below is the original
+> analysis; "RAIL" there now reads "paguro's window agent".
+
 **Keep RAIL as the control plane, replace only the graphics path.** RAIL already
 carries window create/destroy/move/resize/z-order, icons, input, clipboard and
 audio — that is what turns menus, toolbars and frameless popups into genuine host
@@ -2820,8 +2830,8 @@ target audience, not an edge case.
 
 | Edition | Window integration |
 |---|---|
-| Pro / Enterprise / Education | RemoteApp per-window, as described below |
-| **Home** | full-desktop VM window only, until the per-window projection in §1b exists |
+| Every edition | per-window apps from **paguro's own server** (§5c): Desktop Sharing API plus paguro's window agent, token-authenticated |
+| Pro / Enterprise / Education, opted in with a password | optionally Windows' own RemoteApp, as described below |
 
 The SMB file-sharing half works on Home regardless — it needs file sharing, not
 RDP hosting. Only the seamless-window experience is affected.
@@ -2831,10 +2841,11 @@ plane** and replaces only the pixel
 transport — and RAIL is an extension of RDP, which Home cannot host. Replacing
 encoded frames with shared buffers does not supply the missing server.
 
-Seamless windows on Home would need a **separate control protocol** — our own
-guest agent reporting window create/destroy/move/resize/z-order — which is
-additional architecture, not the stated *"keep the integration, replace only the
-pixels"* design. Until that exists, Home gets a full-desktop VM window.
+Seamless windows on Home need a **separate control protocol**: our own guest
+agent reporting window create/destroy/move/resize/z-order. **That is now the
+chosen design for every edition** (§5c, "paguro's own RDP server"), with the
+Desktop Sharing API carrying pixels until kayfabe's per-window dma-bufs replace
+them (§1b).
 
 ### Mode 1 — SMB from the running VM (default)
 
