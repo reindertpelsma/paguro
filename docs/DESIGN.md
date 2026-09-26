@@ -3152,7 +3152,12 @@ none of the following (the SMBIOS marker `paguro-vm/1` is absent, §4.4).
    share and account, the firewall scoping, and the `L:` mapping;
 3. provisions SSH: OpenSSH server bound to the link, the host's public key in
    `authorized_keys`, and the Windows key for reaching Linux;
-4. keeps (2) and (3) correct on every VM boot, and **removes nothing that
+4. provisions RDP for RemoteApp: RDP with NLA, RemoteApp for any program, an
+   inbound rule on the private link from the host only, and the certificate's
+   fingerprint sent over the agent port for the host to pin. It records the
+   user's own RDP on/off setting and puts it back on native boots, because the
+   VM and native Windows share one registry;
+5. keeps (2)–(4) correct on every VM boot, and **removes nothing that
    native Windows needs**. The link adapter only exists in the VM, so its
    rules are inert natively.
 

@@ -11,7 +11,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use crate::net::GUEST_ADDR;
+use crate::net::{GUEST_ADDR, HOST_ADDR};
 
 /// The keyring attributes the credential is stored under.
 pub const SERVICE: &str = "paguro-vm";
@@ -100,17 +100,25 @@ pub enum View {
     RemoteApp { program: String, name: String },
 }
 
+/// Where Windows' RDP listens: its end of the private link.
+pub fn default_addr() -> String {
+    GUEST_ADDR.to_string()
+}
+
 /// FreeRDP 3's command line (`xfreerdp3`, `wlfreerdp3`, or `sdl-freerdp3`);
 /// the password follows on stdin. `home` is shared into Windows as a
-/// redirected drive (§5b "the reverse direction").
+/// redirected drive (§5b "the reverse direction"). The certificate is always
+/// pinned to the fingerprint Windows reported over the agent port (DESIGN.md
+/// §5c "Peers are pinned"): there is no trust-on-first-use.
 pub fn freerdp_args(
+    addr: &str,
     user: &str,
     view: &View,
     home: Option<&str>,
-    cert_fingerprint: Option<&str>,
+    cert_fingerprint: &str,
 ) -> Vec<String> {
     let mut a = vec![
-        format!("/v:{GUEST_ADDR}"),
+        format!("/v:{addr}"),
         format!("/u:{user}"),
         "/from-stdin:force".into(),
         "/network:lan".into(),
@@ -119,12 +127,7 @@ pub fn freerdp_args(
         "/dynamic-resolution".into(),
         "/sound:sys:pulse".into(),
     ];
-    // The link is host-only, but the certificate is still pinned when
-    // known, not accepted blindly.
-    a.push(match cert_fingerprint {
-        Some(fp) => format!("/cert:fingerprint:sha256:{fp}"),
-        None => "/cert:tofu".into(),
-    });
+    a.push(format!("/cert:fingerprint:sha256:{cert_fingerprint}"));
     if let Some(h) = home {
         a.push(format!("/drive:home,{h}"));
     }
@@ -132,6 +135,42 @@ pub fn freerdp_args(
         a.push(format!("/app:program:{program},name:{name}"));
     }
     a
+}
+
+/// PowerShell run in the guest after the link is provisioned (the adapter is
+/// `paguro0`): RDP on, NLA required, RemoteApp for any program, reachable
+/// only on the private link from the host. Additive only: this is the user's
+/// own Windows, so their "Remote Desktop" rules are left alone (in the VM
+/// nothing inbound reaches the internet adapter anyway, §5c), and the paguro
+/// service puts `fDenyTSConnections` back to the user's own choice on native
+/// boots (DESIGN.md §5c "The paguro service in the VM"). Prints the RDP
+/// certificate's SHA-256 fingerprint as `paguro: rdp fingerprint <hex:..>`,
+/// for the host to pin (it travels over the agent port in the product).
+pub fn windows_setup() -> String {
+    format!(
+        r#"$ErrorActionPreference = 'Stop'
+$ts = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
+Set-ItemProperty -Path $ts -Name fDenyTSConnections -Value 0
+Set-ItemProperty -Path "$ts\WinStations\RDP-Tcp" -Name UserAuthentication -Value 1
+# RemoteApp: any program, not only a published list.
+$al = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Terminal Server\TSAppAllowList'
+if (-not (Test-Path $al)) {{ New-Item -Path $al -Force | Out-Null }}
+Set-ItemProperty -Path $al -Name fDisabledAllowList -Value 1
+# Reachable on the private link only, and only from the host.
+Get-NetFirewallRule -Name 'paguro-rdp-in' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+New-NetFirewallRule -Name 'paguro-rdp-in' -DisplayName 'paguro: RDP on the private link' -Direction Inbound `
+    -Protocol TCP -LocalPort 3389 -InterfaceAlias 'paguro0' -RemoteAddress '{HOST_ADDR}' -Action Allow | Out-Null
+Restart-Service TermService -Force -ErrorAction SilentlyContinue
+$c = $null
+for ($i = 0; $i -lt 30 -and -not $c; $i++) {{
+    $c = Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $c) {{ Start-Sleep 1 }}
+}}
+if (-not $c) {{ throw 'paguro: no RDP certificate' }}
+$h = [Security.Cryptography.SHA256]::Create().ComputeHash($c.RawData)
+'paguro: rdp fingerprint ' + (($h | ForEach-Object {{ $_.ToString('x2') }}) -join ':')
+"#
+    )
 }
 
 #[cfg(test)]
@@ -152,25 +191,50 @@ mod tests {
 
     #[test]
     fn rdp_args() {
-        let a = freerdp_args("anna", &View::Desktop, Some("/home/anna"), None);
+        let a = freerdp_args(
+            &default_addr(),
+            "anna",
+            &View::Desktop,
+            Some("/home/anna"),
+            "ab:cd",
+        );
         assert!(a.contains(&"/v:169.254.244.2".to_string()));
         assert!(a.contains(&"/from-stdin:force".to_string()));
         assert!(a.contains(&"/drive:home,/home/anna".to_string()));
         assert!(!a.iter().any(|x| x.starts_with("/p:")));
+        assert!(
+            !a.iter().any(|x| x.contains("tofu")),
+            "never trust on first use"
+        );
         let r = freerdp_args(
+            "127.0.0.1:3390",
             "anna",
             &View::RemoteApp {
                 program: "||explorer".into(),
                 name: "Explorer".into(),
             },
             None,
-            Some("ab:cd"),
+            "ab:cd",
         );
+        assert!(r.contains(&"/v:127.0.0.1:3390".to_string()));
         assert!(r.contains(&"/app:program:||explorer,name:Explorer".to_string()));
         assert!(r.contains(&"/cert:fingerprint:sha256:ab:cd".to_string()));
         assert_eq!(
             keyring_attrs("anna", "rdp").get(1).map(String::as_str),
             Some(SERVICE)
         );
+    }
+
+    #[test]
+    fn windows_setup_is_link_only() {
+        let w = windows_setup();
+        assert!(w.contains("-InterfaceAlias 'paguro0' -RemoteAddress '169.254.244.1'"));
+        assert!(w.contains("UserAuthentication -Value 1"), "NLA stays on");
+        assert!(
+            !w.contains("Disable-NetFirewallRule"),
+            "the user's own rules are left alone"
+        );
+        assert!(w.contains("fDisabledAllowList -Value 1"));
+        assert!(w.contains("paguro: rdp fingerprint"));
     }
 }

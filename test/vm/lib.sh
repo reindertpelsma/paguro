@@ -37,6 +37,8 @@ l2_root() {
     rm -f "$r/bin/ip"
     vm_bin "$(command -v ip)" sbin/ip
     vm_bin "$(command -v qemu-nbd)" bin/qemu-nbd
+    # The RemoteApp phase relays RDP into netns paguro (split-e2e.sh).
+    command -v socat >/dev/null && vm_bin "$(command -v socat)" bin/socat
     # The split test's NBD server: nbdkit answers a failed read with an error
     # on that request and keeps the connection (qemu-nbd drops it, which a
     # client holding requests across reconnects then retries forever).
