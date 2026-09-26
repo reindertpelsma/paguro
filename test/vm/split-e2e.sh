@@ -155,8 +155,9 @@ l2 "(setsid qemu-nbd --persistent --shared=4 --export-name=vmdisk --format=raw -
     --bind=0.0.0.0 --port=10809 /dev/mapper/paguro-vmdisk > /share/qemu-nbd.log 2>&1 & echo \$! > /run/nbd.pid); sleep 1" >/dev/null
 
 say "Windows: paguro-vm launch"
-# A reboot inside the session (PAGURO_Q1_CHKDSK) needs the .BEK again.
-BEK_UNPLUG=30; [ "${PAGURO_Q1_CHKDSK:-0}" = 1 ] && BEK_UNPLUG=86400
+# A reboot inside the session (PAGURO_Q1_CHKDSK) needs the .BEK again: the
+# launcher re-plugs it on the guest's reset, which that phase checks.
+BEK_UNPLUG=30
 # The host workloads' memory.max (DESIGN.md §4.5), on a scratch cgroup
 # with nothing in it: the plumbing, without touching the real host's.
 HOSTCG=/sys/fs/cgroup/paguro-vm-e2e-host
@@ -314,6 +315,7 @@ if [ "${PAGURO_Q1_CHKDSK:-0}" = 1 ]; then
         wssh 'echo up' 2>/dev/null | grep -aq up && break
     done
     result "chkdsk /r: back to SSH after" "$(( $(date +%s) - t0 )) s"
+    expect "a reboot in the session gets the .BEK again" "$(grep -a 'BEK: plugged again' "$VMWORK/launch.log")" 'plugged again'
     wscp "$here/q1-chkdsk.ps1" paguro@127.0.0.1:C:/winvm/ || true
     ck=$(WSSH_TIMEOUT=600 wssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\winvm\q1-chkdsk.ps1' 2>&1 | tr -d '\r') || true
     echo "$ck" > "$VMWORK/q1-chkdsk.txt"

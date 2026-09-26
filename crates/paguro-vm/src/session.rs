@@ -562,6 +562,32 @@ pub fn agent_frame(v: &Value) -> Vec<u8> {
 }
 
 /// Frames in `buf` (consumed from the front as they complete).
+/// Put the `.BEK` stick back (the same devices `qemu::argv` creates), for a
+/// boot inside the session that needs it again.
+fn bek_plug(q: &mut Qmp, img: &Path) {
+    let steps = [
+        (
+            "blockdev-add",
+            json!({"driver": "file", "filename": img.display().to_string(), "node-name": "bek-file", "read-only": true}),
+        ),
+        (
+            "blockdev-add",
+            json!({"driver": "raw", "file": "bek-file", "node-name": "bek", "read-only": true}),
+        ),
+        (
+            "device_add",
+            json!({"driver": "usb-storage", "bus": "xhci.0", "drive": "bek", "removable": true, "id": BEK_DEVICE}),
+        ),
+    ];
+    for (cmd, args) in steps {
+        if let Err(e) = q.cmd(cmd, args) {
+            log(&format!("BEK: re-plug: {cmd}: {e}"));
+            return;
+        }
+    }
+    log("BEK: plugged again for the new boot");
+}
+
 pub fn agent_frames(buf: &mut Vec<u8>) -> Vec<Value> {
     const MAX_FRAME: usize = 64 << 10;
     let mut out = Vec::new();
@@ -712,6 +738,10 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, child: &mut std::process::Child) -
     let start = Instant::now();
     let mut bek_first_read: Option<Instant> = None;
     let mut bek_gone = o.bek_image.is_none();
+    // device_del sent but DEVICE_DELETED not yet seen; and a reset that
+    // arrived in between, whose re-plug waits for it.
+    let mut bek_deleting = false;
+    let mut bek_replug = false;
     let mut driver_seen = o.driver_timeout.is_none();
     let mut agent: Option<std::os::unix::net::UnixStream> = None;
     let mut abuf = Vec::new();
@@ -752,6 +782,7 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, child: &mut std::process::Child) -
                     Err(e) => log(&format!("BEK: {e}")),
                 }
                 bek_gone = true;
+                bek_deleting = true;
             }
         }
         // The driver's report on the agent port.
@@ -806,6 +837,35 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, child: &mut std::process::Child) -
                     for n in ["bek", "bek-file"] {
                         let _ = q.cmd("blockdev-del", json!({ "node-name": n }));
                     }
+                    bek_deleting = false;
+                    if std::mem::take(&mut bek_replug) {
+                        if let Some(img) = &o.bek_image {
+                            bek_plug(&mut q, img);
+                            bek_gone = false;
+                            bek_first_read = None;
+                        }
+                    }
+                }
+                // A reboot inside the session (Windows Update, autochk): the
+                // new boot needs the .BEK again, or bootmgr stops at BitLocker
+                // recovery.
+                "RESET" => {
+                    log(&format!("qmp: {e}"));
+                    if let Some(img) = &o.bek_image {
+                        if !bek_gone {
+                            bek_first_read = None;
+                        } else if bek_deleting {
+                            bek_replug = true;
+                        } else {
+                            bek_plug(&mut q, img);
+                            bek_gone = false;
+                            bek_first_read = None;
+                        }
+                    }
+                    // The driver gate is not re-armed: a reset can lead into
+                    // autochk, which runs for minutes before any driver can
+                    // report, and a gate firing then would power the VM off
+                    // mid-repair (DESIGN.md §4.4, open).
                 }
                 // View B's EIO reaching the guest (DESIGN.md §4.3): counted,
                 // the first of each run logged.
@@ -823,7 +883,7 @@ fn supervise(o: &LaunchOpts, qmp_path: &Path, child: &mut std::process::Child) -
                         ));
                     }
                 }
-                "SHUTDOWN" | "RESET" | "SUSPEND" | "WAKEUP" | "STOP" | "RESUME" => {
+                "SHUTDOWN" | "SUSPEND" | "WAKEUP" | "STOP" | "RESUME" => {
                     log(&format!("qmp: {e}"));
                 }
                 _ => {}

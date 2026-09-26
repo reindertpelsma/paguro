@@ -2156,6 +2156,19 @@ driver the report arrives seconds after C: mounts, so the timeout can be short,
 and *"the paguro driver did not load"* is a clearer failure than odd errors
 later.
 
+> **Open: the gate against autochk.** Measured 2026-09-26: a boot-time
+> `chkdsk /r` scheduled in the session runs for about 10 minutes before any
+> driver loads. When the gate was re-armed on the guest's reset, it fired
+> mid-scan and sent a power-down, which autochk ignored this time. Stopping a
+> VM during a disk repair is the kind of interruption §11 Q3 is about, so the
+> launcher arms the gate for the first boot only. The same hazard exists on
+> that first boot if Windows runs autochk there, for example on a volume
+> marked dirty. A fix must either tell autochk apart from a missing driver
+> (boot phase, disk activity) or change what "stop" means (refuse view B
+> writes rather than power off). Meanwhile, a reboot inside the session
+> (Windows Update, autochk) gets the `.BEK` stick plugged back in, or bootmgr
+> would stop at BitLocker recovery.
+
 *Cost:* this makes the driver a hard dependency for the VM to run at all. A
 Windows update that blocks or breaks it means no VM until fixed, so §7 must treat
 driver load failure as a first-class condition with a real remediation path, not
