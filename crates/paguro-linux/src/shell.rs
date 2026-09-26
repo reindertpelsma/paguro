@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::image::{self, ImageBackend};
 use paguro_vm::net;
 
 /// Where `paguro-initrd`'s `setup::run` writes `PAGURO_ENTRY=` (among
@@ -60,33 +61,119 @@ pub fn resolve(target: &str, booted: Option<&str>) -> Plan {
     }
 }
 
+/// Where to find an unbooted distribution's own file and the volume it
+/// lives on — the piece `attach_view_a` needs and does not itself derive.
+/// A trait because the real answer needs `paguro.ini` (INTERFACES.md §3.2's
+/// `[Boot.<entry>]` `volume`/`root`), which **the running Linux system does
+/// not keep a copy of after the handoff** (§8.3 lists what survives it, and
+/// the `.ini` is not among them) — resolving this for real needs either a
+/// live re-read of the NTFS volume's `paguro.ini` (wherever it is
+/// currently mounted) or a cached copy this codebase does not maintain yet.
+/// [`UnresolvedLocator`] names that gap explicitly; tests supply a
+/// [`FixedLocator`] instead, to exercise everything downstream of it for
+/// real.
+pub trait DistroLocator {
+    /// The distribution's own file (already reachable at this path — e.g.
+    /// under a read-only ntfs3 mount of view C) and the `/dev/paguro`
+    /// volume id it was registered under.
+    fn locate(&self, entry: &str) -> Result<(PathBuf, u32), String>;
+}
+
+/// The honest gap: see [`DistroLocator`].
+pub struct UnresolvedLocator;
+
+impl DistroLocator for UnresolvedLocator {
+    fn locate(&self, entry: &str) -> Result<(PathBuf, u32), String> {
+        Err(format!(
+            "{entry:?}: locating another distribution's file needs paguro.ini's \
+             [Boot.{entry}] (volume, root), which this running system does not keep a copy \
+             of after the handoff (INTERFACES.md §8.3); not wired yet. The claim/cross-check/\
+             view-A path itself (paguro_linux::image::attach) is implemented and tested — only \
+             this lookup is missing."
+        ))
+    }
+}
+
 /// Attach an unbooted distribution's view A at runtime, so its container
-/// can be entered. **STUB.** `paguro-initrd::setup::boot` claims only the
-/// entry chosen at boot (`PG_VOLUME_ADD` + `PG_CLAIM` + the ntfs3
-/// cross-check, DESIGN.md §4.3) through `/dev/paguro`
-/// (`paguro_initrd::pg::Ctl`, `paguro_initrd::dm::Dm`) — the same calls
-/// exist and are exercised by the kernel module's own harness
-/// (`kernel/dm-paguro/test/vm-lib.sh`), but only from the initrd's one-shot
-/// boot path. Claiming a *second*, already-running system's distribution
-/// from a live system needs the same sequence run against a volume that is
-/// not the one already mounted as `/` — which raw device holds it, whether
-/// it's already added (`PG_VOLUME_ADD` is once per volume), and locking
-/// against a concurrent claim of the same volume — none of which exists
-/// outside the initrd yet. Until it does, this refuses explicitly instead
-/// of guessing.
-pub fn attach_view_a(entry: &str) -> Result<PathBuf, String> {
+/// can be entered: [`DistroLocator::locate`] finds the file and volume,
+/// [`crate::image::attach`] claims it by its own ntfs3 identity,
+/// cross-checks and loads the table (INTERFACES.md §10.1a, §10.2 — the
+/// same sequence `paguro-initrd::setup::boot` runs once at boot, here
+/// callable at runtime against a second, not-yet-claimed volume).
+pub fn attach_view_a<B: ImageBackend>(
+    backend: &mut B,
+    locator: &dyn DistroLocator,
+    entry: &str,
+) -> Result<PathBuf, String> {
     let dev = view_a_path(entry);
     if dev.exists() {
         return Ok(dev);
     }
-    Err(format!(
-        "STUB: {entry:?} is not the booted distribution and its view A ({}) does not exist; \
-         attaching another distribution's image at runtime needs the pgctl claim path \
-         (paguro_initrd::pg::Ctl::{{volume_add,claim,crosscheck}}) wired to a live control \
-         device, which is not implemented yet (see kernel/dm-paguro/test/vm-lib.sh for the \
-         harness this would be tested with)",
-        dev.display()
-    ))
+    let (file, volume_id) = locator.locate(entry)?;
+    let attached = image::attach(
+        backend,
+        volume_id,
+        &file,
+        entry,
+        paguro_initrd::pg::FORMAT_RAW,
+    )?;
+    Ok(attached.device)
+}
+
+/// Mounting a claimed view A and booting a `systemd-nspawn` container over
+/// it — behind a trait so the attach path above can be tested without
+/// `systemd-nspawn` (not available in every build/test environment).
+/// [`SystemdNspawn`] is the real thing.
+pub trait ContainerLauncher {
+    /// Mount `device` (a `paguro-image` view A) somewhere private to
+    /// `name` and return the mount point.
+    fn mount(&self, device: &Path, name: &str) -> Result<PathBuf, String>;
+    /// Boot `name`'s container rooted at `root`; the exit code once it
+    /// stops.
+    fn boot(&self, root: &Path, name: &str) -> Result<i32, String>;
+}
+
+/// The real launcher: `mount <device> <mnt>` then `systemd-nspawn -D <mnt>
+/// -b` ([`nspawn_argv`]).
+pub struct SystemdNspawn;
+
+impl ContainerLauncher for SystemdNspawn {
+    fn mount(&self, device: &Path, name: &str) -> Result<PathBuf, String> {
+        let mnt = PathBuf::from("/run/paguro/nspawn").join(name);
+        std::fs::create_dir_all(&mnt).map_err(|e| format!("{}: {e}", mnt.display()))?;
+        let st = Command::new("mount")
+            .arg(device)
+            .arg(&mnt)
+            .status()
+            .map_err(|e| format!("mount: {e}"))?;
+        if !st.success() {
+            return Err(format!("mount {}: {st}", device.display()));
+        }
+        Ok(mnt)
+    }
+
+    fn boot(&self, root: &Path, name: &str) -> Result<i32, String> {
+        let argv = nspawn_argv(root, name);
+        let (prog, rest) = argv.split_first().expect("non-empty argv");
+        Command::new(prog)
+            .args(rest)
+            .status()
+            .map(|s| s.code().unwrap_or(1))
+            .map_err(|e| format!("{prog}: {e}"))
+    }
+}
+
+/// `paguro shell`/`paguro distro enter` for another distribution's
+/// container: attach its view A if needed, mount it, boot it.
+pub fn enter_container<B: ImageBackend, L: ContainerLauncher>(
+    backend: &mut B,
+    locator: &dyn DistroLocator,
+    launcher: &L,
+    entry: &str,
+) -> Result<i32, String> {
+    let device = attach_view_a(backend, locator, entry)?;
+    let root = launcher.mount(&device, entry)?;
+    launcher.boot(&root, entry)
 }
 
 /// `ssh -i <key> <GUEST_ADDR>`: run from inside netns `paguro`, the only
@@ -217,9 +304,132 @@ mod tests {
     }
 
     #[test]
-    fn attach_view_a_stub_when_absent() {
-        let e = attach_view_a("no-such-distro-xyz").unwrap_err();
-        assert!(e.starts_with("STUB"));
-        assert!(e.contains("pgctl"));
+    fn unresolved_locator_names_the_gap_explicitly() {
+        let e = UnresolvedLocator.locate("no-such-distro-xyz").unwrap_err();
+        assert!(e.contains("no-such-distro-xyz"));
+        assert!(e.contains("paguro.ini"));
+        assert!(e.contains("not wired"));
+    }
+
+    /// A canned [`DistroLocator`] for tests: everything downstream of the
+    /// lookup ([`attach_view_a`], [`enter_container`]) is real.
+    struct FixedLocator(PathBuf, u32);
+    impl DistroLocator for FixedLocator {
+        fn locate(&self, _entry: &str) -> Result<(PathBuf, u32), String> {
+            Ok((self.0.clone(), self.1))
+        }
+    }
+
+    /// A minimal fake [`ImageBackend`], just enough for `attach` to reach
+    /// `dm_create` (mirrors `image::tests`'s fake, kept separate since that
+    /// one is private to its own module).
+    #[derive(Default)]
+    struct FakeImageBackend {
+        crosscheck_state: u32,
+    }
+    impl ImageBackend for FakeImageBackend {
+        fn identity(&self, _file: &Path) -> Result<image::Identity, String> {
+            Ok(image::Identity::default())
+        }
+        fn fiemap(&self, _file: &Path) -> Result<Vec<(u64, u64)>, String> {
+            Ok(vec![(1, 1)])
+        }
+        fn claim(
+            &mut self,
+            _volume_id: u32,
+            _format: u32,
+            _id: image::Identity,
+        ) -> Result<image::ClaimResult, String> {
+            Ok(image::ClaimResult {
+                claim_id: 9,
+                sectors: 4096,
+                state: 0,
+            })
+        }
+        fn crosscheck(&mut self, _claim_id: u32, _ranges: &[(u64, u64)]) -> Result<u32, String> {
+            Ok(self.crosscheck_state)
+        }
+        fn grow(&mut self, _claim_id: u32) -> Result<image::GrowResult, String> {
+            unimplemented!("not exercised by these tests")
+        }
+        fn release(&mut self, _claim_id: u32) -> Result<(), String> {
+            Ok(())
+        }
+        fn dm_create(
+            &mut self,
+            name: &str,
+            _claim_id: u32,
+            _sectors: u64,
+        ) -> Result<PathBuf, String> {
+            Ok(Path::new("/dev/mapper").join(name))
+        }
+        fn dm_reload(&mut self, _name: &str, _claim_id: u32, _sectors: u64) -> Result<(), String> {
+            Ok(())
+        }
+        fn dm_remove(&mut self, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn presence(&self, _name: &str) -> Result<image::Presence, String> {
+            Ok(image::Presence::Absent)
+        }
+    }
+
+    #[test]
+    fn attach_view_a_claims_and_crosschecks_through_the_locator() {
+        let mut backend = FakeImageBackend {
+            crosscheck_state: image::CLAIM_CHECKED,
+        };
+        let locator = FixedLocator(PathBuf::from("/mnt/c/paguro/debian.vhd"), 3);
+        let dev = attach_view_a(&mut backend, &locator, "debian-not-booted").unwrap();
+        assert_eq!(dev, Path::new("/dev/mapper/paguro-debian-not-booted"));
+    }
+
+    #[test]
+    fn attach_view_a_surfaces_a_refused_crosscheck() {
+        let mut backend = FakeImageBackend {
+            crosscheck_state: image::CLAIM_REFUSED,
+        };
+        let locator = FixedLocator(PathBuf::from("/mnt/c/paguro/x.vhd"), 3);
+        let e = attach_view_a(&mut backend, &locator, "x-not-booted").unwrap_err();
+        assert!(e.contains("disagrees"));
+    }
+
+    /// Records `mount`/`boot` calls instead of running them: `nspawn` is
+    /// not available in every environment this crate is tested in.
+    #[derive(Default)]
+    struct FakeLauncher {
+        log: std::cell::RefCell<Vec<String>>,
+    }
+    impl ContainerLauncher for FakeLauncher {
+        fn mount(&self, device: &Path, name: &str) -> Result<PathBuf, String> {
+            self.log
+                .borrow_mut()
+                .push(format!("mount {} {name}", device.display()));
+            Ok(PathBuf::from("/run/paguro/nspawn").join(name))
+        }
+        fn boot(&self, root: &Path, name: &str) -> Result<i32, String> {
+            self.log
+                .borrow_mut()
+                .push(format!("boot {} {name}", root.display()));
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn enter_container_attaches_mounts_then_boots_in_order() {
+        let mut backend = FakeImageBackend {
+            crosscheck_state: image::CLAIM_CHECKED,
+        };
+        let locator = FixedLocator(PathBuf::from("/mnt/c/paguro/debian.vhd"), 3);
+        let launcher = FakeLauncher::default();
+        let code = enter_container(&mut backend, &locator, &launcher, "debian-not-booted").unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(
+            *launcher.log.borrow(),
+            vec![
+                "mount /dev/mapper/paguro-debian-not-booted debian-not-booted".to_string(),
+                "boot /run/paguro/nspawn/debian-not-booted debian-not-booted".to_string(),
+            ]
+        );
     }
 }

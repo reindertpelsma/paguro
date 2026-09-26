@@ -187,6 +187,49 @@ pub fn open_by_ino_gen(mnt: &File, ino: u32, generation: u32) -> io::Result<File
     Ok(unsafe { File::from_raw_fd(fd as RawFd) })
 }
 
+/// A file's ntfs3 identity — MFT record number and sequence number — from
+/// `name_to_handle_at` (mirrors `kernel/dm-paguro/tools/pgctl.c`'s `ident`).
+/// ntfs3's file handle is `FILEID_INO32_GEN`: two `u32` words, the record
+/// then the sequence number in its low 16 bits.
+pub fn file_identity(path: &Path) -> R<(u64, u16)> {
+    #[repr(C)]
+    struct Handle {
+        bytes: u32,
+        ty: i32,
+        f: [u32; 2],
+    }
+    const FILEID_INO32_GEN: i32 = 1;
+    let p = cpath(path)?;
+    let mut h = Handle {
+        bytes: (size_of::<Handle>() - std::mem::offset_of!(Handle, f)) as u32,
+        ty: 0,
+        f: [0; 2],
+    };
+    let mut mount_id: libc::c_int = 0;
+    // SAFETY: `h` is a `file_handle` header (bytes, handle_type) followed
+    // by 8 bytes of `f_handle`, and `bytes` names exactly that trailer.
+    let r = unsafe {
+        libc::name_to_handle_at(
+            libc::AT_FDCWD,
+            p.as_ptr(),
+            (&raw mut h).cast::<libc::file_handle>(),
+            &mut mount_id,
+            0,
+        )
+    };
+    if r != 0 {
+        return err(&format!("name_to_handle_at {}", path.display()));
+    }
+    if h.ty != FILEID_INO32_GEN {
+        return Err(format!(
+            "{}: not an ntfs3 file handle (type {})",
+            path.display(),
+            h.ty
+        ));
+    }
+    Ok((u64::from(h.f[0]), (h.f[1] & 0xffff) as u16))
+}
+
 /// A file's physical extents as FIEMAP reports them, in 512-byte sectors
 /// of the device the file system is mounted on, file order.
 pub fn fiemap(f: &File) -> R<Vec<(u64, u64)>> {

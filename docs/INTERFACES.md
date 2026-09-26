@@ -809,6 +809,30 @@ An unknown pid is `ESRCH`, and any other message is `EINVAL`.
   protects the new part, flushes, and reports. The module re-derives the
   extents from NTFS and accepts only an append (`PG_GROW`).
 
+**Frames (DRAFT — Linux side implemented, `crates/paguro-linux::image`;
+the Windows side is not part of this crate).** Every frame carries a
+`"file"` object (today just `{"path": "<Windows path, informational>"}` —
+identity itself is never taken from the channel, only from the module's own
+NTFS parse, per "Protect" above):
+
+| Direction | Frame | Meaning |
+|---|---|---|
+| guest → host | `{"type":"image-protected","file":{...}}` | Windows protected and flushed a new file; here is its path so Linux can claim it |
+| host → guest | `{"type":"image-released","file":{...}}` | Linux has removed view A and released the claim; safe to unprotect now — sent **only** after both have actually happened |
+| host → guest | `{"type":"image-grow-request","file":{...},"by_sectors":N}` | please grow this file by `N` 512-byte sectors, keeping the existing part protected |
+| guest → host | `{"type":"image-grown","file":{...}}` | Windows finished growing (and re-protecting) the file |
+| host → guest | `{"type":"image-grow-ack","file":{...},"ok":bool,"error":N?}` | the result of `PG_GROW` (and, if accepted, of reloading view A at the new length); `error` is a `PG_E_*`/`PG_ERR_*` code, present only when `ok` is false |
+
+The ordering invariants above are enforced in code, not just documented:
+`image::detach` calls the module's `PG_RELEASE` before it ever sends
+`image-released`, and refuses up front (touching neither the device nor the
+claim) while the view A device is open (mounted or otherwise held) —
+`kernel/dm-paguro/tools/pgctl.c`'s own `release` already refuses at the
+module level while any view uses the claim (`-EBUSY`); the userspace check
+exists so `detach` fails with a clear reason before even trying. `image::grow`
+always sends the request before waiting for `image-grown`, and never reloads
+view A's table unless `PG_GROW`'s `error` is `0` (append-only).
+
 ### 11.4 Installing a distribution: the distribution's ISO, in a WSL2 container — DRAFT
 
 **WSL2 is a requirement** (Windows 10 2004+ / 11, any edition). **No

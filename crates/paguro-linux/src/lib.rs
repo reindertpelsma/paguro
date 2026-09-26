@@ -2,6 +2,7 @@
 //! both ways"; INTERFACES.md §11.2's naming/JSON conventions, mirrored
 //! where they make sense on this side).
 
+pub mod image;
 pub mod link;
 pub mod shell;
 pub mod status;

@@ -1,0 +1,122 @@
+# Sourced into the VM's /init after ok/bad and module loading
+# (lifecycle.sh). Fixture: /fx/vol512.img (512-byte clusters); identities in
+# /ids (ID_<image>_<file>).
+. /ids
+dmc() { dmsetup create "$@" 2>/tmp/dmerr && dmsetup mknodes; }
+lim() { pgctl status | awk -v c="$1" '$1 == "claim" && $2 == c { for (i = 1; i < NF; i++) if ($i == "sectors") print $(i + 1) }'; }
+claimed() { pgctl status | grep -q "^claim $1 "; }
+opencount() { dmsetup info -c --noheadings -o open "$1" 2>/dev/null; }
+
+dmesg -c > /tmp/boot.dmesg
+insmod /dm-paguro.ko && ok "insmod" || bad "insmod"
+[ -c /dev/paguro ] && ok "/dev/paguro registered" || bad "/dev/paguro missing"
+
+# A writable copy: growth mutates the volume (a stand-in for Windows,
+# INTERFACES.md §11.3 "Grow" — extending the file with ntfs3 read-write,
+# same as `image::grow`'s own doc comment says to test with).
+cp /fx/vol512.img /tmp/vol.img
+L1=$(losetup -f); losetup "$L1" /tmp/vol.img; N1=$(blockdev --getsz "$L1")
+mkdir -p /ref /mnt /mnt2
+mount -t ntfs3 -o ro "$L1" /mnt && ok "ntfs3 mounts the fixture directly" || bad "direct ntfs3 mount"
+cp /mnt/contig.img /ref/contig.img
+cp /mnt/alist.img /ref/alist.img
+umount /mnt
+
+# ============================================================ attach =====
+# claim (by identity) -> cross-check (mandatory) -> view A, exactly
+# paguro-linux::image::attach's sequence.
+V1=$(pgctl add "$L1" "$L1") && ok "attach: PG_VOLUME_ADD" || bad "volume add"
+set -- $ID_vol512_img_contig_img
+C1=$(pgctl claim "$V1" "$1" "$2" 2>/dev/null) && ok "attach: PG_CLAIM by identity" || bad "claim contig"
+dmc pvc --table "0 $N1 paguro-volume $V1 c" && ok "attach: view C loads" || bad "view C: $(cat /tmp/dmerr)"
+mount -t ntfs3 -o ro /dev/mapper/pvc /mnt && ok "attach: ntfs3 mounts view C" || bad "ntfs3 on view C"
+pgctl crosscheck "$C1" /mnt/contig.img >/dev/null && ok "attach: PG_CROSSCHECK agrees" || bad "cross-check contig"
+dmc pa1 --table "0 $(lim "$C1") paguro-image $C1" && ok "attach: view A loads" || bad "view A: $(cat /tmp/dmerr)"
+cmp /dev/mapper/pa1 /ref/contig.img &&
+    ok "attach: view A reads exactly what ntfs3 itself read off the file" || bad "view A content mismatch"
+
+# ============================================================ detach =====
+# Refuses while the device is held open (checked the way
+# paguro-linux::image::KernelBackend::presence does: DM_DEV_STATUS's open
+# count, and /proc/self/mountinfo for a friendlier reason) -- proved here by
+# actually mounting a filesystem on it, not just holding an fd.
+dmc pae --table "0 832 linear /dev/mapper/pa1 64" && ok "detach setup: a FAT slice of view A loads" ||
+    bad "pae: $(cat /tmp/dmerr)"
+mount -t vfat /dev/mapper/pae /mnt2 && ok "detach setup: vfat mounts on it" || bad "vfat mount"
+[ "$(opencount pa1)" -gt 0 ] && ok "detach: view A shows open (open_count $(opencount pa1))" ||
+    bad "open_count did not reflect the mount"
+dmsetup remove pa1 2>/tmp/dmerr && bad "detach: view A removed while its slice is mounted" ||
+    ok "detach: refused while open ($(tr -d '\n' < /tmp/dmerr))"
+claimed "$C1" || bad "detach: a refused removal must not have touched the claim"
+umount /mnt2 && dmsetup remove pae && ok "detach: unmounted, its slice removed" || bad "umount/remove pae"
+[ "$(opencount pa1)" = 0 ] && ok "detach: view A no longer held open" || bad "still open: $(opencount pa1)"
+dmsetup remove pa1 && ok "detach: view A removed once idle" || bad "remove pa1"
+pgctl release "$C1" && ok "detach: PG_RELEASE" || bad "release"
+claimed "$C1" && bad "detach: claim still listed after release" || ok "detach: claim gone from PG_STATUS"
+set -- $(pgctl fiemap /mnt/contig.img | head -1)
+dd if=/dev/mapper/pvc of=/dev/null bs=512 skip="$1" count=1 iflag=direct 2>/dev/null &&
+    ok "detach: released extents pass through view C again" || bad "released extent still refused"
+
+# ============================================================ grow =====
+# Accepted only when it is an append (INTERFACES.md §10.2 PG_GROW), and a
+# grown claim needs a *fresh* cross-check before the table can reload
+# (§10.1a: "PG_GROW clears it") -- both exactly what paguro-linux::image::grow
+# does after the module reports success.
+set -- $ID_vol512_img_alist_img
+C2=$(pgctl claim "$V1" "$1" "$2" 2>/dev/null) && ok "grow: claimed alist.img" || bad "claim alist"
+pgctl crosscheck "$C2" /mnt/alist.img >/dev/null && ok "grow: initial cross-check agrees" || bad "cross-check alist"
+dmc pa2 --table "0 $(lim "$C2") paguro-image $C2" && ok "grow: view A loads" || bad "view A pa2: $(cat /tmp/dmerr)"
+old=$(lim "$C2")
+umount /mnt
+mount -t ntfs3 /dev/mapper/pvc /mnt && ok "grow: ntfs3 read-write on view C (stand-in for Windows)" ||
+    bad "rw mount"
+yes PAGURO | head -c 65536 > /tmp/pat
+cat /tmp/pat >> /mnt/alist.img && sync && ok "grow: appended through view C" || bad "append"
+umount /mnt
+mount -t ntfs3 -o ro /dev/mapper/pvc /mnt || bad "ro remount"
+set -- $(pgctl grow "$C2")
+[ "$2" = 0 ] && [ "$4" = $((old + 128)) ] && ok "grow: append-only accepted ($old -> $4)" || bad "grow: $*"
+dmsetup reload pa2 --table "0 $(lim "$C2") paguro-image $C2" 2>/dev/null &&
+    bad "grow: reload succeeded before the fresh cross-check" ||
+    ok "grow: a grown claim refuses to reload until re-checked"
+pgctl crosscheck "$C2" /mnt/alist.img >/dev/null && ok "grow: fresh cross-check agrees" || bad "post-grow crosscheck"
+dmsetup reload pa2 --table "0 $(lim "$C2") paguro-image $C2" && dmsetup resume pa2 &&
+    ok "grow: view A reloaded at the new length" || bad "reload pa2"
+cat /ref/alist.img /tmp/pat | cmp - /dev/mapper/pa2 &&
+    ok "grow: grown view A reads the old and the appended bytes" || bad "grown content"
+dmsetup remove pa2; pgctl release "$C2"
+
+# ---- grow refused: a relocation (not an append) stays writable -----------
+# ...unless the old map itself no longer parses (a truncate does, per
+# vm-test.body): the claim goes read-only rather than accepting the "growth".
+set -- $ID_vol512_img_links_img
+C3=$(pgctl claim "$V1" "$1" "$2" 2>/dev/null) && ok "grow-refused: claimed links.img" || bad "claim links"
+pgctl crosscheck "$C3" /mnt/links.img >/dev/null && ok "grow-refused: initial cross-check agrees" ||
+    bad "cross-check links"
+umount /mnt
+mount -t ntfs3 /dev/mapper/pvc /mnt || bad "rw remount"
+truncate -s 1048576 /mnt/links.img && sync && ok "grow-refused: truncated through view C" || bad "truncate"
+umount /mnt
+mount -t ntfs3 -o ro /dev/mapper/pvc /mnt || bad "ro remount"
+set -- $(pgctl grow "$C3")
+[ $(($2 & 1)) = 1 ] && [ "$8" = 106 ] &&
+    ok "grow-refused: a relocation is refused and the claim goes read-only (error 106)" || bad "grow: $*"
+dmc pa3 --readonly --table "0 $(lim "$C3") paguro-image $C3" &&
+    ok "grow-refused: the old (unmoved) extents still load, read-only" ||
+    bad "view A pa3: $(cat /tmp/dmerr)"
+yes X | head -c 512 > /tmp/x
+dd if=/tmp/x of=/dev/mapper/pa3 bs=512 count=1 oflag=direct conv=notrunc 2>/dev/null &&
+    bad "grow-refused: write reached a read-only claim's view A" ||
+    ok "grow-refused: view A refuses writes once the claim is read-only"
+dd if=/dev/mapper/pa3 of=/dev/null bs=512 count=1 iflag=direct 2>/dev/null &&
+    ok "grow-refused: and still reads" || bad "read-only view A read"
+dmsetup remove pa3; pgctl release "$C3"
+
+# ============================================================ teardown =====
+umount /mnt; dmsetup remove pvc
+pgctl remove "$V1" && ok "teardown: PG_VOLUME_REMOVE once no claims/views remain" || bad "volume remove"
+pgctl status
+rmmod dm-paguro && ok "module unloads cleanly" || bad "rmmod"
+dmesg | grep -E "BUG|Oops|WARNING|refcount|KASAN" && bad "kernel complained" || ok "no kernel warnings"
+[ $fail = 0 ] && echo "RESULT: ALL PASS" || echo "RESULT: FAILURES"
+poweroff -f
