@@ -80,8 +80,10 @@ pub struct Image {
 }
 
 /// What this boot needs from the handoff, copied out so the blob itself
-/// can be wiped at once. The FVEK is the only secret kept, until the
-/// crypt table is loaded.
+/// can be wiped at once. The FVEK is kept until the crypt table is loaded;
+/// `b`, `vmk` and `user_hash` are kept for a possible re-seal (INTERFACES.md
+/// §8.3, §5 `PaguroTpmBroken`; `crate::reseal`) and zeroized at the end of
+/// `run` either way.
 pub struct Taken {
     pub volume: handoff::Volume,
     pub fvek: Option<(u16, Zeroizing<Vec<u8>>)>,
@@ -94,6 +96,15 @@ pub struct Taken {
     pub rung: Rung,
     /// A provisioning boot: the new `tpm_seal.bin`, whole.
     pub provision: Option<Vec<u8>>,
+    /// The boot-services-only firmware secret (handoff `B`), kept only for a
+    /// possible re-seal.
+    pub b: Zeroizing<[u8; 32]>,
+    /// BitLocker's Volume Master Key (handoff `VMK`), absent for an
+    /// unencrypted volume.
+    pub vmk: Option<Zeroizing<[u8; 32]>>,
+    /// `kdf::user_password_hash(pw)` (handoff `USER_HASH`), present only on
+    /// a `passphrase`-rung boot.
+    pub user_hash: Option<Zeroizing<[u8; 32]>>,
 }
 
 /// Read the handoff once, decode it, copy out what is needed, wipe it.
@@ -147,9 +158,21 @@ pub fn take(path: &Path) -> R<Taken> {
         state: h.state,
         rung: h.rung,
         provision,
+        b: Zeroizing::new(*h.b),
+        vmk: h.vmk.map(|k| Zeroizing::new(*k)),
+        user_hash: h.user_hash.map(|k| Zeroizing::new(*k)),
     };
     if let Some((_, k)) = &t.fvek {
         sys::mlock(k);
+    }
+    sys::mlock(&t.b[..]);
+    // §8.3: "B goes into a root-only logon key in the kernel keyring that
+    // lives for the session, read only by the re-seal tool" — a later
+    // process (a PIN change from Linux, DESIGN.md §6) can still reach it
+    // after this one exits; this boot's own re-seal (below) uses the copy
+    // in `Taken` directly.
+    if let Err(e) = sys::add_session_logon_key("paguro:b", &t.b[..]) {
+        log(&format!("keeping B in the session keyring failed: {e}"));
     }
     // `blob` (VMK, FVEK, B and all) is zeroed on drop, here.
     drop(blob);

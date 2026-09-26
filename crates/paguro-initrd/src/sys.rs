@@ -119,6 +119,31 @@ pub fn add_logon_key(desc: &str, payload: &[u8]) -> R<i32> {
     Ok(r as i32)
 }
 
+/// Add a `logon` key to this **session** keyring: it survives this process
+/// exiting, for a later re-seal tool in the same login session to read
+/// (INTERFACES.md §8.3). Root-only: `logon` keys are never readable by
+/// userspace, only by the kernel on the creating (or a permitted) process's
+/// behalf.
+pub fn add_session_logon_key(desc: &str, payload: &[u8]) -> R<i32> {
+    let ty = cstr("logon")?;
+    let d = cstr(desc)?;
+    // SAFETY: add_key(type, desc, payload, plen, keyring).
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_add_key,
+            ty.as_ptr(),
+            d.as_ptr(),
+            payload.as_ptr(),
+            payload.len(),
+            libc::KEY_SPEC_SESSION_KEYRING,
+        )
+    };
+    if r < 0 {
+        return err("add_key (session)");
+    }
+    Ok(r as i32)
+}
+
 /// Invalidate a key: gone from every keyring at once.
 pub fn invalidate_key(serial: i32) {
     const KEYCTL_INVALIDATE: libc::c_long = 21;

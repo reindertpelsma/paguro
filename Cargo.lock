@@ -658,6 +658,7 @@ name = "paguro-initrd"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "paguro-boot",
  "paguro-core",
  "paguro-crypto",
  "sha2",

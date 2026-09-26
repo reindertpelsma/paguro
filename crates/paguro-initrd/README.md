@@ -21,11 +21,15 @@ it; builds the decrypted volume with BitLocker's own segment table
 passes an unencrypted volume through; registers it with `dm-paguro`
 (`PG_VOLUME_ADD`); probes the boot entry's disks read-only
 (`ntfs3`), claims and cross-checks them (`PG_CLAIM`/`PG_CROSSCHECK`, which can
-only refuse); loads view A; and on a provisioning boot writes `paguro.ini`,
-`PaguroConfigHash` and `tpm_seal.bin`. Depends on
-[`paguro-core`](../paguro-core) and [`paguro-crypto`](../paguro-crypto) for
-formats and key derivation; talks to `kernel/dm-paguro` over its control
-device. See [`docs/DESIGN.md`](../../docs/DESIGN.md) §4.3, §6 and
+only refuse); loads view A; and on the ESP writes `recorded.bin` every boot,
+`paguro.ini`/`PaguroConfigHash`/`tpm_seal.bin` on a provisioning boot, and —
+after a boot on the `passphrase` rung with `PaguroTpmBroken` set and every
+secret it needs — a fresh `tpm_seal.bin` (`reseal`, below). Depends on
+[`paguro-core`](../paguro-core), [`paguro-crypto`](../paguro-crypto) and
+[`paguro-boot`](../paguro-boot) (its TPM client, reused rather than
+reimplemented — see `reseal` below) for formats and key derivation; talks to
+`kernel/dm-paguro` over its control device. See
+[`docs/DESIGN.md`](../../docs/DESIGN.md) §4.3, §6 and
 [`docs/INTERFACES.md`](../../docs/INTERFACES.md) §5, §8, §10.
 
 ## Modules
@@ -35,18 +39,59 @@ device. See [`docs/DESIGN.md`](../../docs/DESIGN.md) §4.3, §6 and
 | `plan` | pure logic: tables, layouts, root choice — unit-tested, no syscalls |
 | `setup` | the `setup` subcommand's orchestration |
 | `dm` | device-mapper table construction |
-| `esp` | ESP-side reads/writes (`paguro.ini`, seals, `recorded.bin`) |
+| `esp` | ESP-side reads/writes (`paguro.ini`, seals, `recorded.bin`, `PaguroTpmBroken`) |
+| `reseal` | re-seal the `tpm` rung after `PaguroTpmBroken` (below) |
 | `pg` | `/dev/paguro` control-device ioctls |
 | `sys` | thin system-call glue (everything not pure) |
+
+### Re-sealing the `tpm` rung (`reseal`, INTERFACES.md §5, §8.3)
+
+A firmware update, `dbx` change or MOK enrolment moves the PCR values the old
+`tpm_seal.bin` was sealed against; the loader notices (`PolicyPCR` fails) and
+sets `PaguroTpmBroken`. A later boot on the `passphrase` rung carries
+everything a re-seal needs — this boot's recorded PCR 0/2/4/7 (handoff
+`PCRS`), `B` (handoff `B`), the BitLocker Volume Master Key (handoff `VMK`)
+and, only on this rung, the Linux password's fast hash (handoff `USER_HASH` —
+safe to forward only here, since the `passphrase` rung's own `env` is already
+a public constant: DESIGN.md §6) — so `esp::maybe_reseal` seals a fresh `D'`
+under a policy over those values, with the `auth` a future `tpm`-rung boot
+will re-derive from the same passphrase, and rewrites `tpm_seal.bin`
+(`esp::replace`'s atomic write, fsyncing the file and then the directory)
+before clearing the flag — never the other way round, and never on a
+failure. A `recovery`-rung boot (no PIN typed, so no `USER_HASH` anywhere)
+cannot do this automatically; it logs why and leaves the flag for a
+`passphrase`- or `tpm`-rung boot to clear instead.
+
+`reseal::LinuxTpm` adapts `/dev/tpmrm0` (the kernel's TPM resource manager) to
+`paguro_boot::platform::Platform`, exactly as `paguro-win`'s `TbsPlatform`
+adapts Windows' TBS — so the actual TPM marshalling, session salting and
+policy digest are `paguro-boot`'s own, not reimplemented, and provably match
+what the loader's unseal path checks (`reseal`'s tests run the same code
+against a real `swtpm`).
+
+**Known gap**: `root_gate` also needs BitLocker's encrypted FVEK blob
+(unchanged by a re-seal, but still required as an input). The parser that
+reads it (`paguro_boot::bde`) is private to the loader crate; `esp::fvek_blob`
+is a deliberate stub returning `None` rather than duplicating those offsets
+without a test oracle. Until a shared reader exists, `maybe_reseal` logs why
+and leaves `PaguroTpmBroken` set.
 
 ## Invariants
 
 - Key material is zeroized (`zeroize`) once no longer needed; the FVEK
-  reaches `dm-crypt` through a kernel `logon` key, never a table string.
+  reaches `dm-crypt` through a kernel `logon` key, never a table string. `B`
+  is additionally kept in a root-only *session* `logon` key
+  (`sys::add_session_logon_key`), for a re-seal after this process exits
+  (INTERFACES.md §8.3).
 - View A is loaded only after the module has asserted the payload's
   structure, and only read-only when the volume is dirty or hibernated.
 - Everything pure (tables, layouts, root choice) lives in `plan`,
-  unit-tested apart from the syscall glue around it.
+  unit-tested apart from the syscall glue around it; `esp::reseal_readiness`
+  and `esp::finish_reseal` pull the same discipline out of the re-seal path
+  (see `esp`'s tests).
+- `PaguroTpmBroken` is cleared only once the new `tpm_seal.bin` is durably
+  written (fsynced file, then directory) — never before, and never on a
+  failed write or a failed TPM operation.
 
 ## Build & test
 
@@ -55,8 +100,19 @@ cargo test -p paguro-initrd
 test/qemu/linux-e2e.sh linux-plain    # a real kernel, through this tool, to a marker service
 ```
 
+`reseal`'s tests spawn a real `swtpm` (skipped, with a message, when it is not
+installed — CI installs it), the same way `paguro-boot/tests/swtpm.rs` does;
+they check that a re-sealed object's policy and template are accepted by the
+loader's own `Tpm::unseal`, and that the wrapped VMK it produces really does
+recover the original VMK.
+
 Exercised end to end — OVMF → `paguro.efi` → a UKI → `paguro-initrd` → the
 root from `dm-paguro`'s view A → a marker service — by
 `.github/workflows/linux-e2e.yml`'s eight scenarios (plain, bare, dirty,
 hibernated, persist, BitLocker, BitLocker-partial, fragmented); see
-DESIGN.md §3a.
+DESIGN.md §3a. No scenario yet exercises the `PaguroTpmBroken` re-seal (it
+needs the FVE-blob reader above); `test/qemu/runner` already stages
+`PaguroTpmBroken` for the loader-side test
+(`policy_failure_sets_tpm_broken_and_offers_the_rest` in
+`paguro-boot/tests/mock_boot.rs` is its mock-boot equivalent) and would be the
+place to add one.

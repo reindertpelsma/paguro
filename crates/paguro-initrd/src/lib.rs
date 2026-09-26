@@ -6,5 +6,6 @@ pub mod dm;
 pub mod esp;
 pub mod pg;
 pub mod plan;
+pub mod reseal;
 pub mod setup;
 pub mod sys;
