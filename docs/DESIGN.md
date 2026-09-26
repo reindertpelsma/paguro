@@ -2149,25 +2149,67 @@ caveat: **the pin cannot happen at `DriverEntry`**, because the filter manager
 attaches the instance when C: mounts. Pin, verify, then report; pinning needs no
 host channel, so nothing early depends on virtio being up.
 
-**QEMU stops the VM if the driver has not reported within ~60 s.** Nothing is
-lost — the disk is protected by §4.3 either way — but a session without the
-driver means Windows meeting `EIO` instead of clean refusals. With a boot-start
-driver the report arrives seconds after C: mounts, so the timeout can be short,
-and *"the paguro driver did not load"* is a clearer failure than odd errors
-later.
+#### Until the driver arms: the tripwire
 
-> **Open: the gate against autochk.** Measured 2026-09-26: a boot-time
-> `chkdsk /r` scheduled in the session runs for about 10 minutes before any
-> driver loads. When the gate was re-armed on the guest's reset, it fired
-> mid-scan and sent a power-down, which autochk ignored this time. Stopping a
-> VM during a disk repair is the kind of interruption §11 Q3 is about, so the
-> launcher arms the gate for the first boot only. The same hazard exists on
-> that first boot if Windows runs autochk there, for example on a volume
-> marked dirty. A fix must either tell autochk apart from a missing driver
-> (boot phase, disk activity) or change what "stop" means (refuse view B
-> writes rather than power off). Meanwhile, a reboot inside the session
-> (Windows Update, autochk) gets the `.BEK` stick plugged back in, or bootmgr
-> would stop at BitLocker recovery.
+Before the driver has its protections in place, a refusal must not reach
+Windows at all. §11 Q1's measurement is why: a boot-time `chkdsk /r` (autochk,
+which runs before any driver loads) read the image's clusters, got the
+refusal, and set out to *"replace bad clusters"* in `linux.img`. That would
+move them into `$BadClus` and point the file at fresh clusters, through MFT
+writes view B allows. So until the driver arms, the first refused request
+stops the VM **before Windows can see it**:
+
+```text
+launcher   QEMU started paused (-S)
+           dmsetup message <view B> 0 tripwire <QEMU pid>
+           cont
+guest      ... a request touching a claim, before arming
+module     SIGKILL to QEMU; an interrupt on every CPU, waited for;
+           only then the request is failed
+           (no QEMU thread can run another user or guest instruction by
+           then, so nothing reads the error)
+driver     protections in place -> asks to be armed (agent port)
+launcher   tripwire off -> {"type":"armed","ok":true}
+driver     armed only on that ack; from now on refusals are EIO, as ever
+```
+
+- **Every boot starts under the tripwire.** `-action reboot=shutdown`: a guest
+  reboot ends QEMU, and the launcher starts the next one paused and sets the
+  tripwire before it runs. That is also how every boot gets the `.BEK`
+  stick again.
+- **It is set by name, in the kernel, and kills synchronously.** No userspace
+  hop sits in the disk path. There is no timeout on the driver either: a
+  Windows without the driver runs, and only an access to the image stops it.
+- **The driver loads before any channel to the host exists** (boot-start,
+  attached when C: mounts). So what depends on the host's ack is its *armed*
+  state, not its load. Until the ack arrives the tripwire stays on, which is
+  the safe side.
+- **When it fires, the user is told why:** *"Windows read or wrote the Linux
+  image before paguro's driver had armed … usually a disk check scheduled in
+  Windows: start Windows natively once to let it finish there, where it is
+  harmless."* The launcher also writes `tripped.json` for the front ends. A
+  scheduled `/r` would otherwise stop every VM boot at the same point.
+- **Risk to verify on real machines:** third-party antivirus with boot-time
+  scanners reading files before the driver attaches would stop every VM boot.
+  The message makes it obvious, and native boot is unaffected.
+- **Measured end to end (2026-09-26, `test/vm/split-e2e.sh` with
+  `PAGURO_Q1_CHKDSK=1`):** `chkdsk C: /r` scheduled in the session, then a
+  reboot. The new QEMU was started paused and the tripwire set. autochk's
+  first read of the image stopped it, and Windows was told of no refusal in
+  that boot (0 I/O errors reported). Afterwards the image's extents, its NTFS
+  map and every protected sector were unchanged.
+- **Side effect: one Automatic Repair screen.** A VM stopped *while Windows
+  boots* leaves a failed boot recorded on C:, which the VM and native Windows
+  share. So the next boot, native or VM, opens Automatic Repair. Its log
+  reports "Number of root causes = 0", and **Continue** boots normally (native
+  Windows up in 65 s, volume clean, image unchanged). The launcher's message
+  says so. Stopping a Windows that has *finished* booting records nothing
+  (the Q3 kill runs).
+- **Prevention, so users rarely meet it:** in a VM session the paguro service
+  refuses to let a bad-sector scan of C: be scheduled. It watches the
+  `BootExecute` autochk entry and the dirty bit for `/r`/`/b` on C:, removes
+  them, and tells the user to run the check natively, where it is harmless.
+  The tripwire stays the safety net for whatever else reads the image early.
 
 *Cost:* this makes the driver a hard dependency for the VM to run at all. A
 Windows update that blocks or breaks it means no VM until fixed, so §7 must treat
@@ -2992,27 +3034,109 @@ conflict with nor be reached from the user's own network or their own Samba:
   dedicated SMB account, kept in Windows' Credential Manager and the Linux
   keyring (§4.7); SMB signing on, SMB encryption off — the link never leaves the
   machine. Nothing is exposed as a guest share.
+- **Built and proven** (the split end-to-end test in `test/vm/`): Samba in netns
+  `paguro` bound to `paguro0` only, `/mnt/c` mounted from inside the netns, and
+  `L:` mapped in Windows over the link. **Keep this model**: it is what makes
+  every service below link-only.
+- **Everything paguro serves on the link is link-only by construction, never
+  by configuration the user could change**: a listener on Linux exists only
+  inside netns `paguro`; one on Windows is bound to `169.254.244.2` where the
+  service allows it and firewall-scoped to the private adapter where it does
+  not (SMB). None of them is ever reachable from the LAN (see the DMZ rule
+  below).
 
 ### Shells, the same command both ways
 
-`paguro shell <target>` works from either side, whichever is booted:
+`paguro` is the same command on both sides, and forwards to the other side
+when the target lives there. `paguro shell <target>` and `paguro distro enter
+<d>` work from either side, whichever is booted:
 
-| Target | From Windows | From Linux |
-|---|---|---|
-| `windows` | a local shell | into the running VM (or an offer to start it) |
-| a distribution *d* | `wsl -d` for WSL distributions; into the container for paguro images | into the container, or the host itself |
+| Target | From Windows native | From the Windows VM | From Linux (metal) |
+|---|---|---|---|
+| `windows` | a local shell | a local shell | into the running VM (or an offer to start it) |
+| the running Linux host | — | **into the host**, over the link | a local shell |
+| a distribution *d* | `wsl -d` for WSL distributions; into its container in the WSL helper for paguro images | **forwarded to the host**: the host's `paguro distro enter d` | into *d*'s container on the host |
 
-The channel is **vsock**, not the network: Hyper-V sockets to the WSL VM,
-virtio-vsock to the QEMU VM (Windows' `viosock` driver), with the paguro agent
-on the far side starting a PTY (ConPTY on Windows). No SSH keys, no listening
-ports.
+From the Windows VM, **Linux's images are never touched directly**: they are
+claimed by the host and refused to Windows at the block layer (§4.3), so
+"enter" is always the host doing it on Windows' behalf.
 
+**The channels:**
+
+- **Windows VM ↔ Linux host: SSH over the private link, both directions.**
+  This is standard tooling that users already have: PowerShell over OpenSSH,
+  `scp`, and editors' remote modes.
+  - **Linux → Windows:** Windows' OpenSSH server, `ListenAddress
+    169.254.244.2` only, firewall-scoped to the private adapter, key-only.
+    The default shell is PowerShell.
+  - **Windows → Linux:** the listener must exist only on the link, but an
+    `sshd` *running* in netns `paguro` would start shells cut off from the
+    network. So a **systemd socket unit with
+    `NetworkNamespacePath=/run/netns/paguro`** listens on `169.254.244.1:22`
+    and hands each connection to `sshd -i` in the host's own namespace. The
+    socket lives only on the link, and the shells are ordinary.
+  - **Keys:** a unique key pair per installation and direction, generated by
+    paguro. The private halves are readable only by the owning account (the
+    Linux user, and on Windows the user's profile, SYSTEM-only for the
+    service's own). Each side's `authorized_keys` holds exactly the other's
+    public key, restricted with `from="169.254.244.x"`. No passwords.
+- **Windows native ↔ WSL: unchanged.** `wsl.exe` and the WSL helper's own
+  channel (Hyper-V sockets). Nothing listens on a network.
+- *Superseded:* the earlier plan of vsock with a paguro agent PTY for the VM.
+  SSH over the link gives the same isolation (link-only listeners, key-only,
+  from-restricted) with standard clients on both ends.
+
+### The paguro service in the VM
+
+The same `paguro service` runs on every Windows boot. **Natively** it does
+none of the following (the SMBIOS marker `paguro-vm/1` is absent, §4.4).
+**In the VM** it:
+
+1. arms the driver: sends the report on the agent port, waits for the host's
+   ack, and only then marks the minifilter armed (§4.4, INTERFACES §11.3);
+2. provisions the link: the static address on the private adapter, the SMB
+   share and account, the firewall scoping, and the `L:` mapping;
+3. provisions SSH: OpenSSH server bound to the link, the host's public key in
+   `authorized_keys`, and the Windows key for reaching Linux;
+4. keeps (2) and (3) correct on every VM boot, and **removes nothing that
+   native Windows needs**. The link adapter only exists in the VM, so its
+   rules are inert natively.
+
+### Adding WSL distributions for bare metal
 ### Adding WSL distributions for bare metal
 
 A WSL distribution becomes bootable by being **registered with the paguro host
 distribution**, which runs it as a privileged container on the metal (§8b). The
 Windows app writes that registration into the host image (it is a VHD WSL can
 attach), not into `paguro.ini`, which stays the bootloader's configuration.
+
+### The VM's network: a tap and nftables, no user-mode networking
+
+The VM's LAN adapter is a **tap device with vhost-net, NATed by nftables** on
+the host, not QEMU's user-mode network (slirp). slirp is a userspace TCP stack,
+slow for SMB and bulk transfers and awkward for inbound forwarding. A tap runs
+at kernel speed and makes the DMZ below a plain DNAT.
+
+- **Where things live:** the LAN tap is in the **host's own namespace**,
+  because it needs the host's routes. Netns `paguro` keeps **only** the private
+  link (`paguro0`, §The private link). The two adapters, and their purposes,
+  never mix.
+- **Routed, not bridged:** a small private subnet on the tap, with
+  masquerading out of whatever interface the host routes by. That works on
+  Wi-Fi, where bridging does not.
+- **paguro's own nftables table** (`inet paguro`): masquerade, forward-accept
+  for the tap, and the DMZ's DNAT set. Created per session, deleted after.
+  `net.ipv4.ip_forward` is enabled for the session and restored. IPv6 starts
+  as none and comes later as NAT66 if needed.
+- **DHCP and DNS,** which slirp used to provide: a single-lease DHCP server in
+  the launcher, and DNS forwarded to the host's resolver on the tap address
+  (systemd-resolved's `DNSStubListenerExtra` where present, dnsmasq
+  otherwise). Windows needs no special configuration.
+- **Coexistence is a requirement, not a detail:** Docker sets the FORWARD
+  policy to DROP, and a drop in any base chain wins over our accept, which is
+  the classic libvirt-plus-Docker breakage. So the launcher detects Docker and
+  firewalld and adds its accept where they will honour it (`DOCKER-USER`,
+  firewalld's policy/zone). A preflight check says so plainly when it cannot.
 
 ### The network: Windows keeps its inbound services
 
@@ -3024,6 +3148,10 @@ sync client's port), like a DMZ host behind the Linux one:
 - nftables DNAT on the LAN interface for new inbound connections whose port is
   not in the set of Linux's listening sockets; the set is kept current from the
   kernel's socket diagnostics, plus ports the user pins to either side;
+- **never forwarded, whatever the set says:** the ports of paguro's link-only
+  services on Windows (445 SMB, 22 SSH, 5985/5986 WinRM) and 3389 RDP unless the
+  user pins it to Windows. The DMZ must not turn the private link's services
+  into LAN services;
 - replies and Linux's own outbound traffic are untouched (conntrack); the VM's
   outbound traffic is NATed through the host;
 - the VM's LAN adapter carries the host's MAC (§4.5), so the network sees one

@@ -673,6 +673,45 @@ virtio-serial channel `org.paguro.agent.0`; length-prefixed messages; the host
 never trusts a reported extent without claiming it first and verifying it
 against the on-disk MFT after a guest volume flush.
 
+**Frames:** a `u32` little-endian length, then that many bytes of UTF-8 JSON.
+
+**Arming (DESIGN §4.4, "Until the driver arms").** Built:
+
+| Direction | Frame | Meaning |
+|---|---|---|
+| guest → host | `{"type":"driver","driver":"PaguroFlt","state":"ok"}` | protections in place; asks to be armed |
+| host → guest | `{"type":"armed","ok":true}` | the tripwire is off: refusals now reach Windows as `EIO` |
+| host → guest | `{"type":"armed","ok":false,"error":"…"}` | it could not be cleared; not armed, and the tripwire stays |
+
+The host sends the ack only after `dmsetup message <view B> 0 tripwire off` has
+succeeded. The guest treats a missing ack as "not armed".
+
+**View B's tripwire** (dm-paguro `paguro-volume` 1.1.0, view `b` only):
+
+```text
+dmsetup message <view B> 0 tripwire <pid>   set: a refused request first kills <pid>
+                                            (SIGKILL + a waited interrupt on every
+                                            CPU), then fails
+dmsetup message <view B> 0 tripwire off     clear
+status: guard N readahead N tripwire <on|off> trips N
+```
+
+`<pid>` is resolved in the caller's pid namespace when the message is sent.
+An unknown pid is `ESRCH`, and any other message is `EINVAL`.
+
+**Image lifecycle over this channel (DRAFT, owner's order):**
+- **Protect** (Windows gives Linux a new image): the minifilter protects the
+  file (cluster pin plus handle refusal), checks nothing else has it open
+  (otherwise reverts), flushes the volume, then sends the file's identity.
+  The module claims it from its **own** NTFS parse, never from reported
+  extents.
+- **Release** (Linux gives an image back): Linux checks the device is unused
+  and unmounted, and removes it. The module releases the claim's ranges.
+  Only then is Windows told to unprotect the file.
+- **Grow:** Windows extends the file with the existing part still protected,
+  protects the new part, flushes, and reports. The module re-derives the
+  extents from NTFS and accepts only an append (`PG_GROW`).
+
 ### 11.4 Installing a distribution: the distribution's ISO, in a WSL2 container — DRAFT
 
 **WSL2 is a requirement** (Windows 10 2004+ / 11, any edition). **No
