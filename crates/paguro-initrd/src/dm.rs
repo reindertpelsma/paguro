@@ -63,6 +63,7 @@ const SPEC_ALIGN: usize = 8;
 const CMD_CREATE: u8 = 3;
 const CMD_REMOVE: u8 = 4;
 const CMD_SUSPEND: u8 = 6;
+const CMD_STATUS: u8 = 7;
 const CMD_LOAD: u8 = 9;
 const CMD_TARGET_MSG: u8 = 14;
 
@@ -105,6 +106,15 @@ impl Mapped {
     }
 }
 
+/// `DM_DEV_STATUS`'s header fields ([`Dm::info`]).
+#[derive(Clone, Copy, Debug)]
+pub struct DevInfo {
+    pub major: u32,
+    pub minor: u32,
+    pub open_count: i32,
+    pub target_count: u32,
+}
+
 fn put(buf: &mut [u8], at: usize, bytes: &[u8]) {
     if let Some(d) = buf.get_mut(at..at + bytes.len()) {
         d.copy_from_slice(bytes);
@@ -140,6 +150,27 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
     b.get(at..at + size_of::<u64>())
         .and_then(|s| s.try_into().ok())
         .map_or(0, u64::from_le_bytes)
+}
+
+fn i32_at(b: &[u8], at: usize) -> i32 {
+    b.get(at..at + size_of::<i32>())
+        .and_then(|s| s.try_into().ok())
+        .map_or(0, i32::from_le_bytes)
+}
+
+fn u32_at(b: &[u8], at: usize) -> u32 {
+    b.get(at..at + size_of::<u32>())
+        .and_then(|s| s.try_into().ok())
+        .map_or(0, u32::from_le_bytes)
+}
+
+/// `new_encode_dev()` (include/linux/kdev_t.h): minor bits 0..8 and 20..32,
+/// major bits 8..20.
+fn devt_major_minor(dev: u64) -> (u32, u32) {
+    let major = ((dev & DEV_MAJOR_MASK) >> DEV_MAJOR_SHIFT) as u32;
+    let minor =
+        ((dev & DEV_MINOR_LOW_MASK) | ((dev >> DEV_MINOR_HIGH_SHIFT) & DEV_MINOR_HIGH_MASK)) as u32;
+    (major, minor)
 }
 
 impl Dm {
@@ -189,9 +220,7 @@ impl Dm {
             let _ = self.remove(name);
             return Err(e);
         }
-        let major = ((dev & DEV_MAJOR_MASK) >> DEV_MAJOR_SHIFT) as u32;
-        let minor = ((dev & DEV_MINOR_LOW_MASK)
-            | ((dev >> DEV_MINOR_HIGH_SHIFT) & DEV_MINOR_HIGH_MASK)) as u32;
+        let (major, minor) = devt_major_minor(dev);
         let node = PathBuf::from(format!("/dev/dm-{minor}"));
         for _ in 0..DEVNODE_POLLS {
             if node.exists() {
@@ -294,6 +323,34 @@ impl Dm {
         put(&mut b, HDR, &body);
         self.call(CMD_TARGET_MSG, &mut b)
             .map_err(|e| format!("dm message {name} {msg:?}: {e}"))
+    }
+
+    /// Reload an already-created device's table and resume it (`dmsetup
+    /// reload && dmsetup resume`): growth (INTERFACES.md §10.3 last bullet)
+    /// reloads `paguro-image` at the new, larger length.
+    pub fn reload(&self, name: &str, targets: &[Target], flags: u32) -> R<()> {
+        self.load_resume(name, targets, flags)
+    }
+
+    /// `DM_DEV_STATUS`: whether `name` exists, and if so its open count —
+    /// `> 0` means it is mounted or otherwise held open, and must not be
+    /// removed (INTERFACES.md §11.3 "Release": Linux checks the device is
+    /// unused and unmounted before removing it).
+    pub fn info(&self, name: &str) -> R<Option<DevInfo>> {
+        let mut b = header(name, 0, HDR)?;
+        match self.call(CMD_STATUS, &mut b) {
+            Ok(()) => {
+                let (major, minor) = devt_major_minor(u64_at(&b, offset_of!(DmIoctl, dev)));
+                Ok(Some(DevInfo {
+                    major,
+                    minor,
+                    open_count: i32_at(&b, offset_of!(DmIoctl, open_count)),
+                    target_count: u32_at(&b, offset_of!(DmIoctl, target_count)),
+                }))
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ENXIO) => Ok(None),
+            Err(e) => Err(format!("dm status {name}: {e}")),
+        }
     }
 
     pub fn remove(&self, name: &str) -> R<()> {
