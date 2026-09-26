@@ -3081,23 +3081,57 @@ leaves the machine, so SMB signing without encryption stays (§The private
 link). Every connection is authenticated: SMB with the per-installation
 secret, SSH by key, RDP as below.
 
-**RDP's credential is the user's own Windows password, kept only in the Linux
-keyring** (§4.7). A paguro-issued token in its place was considered and
-rejected. RDP authenticates local accounts by password (NLA), so accepting
-anything else means code inside LSASS (an authentication package, or an
-MSV1_0 sub-authentication DLL). Windows 11's LSA protection refuses LSASS
-plugins not signed through Microsoft's program, so that would stop working on
-exactly the machines paguro targets. A credential provider runs in LogonUI, not
-LSASS, but still has to hand Windows a password. Within that limit, the
-password is:
+**Windows apps on the Linux desktop come from paguro's own RDP server, not
+Windows'.** RDP is only the protocol; the server is ours. It is built on
+FreeRDP 3's server library (its `shadow` server already streams a Windows
+desktop; the RAIL channel carries RemoteApp windows). It runs **inside the
+user's signed-in session** and listens only on the private link. Windows'
+Remote Desktop service (TermService) is not used, for three reasons, all
+researched (`rdp-auth-research`, 2026-09-26):
 
-- stored only in the Linux keyring, unlocked by the Linux login (PAM);
-- re-prompted when Windows' password changes;
-- sent only by FreeRDP, only over the pinned link, to the pinned certificate.
+- **Windows Home cannot host RDP,** and Home is what most machines ship with.
+  WinApps and WinBoat avoid this by installing their own Pro or evaluation
+  Windows. paguro boots the user's own, so a TermService design fails for
+  most users.
+- **TermService authenticates local and Microsoft accounts by password**
+  (NLA/CredSSP). A token in its place needs an LSASS plugin, which LSA
+  protection refuses unless Microsoft-signed. A credential provider has no
+  hook into RDP's network handshake. Entra web sign-in needs an Entra-joined
+  machine. **A passwordless Microsoft account (PIN only) cannot sign in to
+  TermService's RDP at all.**
+- Client editions allow one interactive session, and RDP sign-in takes over
+  the console.
 
-*Alternative kept open:* log the user's session in at VM boot and attach RDP
-to it with no password. It is not the default, because RemoteApp and
-client-edition session rules make it fragile.
+Our server authenticates **the way paguro chooses**: a per-session token
+issued over the agent port (§The control channel), presented by the Linux
+client and checked by the server. There is no password, no NLA and no LSA
+involvement, and the link binding and certificate pinning still apply. The
+Linux side stays a stock client (`xfreerdp3`). Built in two stages:
+
+1. **Full desktop:** capture with DXGI desktop duplication, encode with
+   H.264 through Media Foundation or the GPU, input by `SendInput`. It proves
+   transport, token authentication and Home support.
+2. **RemoteApp windows:** track top-level windows, capture each
+   (Windows.Graphics.Capture), send RAIL window orders, and handle focus and
+   z-order, clipboard and redirected drives.
+
+**Open, and decisive for passwordless users: signing in to the session.** The
+server needs a signed-in session, and a Windows Hello PIN is bound to the
+physical TPM, which the VM deliberately lacks. Two experiments decide it:
+
+- **The physical TPM passed through to the VM:** Hello keys are not tied to
+  boot measurements, so the user's own PIN may simply work. The host gives up
+  its TPM while the VM runs; paguro needs it only at boot, but Linux's other
+  TPM users need checking.
+- **A persistent virtual TPM** with its own Hello enrollment, and whether
+  Windows tolerates the TPM changing between native and VM boots.
+
+Users with a password can always sign in with it. It is never stored.
+
+*Superseded:* TermService RDP with the user's password kept in the Linux
+keyring (no Home support, no passwordless accounts), and attaching an
+incoming TermService connection to the signed-in session (still
+TermService, so still no Home).
 
 ### Shells, the same command both ways
 
@@ -3152,11 +3186,10 @@ none of the following (the SMBIOS marker `paguro-vm/1` is absent, §4.4).
    share and account, the firewall scoping, and the `L:` mapping;
 3. provisions SSH: OpenSSH server bound to the link, the host's public key in
    `authorized_keys`, and the Windows key for reaching Linux;
-4. provisions RDP for RemoteApp: RDP with NLA, RemoteApp for any program, an
-   inbound rule on the private link from the host only, and the certificate's
-   fingerprint sent over the agent port for the host to pin. It records the
-   user's own RDP on/off setting and puts it back on native boots, because the
-   VM and native Windows share one registry;
+4. runs paguro's own RDP server in the user's session (§The control channel):
+   link-only, token-authenticated, its certificate's fingerprint sent over the
+   agent port for the host to pin. Windows' own Remote Desktop settings are
+   left alone;
 5. keeps (2)–(4) correct on every VM boot, and **removes nothing that
    native Windows needs**. The link adapter only exists in the VM, so its
    rules are inert natively.

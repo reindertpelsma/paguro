@@ -137,6 +137,11 @@ pub fn freerdp_args(
     a
 }
 
+/// **Superseded for the product** by paguro's own RDP server (DESIGN.md §5c:
+/// TermService cannot serve Windows Home or passwordless accounts); kept for
+/// split-e2e.sh's RemoteApp phase, which proves the client side against
+/// Windows' own server on the evaluation image.
+///
 /// PowerShell run in the guest after the link is provisioned (the adapter is
 /// `paguro0`): RDP on, NLA required, RemoteApp for any program, reachable
 /// only on the private link from the host. Additive only: this is the user's
