@@ -26,7 +26,7 @@ Check 'cpu' (Get-CimInstance Win32_Processor | Select-Object -First 1).Name
 Check 'hypervisor.present' (Get-CimInstance Win32_ComputerSystem).HypervisorPresent
 Get-NetAdapter | ForEach-Object { Check "nic.$($_.Name)" "$($_.InterfaceDescription) $($_.MacAddress) $($_.Status)" }
 Get-Disk | ForEach-Object { Check "disk.$($_.Number)" "serial=$($_.SerialNumber) size=$($_.Size) guid=$($_.Guid)" }
-Get-Partition | ForEach-Object { Check "partition.$($_.PartitionNumber)" "$($_.DriveLetter) $($_.Type) offset=$($_.Offset) size=$($_.Size) guid=$($_.Guid)" }
+Get-Partition -DiskNumber 0 | ForEach-Object { Check "partition.$($_.PartitionNumber)" "$($_.DriveLetter) $($_.Type) offset=$($_.Offset) size=$($_.Size) guid=$($_.Guid)" }
 Check 'winre' ((reagentc /info | Select-String 'Windows RE status') -replace '\s+', ' ')
 Check 'tpm' ((Get-CimInstance -Namespace root/cimv2/Security/MicrosoftTpm Win32_Tpm -ErrorAction SilentlyContinue | Measure-Object).Count)
 Check 'secureboot' $(try { Confirm-SecureBootUEFI } catch { 'unsupported' })

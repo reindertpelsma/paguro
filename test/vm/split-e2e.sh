@@ -34,6 +34,8 @@
 #                            relocation of it from the guest (q1-probe.ps1)
 #   PAGURO_Q1_KILL=1         end the session by killing QEMU, not a shutdown
 #                            (Q3's "arbitrary interruption")
+#   PAGURO_Q1_CHKDSK=1       also schedule `chkdsk C: /r` in the session and
+#                            reboot the guest into it (Q1's firmest case)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=lib.sh
@@ -153,6 +155,8 @@ l2 "(setsid qemu-nbd --persistent --shared=4 --export-name=vmdisk --format=raw -
     --bind=0.0.0.0 --port=10809 /dev/mapper/paguro-vmdisk > /share/qemu-nbd.log 2>&1 & echo \$! > /run/nbd.pid); sleep 1" >/dev/null
 
 say "Windows: paguro-vm launch"
+# A reboot inside the session (PAGURO_Q1_CHKDSK) needs the .BEK again.
+BEK_UNPLUG=30; [ "${PAGURO_Q1_CHKDSK:-0}" = 1 ] && BEK_UNPLUG=86400
 # The host workloads' memory.max (DESIGN.md §4.5), on a scratch cgroup
 # with nothing in it: the plumbing, without touching the real host's.
 HOSTCG=/sys/fs/cgroup/paguro-vm-e2e-host
@@ -162,7 +166,7 @@ rm -f "$WIN/vars.fd"
 (cd "$WIN" && "$vm" launch --work "$WIN" --nbd "127.0.0.1:$L2_NBD_PORT/vmdisk" --bek "$SHARE/bek.img" \
     --bus ahci --nat-hostfwd "tcp:127.0.0.1:$SSH_PORT-:22" --hostonly "socket:$VMWORK/paguro0.sock" \
     --no-vsock --record-writes "$VMWORK/writes.log" --memory 6144 --cpus 4 --scope-memory-max 8G \
-    --driver-timeout 300 --bek-unplug-after 30 --host-cgroup "$HOSTCG" \
+    --driver-timeout 300 --bek-unplug-after "$BEK_UNPLUG" --host-cgroup "$HOSTCG" \
     -- -qmp "unix:$WIN/qmp-test.sock,server=on,wait=off" > "$VMWORK/launch.log" 2>&1) &
 t0=$(date +%s)
 for i in $(seq 90); do
@@ -294,6 +298,32 @@ if [ "${PAGURO_Q1:-0}" = 1 ]; then
     shim screenshot "$SHOTS/03-q1.png" >/dev/null 2>&1 || true
 fi
 
+if [ "${PAGURO_Q1_CHKDSK:-0}" = 1 ]; then
+    say "§11 Q1, firmest case: chkdsk /r in the session"
+    # The system volume is checked at the next boot (autochk). /r reads every
+    # cluster; the image's cannot be read, and the question is what it does
+    # about that: report, or take them out of the file.
+    # chkdsk exits 3 when it schedules the check for the next boot.
+    { wssh 'echo Y| chkdsk C: /r' 2>&1 || true; } | tr -d '\r' | tail -3 | tee -a "$RES"
+    wssh 'shutdown /r /t 0' >/dev/null 2>&1 || true
+    sleep 60
+    t0=$(date +%s)
+    for i in $(seq 360); do
+        sleep 10
+        [ $((i % 30)) = 1 ] && shim screenshot "$SHOTS/05-autochk-$i.png" >/dev/null 2>&1 || true
+        wssh 'echo up' 2>/dev/null | grep -aq up && break
+    done
+    result "chkdsk /r: back to SSH after" "$(( $(date +%s) - t0 )) s"
+    wscp "$here/q1-chkdsk.ps1" paguro@127.0.0.1:C:/winvm/ || true
+    ck=$(WSSH_TIMEOUT=600 wssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\winvm\q1-chkdsk.ps1' 2>&1 | tr -d '\r') || true
+    echo "$ck" > "$VMWORK/q1-chkdsk.txt"
+    result "chkdsk /r: bad sectors" "$(grep -a -m1 -i 'bad sectors' <<<"$ck")"
+    result "chkdsk /r: what it did" "$(grep -a -i -E 'replac|bad cluster|removed|recover|correct|Windows has' <<<"$ck" | head -8 | tr '\n' '|')"
+    result "chkdsk /r: the image's extents in the guest" "$(check ck.extents <(echo "$ck"))"
+    result "chkdsk /r: dirty" "$(check ck.dirty <(echo "$ck"))"
+    phase chkdsk
+fi
+
 say "shutdown"
 qpid=$(cat "$WIN/qemu.pid")
 if [ "${PAGURO_Q1_KILL:-0}" = 1 ]; then
@@ -324,10 +354,11 @@ else
 fi
 out=$(l2 "paguro-vm teardown --work /run/paguro/vm 2>&1; pgctl status
 dmsetup create paguro-c-try --table \"0 \$(blockdev --getsz $PART) paguro-volume \$(tail -1 /run/vol) c\" && echo view-c-loads && dmsetup remove paguro-c-try
-mount -t ntfs3 -o ro /dev/mapper/paguro-plain /mnt/p && cat /mnt/p/paguro/written-in-vm.txt; umount /mnt/p") || true
+mount -t ntfs3 -o ro /dev/mapper/paguro-plain /mnt/p && cat /mnt/p/paguro/written-in-vm.txt && { pgctl fiemap /mnt/p/$IMAGE | cmp -s - /share/fiemap && echo fiemap-same || echo fiemap-CHANGED; }; umount /mnt/p") || true
 echo "$out" | tee "$VMWORK/l2-post.txt"
 expect "view C loads once view B is gone" "$out" 'view-c-loads'
 expect "the guest's file is on the volume" "$out" '^paguro-vm '
+expect "the image's NTFS extent map is the one claimed at the start" "$out" 'fiemap-same'
 l2_stop
 
 say "native boot of the same disk (TPM, no marker)"

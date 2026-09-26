@@ -75,7 +75,9 @@ far, in QEMU and in CI:
 - **the design's go/no-go gate, first pass** (DESIGN §11 Q1–Q3): from inside
   that Windows VM, writes into the image and relocations of it are refused
   without NTFS remapping anything, marking the volume dirty or needing repair,
-  including after a hard kill; native Windows then scans clean.
+  including after a hard kill; native Windows then scans clean. One open path
+  found: a boot-time `chkdsk /r` in the session tries to replace the image's
+  unreadable clusters, and was stopped only by its own "not enough space".
 
 Not done: real hardware, the GPU backend, the dedicated-disk mode, and the rest
 of the gate (other error classes and disk buses, `chkdsk /r`, older builds).

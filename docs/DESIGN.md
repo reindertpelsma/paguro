@@ -4733,10 +4733,42 @@ later question sits with the ones it belongs to rather than in numeric order.
    pages cached. A hard stop after both left nothing for recovery to reapply,
    so Q3 held.
 
+   **`chkdsk /r` in the session: it tried to take the image's clusters out of
+   the file.** Measured by `PAGURO_Q1_CHKDSK=1` in two runs with the same
+   result: `chkdsk C: /r` scheduled in the VM, then a reboot into autochk
+   (about 9.5 min). Its own log, from `System Volume Information\Chkdsk`:
+
+   ```text
+   Stage 4: Looking for bad clusters in user file data ...
+   Read failure with status 0xc0000185 at offset 0x8b521000 for 0x10000 bytes.
+   A disk read error occurredc0000185
+   The disk does not have enough space to replace bad clusters
+   detected in file 2585C of name \paguro\linux.img.
+   ...
+   Windows has scanned the file system and found no problems.
+   0 KB in bad sectors.
+   ```
+
+   Afterwards the image's size, extents and NTFS extent map were unchanged,
+   read from both Windows and Linux (`pgctl fiemap` against the claim-time map).
+   The volume was not dirty, and native Windows scanned clean. **But the outcome
+   rests on autochk declining with "not enough space"** on a volume with 10 GB
+   free, for a reason not yet understood. The **intent** was the one this
+   question feared: replace the clusters it cannot read, which moves them into
+   `$BadClus` and rewrites the runlist through MFT writes view B allows. **Treat
+   `chkdsk /r` in a session as an open corruption path until the refusal is
+   understood or closed by design.** Candidates (none decided):
+   - refuse view B writes to the image's own FILE record(s), with the installer
+     giving that record a cluster of its own;
+   - have the minifilter refuse `/r`-style scans in the session;
+   - find which error class makes autochk report the clusters rather than
+     replace them.
+
    **Not yet covered:**
    - other error classes (a write-protect or medium error instead of `EIO`), and
      virtio-blk / virtio-scsi instead of AHCI;
-   - `chkdsk /r`, which is explicit and user-initiated;
+   - why autochk declined the replacement (see above), and `chkdsk /r` on a
+     volume where it would not;
    - the lazy writer's own flush attempt observed directly, and an interruption
      at other points (for example mid-defrag);
    - older builds and ReFS;

@@ -10,6 +10,7 @@ volume without loading anything into the host's kernel.
 | `fve-oracle.sh` | §11 Q10: the substituted FVE metadata (one extra External Key VMK entry) and its `.BEK`, applied to generated BitLocker volumes (`test/fixtures/bde/make.sh`), are opened by **libbde** (`bdemount -s`) and **dislocker** (`dislocker-file -f`) to exactly the expected plaintext; the volume's own recovery password still opens it |
 | `split-e2e.sh` | the whole path, below |
 | `q1-probe.ps1` | §11 Q1–Q3 from inside the guest (`split-e2e.sh` with `PAGURO_Q1=1`; `PAGURO_Q1_KILL=1` ends the session with `kill -9`): writes into the image in every form, `FSCTL_MOVE_FILE` of it, the optimiser, with extents, dirty bit, bad-sector count and events before and after; a native scan afterwards |
+| `q1-chkdsk.ps1` | after `PAGURO_Q1_CHKDSK=1` schedules `chkdsk C: /r` and reboots the guest into it: autochk's own log (copied out of `System Volume Information` with backup semantics) and the image as NTFS then maps it |
 | `q24.py` | §11 Q24's instrument: which sectors the guest wrote where, from the disk's `dm-log-writes` log (QEMU `blklogwrites`) |
 
 ## `split-e2e.sh`
