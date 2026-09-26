@@ -379,7 +379,7 @@ this machine any more", and whoever makes it match again clears it:
 |---|---|---|
 | TPM rung fails its policy (PCRs moved) | loader | set |
 | Windows sees the flag, stages `setupTPM`, reboots into Linux | Windows tool | cleared when staging |
-| a boot on another rung (passphrase, recovery) whose initrd re-seals against this boot's PCR values (handoff `PCRS`) and writes the new `tpm_seal.bin` | initrd | cleared after the file is written |
+| a `passphrase`-rung boot whose initrd re-seals against this boot's PCR values (handoff `PCRS`) and writes the new `tpm_seal.bin` (§8.3; a `recovery`-rung boot never types a PIN, so it has nothing to re-derive the `tpm` rung's `auth` from and cannot clear it by itself) | initrd | cleared after the file is written |
 | a boot whose TPM rung succeeds **and its key opens the volume** (the FVEK unwrap confirms it; a successful unseal alone does not) | loader | cleared, read first so a normal boot writes nothing |
 
 A successful boot alone does not clear it: only a seal that matches again
@@ -451,8 +451,19 @@ record   type u16 | len u32 | value[len]        (no padding)
 | 9 | `STATE` | flags u32: 1 = hibernation image, 2 = dirty bit, 4 = config unverified (also: Secure Boot off, first boot), 8 = recovery path | 1 |
 | 10 | `RUNG` | u8: 1 tpm, 2 setuptpm, 3 passphrase, 4 recovery, 5 pin bypass, 6 bootstrap, 7 clear key (BitLocker suspended), 8 unencrypted volume, 9 BitLocker password protector | 1 |
 | 11 | `PROVISION` | sealed object, wrapped VMK, salt (as the tpm seal body), sealed against the load taint of the `CONFIG` the loader authored on this boot | 0–1 |
+| 12 | `USER_HASH` | `kdf::user_password_hash(pw)`, 32 bytes | 0–1: only on a `passphrase`-rung boot |
 
 Unknown type → refuse. Duplicate of a type that occurs at most once → refuse.
+
+`USER_HASH` lets Linux re-seal the `tpm` rung after `PaguroTpmBroken` (§5,
+§8.3) with the same `auth` a future `tpm`-rung boot will derive from the same
+passphrase. Forwarded **only** on the `passphrase` rung: that rung's own
+`env` is already a public constant (DESIGN.md §6), so a compromised Linux
+process reading the handoff learns nothing an attacker with ESP + raw-disk
+access could not already use for the same offline dictionary attack. Never
+forwarded on `tpm`, `recovery` or any other rung — `recovery` in particular
+never types a PIN, so there is no value to forward and no re-seal it can
+trigger by itself (§5).
 
 `IMAGE` gives the file's identity; it never gives its location. Only the chosen
 entry's files are forwarded; the whole verified configuration travels in
@@ -490,6 +501,16 @@ module reads the extents itself (§10).
   `BootOrder` (kept if `BootOrder` cannot be read).
 - **Hash variable missing with Secure Boot on:** straight to recovery.
 - **GPT:** primary header only; entry array ≤ 16 KiB.
+- **Linux re-seal, PCR values:** the *recorded* ones (handoff `PCRS`, PCR
+  0/2/4/7) plus PCR 12 computed from the `CONFIG` the same handoff carried
+  (`pcr12_after_load_taint`) — never a live PCR read, which by the time
+  Linux runs no longer matches what the loader saw (DESIGN.md §6, "Changing
+  the PIN and firmware updates").
+- **Linux re-seal, the TPM conversation:** `paguro-initrd` reuses
+  `paguro-boot`'s own TPM client (`crates/paguro-boot/src/tpm.rs`) over
+  `/dev/tpmrm0`, the same way `paguro-win` reuses it over Windows' TBS — so
+  the object template, policy digest and session salting are the loader's,
+  not a second implementation of them.
 
 ### 8.2 Handoff driver — OPEN
 
@@ -498,12 +519,25 @@ exposes to the initrd (e.g. a read-once `/dev/paguro-handoff`).
 
 ### 8.3 What Linux keeps after the handoff
 
-The initrd zeroes the VMK and FVEK once dm-crypt is set up (the FVEK through a
-`logon` key invalidated after the table loads). **`B` and the PCR values are
-kept for re-sealing** (a PIN change from Linux, or re-sealing after a TPM
-failure — §5): `B` goes into a root-only `logon` key in the kernel keyring that
-lives for the session, read only by the re-seal tool; the PCR values are
-public and go into `recorded.bin`. Nothing is written to disk in the clear.
+The initrd zeroes the FVEK once dm-crypt is set up (through a `logon` key
+invalidated after the table loads). **`B`, the VMK and the PCR values are kept
+for re-sealing** (a PIN change from Linux, or re-sealing after a TPM failure —
+§5): `B` goes into a root-only, *session*-scoped `logon` key in the kernel
+keyring, so a re-seal tool started later in the same login session (not only
+`paguro-initrd` itself) can still reach it; the VMK is kept in process memory
+for the same boot's own re-seal attempt and zeroized when that process exits;
+the PCR values are public and go into `recorded.bin`. Nothing is written to
+disk in the clear.
+
+A re-seal also needs the encrypted FVEK blob (DESIGN.md §6, "The Linux-side
+seal" — an input to `root_gate`, unchanged by a re-seal): read from the raw
+BitLocker FVE metadata, not carried in the handoff (it is not a secret, and
+Linux can read it directly off the volume — DESIGN.md §6, "Reading a
+BitLocker volume"). As of this writing the parser that reads it
+(`paguro-boot::bde`) is private to the loader crate; `paguro-initrd` does not
+yet have its own reader, so it skips a re-seal it cannot complete rather than
+duplicate that parser's offsets unverified (`crates/paguro-initrd/README.md`
+has the fuller account).
 
 ## 9. Bootstrap — DRAFT
 

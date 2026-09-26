@@ -225,6 +225,7 @@ proptest! {
         state in 0u32..16,
         rung in 1u8..=9,
         prov in proptest::option::of((any::<[u8; 32]>(), any::<[u8; 16]>(), tpm2b(300), tpm2b(300))),
+        user_hash in proptest::option::of(any::<[u8; 32]>()),
     ) {
         let pcrv = vec![0x5au8; mask.count_ones() as usize * 32];
         let root = root.map(|(r, s)| ImageId { name: &name, mft_record: r, mft_seq: s });
@@ -264,6 +265,7 @@ proptest! {
             state,
             rung: Rung::from_u8(rung).unwrap(),
             provision,
+            user_hash: user_hash.as_ref(),
         };
         let mut buf = vec![0u8; handoff::MAX_LEN];
         let n = handoff::encode(&h, &mut buf).unwrap();

@@ -115,6 +115,13 @@ pub mod rtype {
     pub const STATE: u16 = 9;
     pub const RUNG: u16 = 10;
     pub const PROVISION: u16 = 11;
+    /// `kdf::user_password_hash(pw)`: only on a `passphrase`-rung boot
+    /// (INTERFACES.md §8, §6 "Changing the PIN, and firmware updates"), so
+    /// Linux can re-seal the `tpm` rung after `PaguroTpmBroken`. Safe to
+    /// forward only there: that rung's own `env` is already a public
+    /// constant, so an attacker with ESP + raw-disk access can already run
+    /// the same offline dictionary attack without it.
+    pub const USER_HASH: u16 = 12;
 }
 
 pub mod state {
@@ -246,6 +253,9 @@ pub struct Handoff<'a> {
     pub rung: Rung,
     /// A new `tpm` seal body (INTERFACES.md §4) on a provisioning boot.
     pub provision: Option<Seal<'a>>,
+    /// `kdf::user_password_hash(pw)`, only on a `passphrase`-rung boot
+    /// (§8.3, re-sealing after `PaguroTpmBroken` or a PIN change from Linux).
+    pub user_hash: Option<&'a [u8; KEY_LEN]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,6 +325,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
     let mut st = None;
     let mut rung = None;
     let mut provision = None;
+    let mut user_hash = None;
 
     let mut n = 0u16;
     while !r.is_empty() {
@@ -325,7 +336,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
         let t = r.u16_le().map_err(short)?;
         let len = r.u32_le().map_err(short)? as usize;
         let value = r.take(len).map_err(short)?;
-        if !(rtype::VOLUME..=rtype::PROVISION).contains(&t) {
+        if !(rtype::VOLUME..=rtype::USER_HASH).contains(&t) {
             return Err(HandoffError::UnknownType(t));
         }
         let bit = 1u16 << t;
@@ -445,10 +456,14 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
                 rung =
                     Some(Rung::from_u8(v.u8().map_err(short)?).ok_or(HandoffError::BadValue(t))?);
             }
-            _ => {
-                // rtype::PROVISION, the only type left in range.
+            rtype::PROVISION => {
                 provision =
                     Some(seal::read_body(Kind::Tpm, value).map_err(HandoffError::Provision)?);
+            }
+            _ => {
+                // rtype::USER_HASH, the only type left in range.
+                fixed(KEY_LEN)?;
+                user_hash = Some(v.array::<KEY_LEN>().map_err(short)?);
             }
         }
     }
@@ -472,6 +487,7 @@ pub fn decode(blob: &[u8]) -> Result<Handoff<'_>, HandoffError> {
         state: st.ok_or(HandoffError::Missing(rtype::STATE))?,
         rung: rung.ok_or(HandoffError::Missing(rtype::RUNG))?,
         provision,
+        user_hash,
     })
 }
 
@@ -620,6 +636,10 @@ pub fn encode(h: &Handoff<'_>, out: &mut [u8]) -> Result<usize, EncodeError> {
         record(&mut w, rtype::PROVISION, |w| seal::write_body(&p, w))?;
         count += 1;
     }
+    if let Some(uh) = h.user_hash {
+        record(&mut w, rtype::USER_HASH, |w| w.put(uh))?;
+        count += 1;
+    }
     let total = u32::try_from(w.len()).map_err(|_| EncodeError::Full)?;
     w.patch(offset_of!(Header, total_len), &total.to_le_bytes())?;
     w.patch(offset_of!(Header, record_count), &count.to_le_bytes())?;
@@ -684,6 +704,7 @@ mod tests {
                     private: &[0, 1, 8],
                 }),
             }),
+            user_hash: Some(&[0xcc; 32]),
         }
     }
 
@@ -717,9 +738,11 @@ mod tests {
         m.provision = None;
         m.efi_disk = None;
         m.rung = Rung::Unencrypted;
+        m.user_hash = None;
         let (b, n) = enc(&m);
         assert_eq!(decode(&b[..n]), Ok(m));
         assert_eq!(decode(&b[..n]).unwrap().efi_disk, None);
+        assert_eq!(decode(&b[..n]).unwrap().user_hash, None);
         // An efi_file entry with and without a root, and no image at all.
         let file = Some(ImageId {
             name: "debian",
@@ -833,8 +856,8 @@ mod tests {
             Err(HandoffError::UnknownType(0))
         );
         assert_eq!(
-            with(&[12, 0, 0, 0, 0, 0], 2),
-            Err(HandoffError::UnknownType(12))
+            with(&[13, 0, 0, 0, 0, 0], 2),
+            Err(HandoffError::UnknownType(13))
         );
         assert_eq!(
             with(
@@ -964,7 +987,7 @@ mod tests {
             with(&[8, 0, 1, 0, 0, 0, 1], 2),
             Err(HandoffError::BadLength(8))
         );
-        for t in [1u8, 2, 4, 5] {
+        for t in [1u8, 2, 4, 5, 12] {
             assert_eq!(
                 with(&[t, 0, 1, 0, 0, 0, 0], 2),
                 Err(HandoffError::BadLength(u16::from(t)))

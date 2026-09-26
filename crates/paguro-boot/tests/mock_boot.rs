@@ -85,6 +85,10 @@ fn happy_path_tpm_rung() {
     assert_eq!(&h.pcrs.values[96..], &t.pcrs[7]);
     assert!(h.provision.is_none());
     assert_eq!(
+        h.user_hash, None,
+        "only a passphrase-rung boot forwards USER_HASH (INTERFACES.md §8.3)"
+    );
+    assert_eq!(
         w.m.events.last(),
         Some(&Event::Start(b"chain-device-path".to_vec()))
     );
@@ -266,6 +270,12 @@ fn missing_tpm_seal_extends_the_sentinel() {
     assert!(w.m.logged("(no tpm_seal.bin)"));
     assert_eq!(unlock_menus(&w.m)[0].tpm, Err(Grey::Unavailable));
     assert_eq!(w.m.decoded().config, Some(&w.ini[..]));
+    assert_eq!(
+        w.m.decoded().user_hash,
+        Some(&kdf::user_password_hash("pw")),
+        "a passphrase-rung boot forwards USER_HASH so Linux can re-seal the \
+         tpm rung (INTERFACES.md §5, §8.3)"
+    );
 }
 
 #[test]
