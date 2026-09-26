@@ -3045,6 +3045,60 @@ conflict with nor be reached from the user's own network or their own Samba:
   not (SMB). None of them is ever reachable from the LAN (see the DMZ rule
   below).
 
+### The control channel, and keeping the link to itself
+
+**The agent port is paguro's RPC between the two sides, not a network:**
+virtio-serial `org.paguro.agent.0` between the Windows VM and its launcher,
+and Hyper-V sockets between Windows and the WSL VM when Windows is on the
+metal. Everything that bootstraps trust travels there and nowhere else:
+
+- arming (§4.4);
+- the SSH public keys and host keys for each direction;
+- the SMB secret;
+- the RDP certificate's fingerprint;
+- later, any other provisioning.
+
+A device between one VM and its launcher cannot be reached from any network.
+
+**The link carries the internal protocols, and only the link.** SMB, SSH and
+RDP between the two sides run on `paguro0`. The VM's internet adapter has no
+paguro listener on either side, and nothing of ours is reachable from
+LAN/Wi-Fi/VPN. Hardened against pushed or overlapping routes (a VPN or DHCP
+server that pushes `169.254.0.0/16`, or a LAN that reuses the range):
+
+- **Linux side:** the link lives in netns `paguro`, whose routing table no
+  VPN or DHCP client touches.
+- **Windows side:** listeners are bound to `169.254.244.2` where the service
+  allows it, and firewall-scoped by **interface**, not by address.
+- **Outbound pinning:** a Windows firewall rule allows SMB, SSH and RDP to
+  `169.254.244.0/30` to leave **only** through the private adapter. A
+  pushed route can never carry a credential to someone else.
+- **Peers are pinned, never trusted on first use:** SSH `known_hosts`
+  entries and RDP's `/cert:fingerprint:` both come from the agent port.
+
+**No encryption on the link, authentication everywhere.** The link never
+leaves the machine, so SMB signing without encryption stays (§The private
+link). Every connection is authenticated: SMB with the per-installation
+secret, SSH by key, RDP as below.
+
+**RDP's credential is the user's own Windows password, kept only in the Linux
+keyring** (§4.7). A paguro-issued token in its place was considered and
+rejected. RDP authenticates local accounts by password (NLA), so accepting
+anything else means code inside LSASS (an authentication package, or an
+MSV1_0 sub-authentication DLL). Windows 11's LSA protection refuses LSASS
+plugins not signed through Microsoft's program, so that would stop working on
+exactly the machines paguro targets. A credential provider runs in LogonUI, not
+LSASS, but still has to hand Windows a password. Within that limit, the
+password is:
+
+- stored only in the Linux keyring, unlocked by the Linux login (PAM);
+- re-prompted when Windows' password changes;
+- sent only by FreeRDP, only over the pinned link, to the pinned certificate.
+
+*Alternative kept open:* log the user's session in at VM boot and attach RDP
+to it with no password. It is not the default, because RemoteApp and
+client-edition session rules make it fragile.
+
 ### Shells, the same command both ways
 
 `paguro` is the same command on both sides, and forwards to the other side
