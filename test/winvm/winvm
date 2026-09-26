@@ -187,7 +187,9 @@ def qemu_argv(disk, vars_fd, secure_boot, cdroms=(), vnc=None, serial=None, pagu
             a += ["-blockdev", f"driver=file,filename={cd},node-name=cdf{i},read-only=on",
                   "-blockdev", f"driver=raw,file=cdf{i},node-name=cd{i},read-only=on"]
         a += ["-device", f"ide-cd,drive=cd{i},bus=ide.{i + 1},bootindex={i + 1}"]
-    a += ["-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{SSH_PORT}-:22",
+    # WINVM_EXTRA_FWD: more user-mode forwards, e.g. "hostfwd=tcp:127.0.0.1:3391-:3391".
+    fwd = os.environ.get("WINVM_EXTRA_FWD", "")
+    a += ["-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{SSH_PORT}-:22" + (f",{fwd}" if fwd else ""),
           "-device", "e1000e,netdev=n0",
           "-device", "qemu-xhci,id=xhci", "-device", "usb-tablet,bus=xhci.0",
           "-vga", "std", "-display", "none",
