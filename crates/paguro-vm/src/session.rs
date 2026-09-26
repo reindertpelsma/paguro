@@ -674,6 +674,84 @@ pub fn driver_ok(v: &Value) -> bool {
     field(v, "type") == "driver" && field(v, "state") == "ok"
 }
 
+/// Provisioning SSH over the agent port (DESIGN.md §5c "The control
+/// channel, and keeping the link to itself"; INTERFACES.md §11.3): the
+/// only place either side's keys travel, so both ends reach
+/// `StrictHostKeyChecking yes` with a pinned `known_hosts` instead of
+/// trust-on-first-use.
+pub fn is_ssh_keys(v: &Value) -> bool {
+    field(v, "type") == "ssh-keys"
+}
+
+/// guest → host: Windows' own client key (for the host's `authorized_keys`)
+/// and its sshd host key (for the host's `known_hosts`).
+pub fn ssh_keys_frame(windows_user_pub: &str, windows_host_pub: &str) -> Value {
+    json!({
+        "type": "ssh-keys",
+        "windows_user_pub": windows_user_pub,
+        "windows_host_pub": windows_host_pub,
+    })
+}
+
+/// host → guest: the mirror, the host's own client key and host key.
+pub fn ssh_keys_ack_frame(linux_user_pub: &str, linux_host_pub: &str) -> Value {
+    json!({
+        "type": "ssh-keys-ack",
+        "linux_user_pub": linux_user_pub,
+        "linux_host_pub": linux_host_pub,
+    })
+}
+
+/// The host's side of the handshake: fold the guest's keys into the link's
+/// own `authorized_keys`/`known_hosts` (`net::LINK_STATE_DIR`, the same
+/// files `paguro-linux link setup` manages) and answer with the host's own
+/// keys, read from the same directory (written there by `link setup`,
+/// which must have already run at least once — this never generates
+/// keys itself, only exchanges them).
+pub fn handle_ssh_keys(state_dir: &Path, req: &Value) -> R<Value> {
+    let user_pub = req
+        .get("windows_user_pub")
+        .and_then(Value::as_str)
+        .ok_or("ssh-keys: no windows_user_pub")?;
+    let host_pub = req
+        .get("windows_host_pub")
+        .and_then(Value::as_str)
+        .ok_or("ssh-keys: no windows_host_pub")?;
+
+    let akey = state_dir.join("authorized_keys");
+    let line = net::authorized_keys_line(user_pub);
+    let mut existing = fs::read_to_string(&akey).unwrap_or_default();
+    if !existing.lines().any(|l| l == line) {
+        if !existing.is_empty() && !existing.ends_with('\n') {
+            existing.push('\n');
+        }
+        existing.push_str(&line);
+        existing.push('\n');
+    }
+    fs::write(&akey, existing).map_err(|e| format!("{}: {e}", akey.display()))?;
+
+    let khosts = state_dir.join("known_hosts");
+    let line = net::known_hosts_line(net::GUEST_ADDR, host_pub);
+    let mut existing = fs::read_to_string(&khosts).unwrap_or_default();
+    if !existing.lines().any(|l| l == line) {
+        if !existing.is_empty() && !existing.ends_with('\n') {
+            existing.push('\n');
+        }
+        existing.push_str(&line);
+        existing.push('\n');
+    }
+    fs::write(&khosts, existing).map_err(|e| format!("{}: {e}", khosts.display()))?;
+
+    let linux_user_pub = fs::read_to_string(state_dir.join("id_ed25519.pub"))
+        .map_err(|e| format!("this installation's own key: {e}"))?;
+    let linux_host_pub = fs::read_to_string(state_dir.join("ssh_host_ed25519_key.pub"))
+        .map_err(|e| format!("this installation's own host key: {e}"))?;
+    Ok(ssh_keys_ack_frame(
+        linux_user_pub.trim(),
+        linux_host_pub.trim(),
+    ))
+}
+
 fn wait_for(p: &Path, t: Duration) -> bool {
     let end = Instant::now() + t;
     while Instant::now() < end {
@@ -985,6 +1063,22 @@ fn supervise(
                 abuf.extend_from_slice(b.get(..n).unwrap_or(&[]));
                 for f in agent_frames(&mut abuf) {
                     log(&format!("agent: {f}"));
+                    if is_ssh_keys(&f) {
+                        let ack = match handle_ssh_keys(Path::new(net::LINK_STATE_DIR), &f) {
+                            Ok(ack) => {
+                                log("ssh-keys: Windows' keys folded in, replied with the host's");
+                                ack
+                            }
+                            Err(e) => {
+                                log(&format!("ssh-keys: {e}"));
+                                json!({"type": "ssh-keys-ack", "error": e})
+                            }
+                        };
+                        if let Err(e) = a.write_all(&agent_frame(&ack)) {
+                            log(&format!("agent: ssh-keys ack: {e}"));
+                        }
+                        continue;
+                    }
                     if !driver_ok(&f) || armed {
                         continue;
                     }
@@ -1233,5 +1327,49 @@ mod tests {
         let mut junk = vec![0xff, 0xff, 0xff, 0xff, 1, 2];
         assert!(agent_frames(&mut junk).is_empty());
         assert!(junk.is_empty());
+    }
+
+    #[test]
+    fn ssh_keys_frames_carry_both_keys() {
+        let f = ssh_keys_frame(
+            "ssh-ed25519 AAAA windows-user",
+            "ssh-ed25519 AAAA windows-host",
+        );
+        assert!(is_ssh_keys(&f));
+        assert_eq!(f["windows_user_pub"], "ssh-ed25519 AAAA windows-user");
+        assert_eq!(f["windows_host_pub"], "ssh-ed25519 AAAA windows-host");
+        let ack = ssh_keys_ack_frame("ssh-ed25519 AAAA linux-user", "ssh-ed25519 AAAA linux-host");
+        assert!(!is_ssh_keys(&ack));
+        assert_eq!(field(&ack, "type"), "ssh-keys-ack");
+    }
+
+    #[test]
+    fn handle_ssh_keys_folds_in_and_replies_with_the_hosts_own() {
+        let d = std::env::temp_dir().join(format!("paguro-vm-sshkeys-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("id_ed25519.pub"), "ssh-ed25519 AAAA linux-user\n").unwrap();
+        fs::write(
+            d.join("ssh_host_ed25519_key.pub"),
+            "ssh-ed25519 AAAA linux-host\n",
+        )
+        .unwrap();
+
+        let req = ssh_keys_frame("ssh-ed25519 AAAA win-user", "ssh-ed25519 AAAA win-host");
+        let ack = handle_ssh_keys(&d, &req).unwrap();
+        assert_eq!(ack["linux_user_pub"], "ssh-ed25519 AAAA linux-user");
+        assert_eq!(ack["linux_host_pub"], "ssh-ed25519 AAAA linux-host");
+
+        let akey = fs::read_to_string(d.join("authorized_keys")).unwrap();
+        assert_eq!(akey, "from=\"169.254.244.2\" ssh-ed25519 AAAA win-user\n");
+        let khosts = fs::read_to_string(d.join("known_hosts")).unwrap();
+        assert_eq!(khosts, "169.254.244.2 ssh-ed25519 AAAA win-host\n");
+
+        // Idempotent: a second identical handshake does not duplicate lines.
+        handle_ssh_keys(&d, &req).unwrap();
+        assert_eq!(fs::read_to_string(d.join("authorized_keys")).unwrap(), akey);
+
+        assert!(handle_ssh_keys(&d, &json!({"type": "ssh-keys"})).is_err());
+        let _ = fs::remove_dir_all(&d);
     }
 }

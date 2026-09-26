@@ -33,6 +33,19 @@ pub const C_SHARE: &str = "paguro-c";
 /// The dedicated accounts, one per side.
 pub const LINUX_SMB_USER: &str = "paguro";
 pub const WINDOWS_SMB_USER: &str = "paguro-smb";
+pub const SSH_PORT: u16 = 22;
+pub const WINDOWS_SSH_FIREWALL_RULE: &str = "paguro-ssh-in";
+/// The private link's whole subnet, for rules scoped by network rather
+/// than by one address (outbound pinning, below).
+pub const LINK_NET: &str = "169.254.244.0/30";
+/// RDP's port (§5b), pinned to the link the same way SMB and SSH are.
+pub const RDP_PORT: u16 = 3389;
+pub const OUTBOUND_ALLOW_RULE: &str = "paguro-link-out-allow";
+pub const OUTBOUND_BLOCK_RULE: &str = "paguro-link-out-block";
+/// Where the Linux side's own SSH state lives (keys, `sshd_config`,
+/// `authorized_keys`, `known_hosts`): one constant so `paguro-linux`'s CLI
+/// and the agent-port handler below never disagree on the path.
+pub const LINK_STATE_DIR: &str = "/etc/paguro/link";
 
 /// `smb.conf` for the netns Samba: one share, the distributions' roots
 /// under `root` (`/mnt/l`), bound to `paguro0` only.
@@ -139,6 +152,103 @@ try {{
     )
 }
 
+/// PowerShell run once in the guest: the Windows side of "Shells, the same
+/// command both ways" (DESIGN.md §5c). Idempotent, like
+/// [`windows_provision_ps1`]. `linux_pubkey` is the Linux side's public key
+/// line (`ssh-ed25519 AAAA... comment`); `admin` selects
+/// `administrators_authorized_keys` (OpenSSH-on-Windows always consults this
+/// one file for a member of Administrators, whichever admin account signs
+/// in — never that account's own `authorized_keys`) or the plain per-user
+/// file for a non-admin account. Nothing here is reachable except from the
+/// private link: `ListenAddress` and the firewall rule both scope to it.
+pub fn windows_ssh_provision_ps1(user: &str, linux_pubkey: &str, admin: bool) -> String {
+    // Not a secret: embedded like the MAC, not passed as a parameter.
+    // PowerShell's single-quoted strings escape `'` by doubling it.
+    let linux_pubkey = linux_pubkey.trim().replace('\'', "''");
+    let akey_path = if admin {
+        r"$env:ProgramData\ssh\administrators_authorized_keys".to_string()
+    } else {
+        format!(r"$env:SystemDrive\Users\{user}\.ssh\authorized_keys")
+    };
+    format!(
+        r#"# paguro: the private link, SSH Windows side (DESIGN.md §5c). Generated.
+$ErrorActionPreference = 'Stop'
+$LinuxPubKey = '{linux_pubkey}'
+$cap = Get-WindowsCapability -Online -Name OpenSSH.Server*
+if ($cap.State -ne 'Installed') {{ Add-WindowsCapability -Online -Name $cap.Name | Out-Null }}
+Set-Service -Name sshd -StartupType Automatic
+Start-Service sshd -ErrorAction SilentlyContinue
+$conf = "$env:ProgramData\ssh\sshd_config"
+$body = Get-Content $conf -Raw -ErrorAction SilentlyContinue
+if (-not $body) {{ $body = '' }}
+$lines = @(
+    'ListenAddress {GUEST_ADDR}',
+    'Port {SSH_PORT}',
+    'PubkeyAuthentication yes',
+    'PasswordAuthentication no',
+    'KbdInteractiveAuthentication no',
+    "AllowUsers {user}"
+)
+foreach ($l in $lines) {{
+    $key = ($l -split '\s+')[0]
+    $body = ($body -split "`n" | Where-Object {{ $_ -notmatch "^\s*$key\s" }}) -join "`n"
+    $body += "`n$l"
+}}
+Set-Content -Path $conf -Value $body -Encoding ascii
+$akey = '{akey_path}'
+New-Item -ItemType Directory -Force -Path (Split-Path $akey) | Out-Null
+if (-not (Select-String -Path $akey -Pattern ([regex]::Escape($LinuxPubKey)) -ErrorAction SilentlyContinue)) {{
+    Add-Content -Path $akey -Value $LinuxPubKey
+}}
+# OpenSSH refuses a world- or group-writable authorized-keys file.
+icacls $akey /inheritance:r | Out-Null
+icacls $akey /grant 'SYSTEM:F' 'Administrators:F' | Out-Null
+Set-Service -Name sshd -Status Running
+# Default shell: PowerShell, not cmd.exe.
+$pwsh = (Get-Command powershell.exe).Source
+New-Item -Path 'HKLM:\SOFTWARE\OpenSSH' -Force | Out-Null
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value $pwsh
+# In on this adapter only, key-only (PasswordAuthentication no above).
+Get-NetFirewallRule -Name '{WINDOWS_SSH_FIREWALL_RULE}' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+New-NetFirewallRule -Name '{WINDOWS_SSH_FIREWALL_RULE}' -DisplayName 'paguro: SSH on the private link' -Direction Inbound `
+    -Protocol TCP -LocalPort {SSH_PORT} -InterfaceAlias 'paguro0' -RemoteAddress '{HOST_ADDR}' -Action Allow | Out-Null
+'paguro: SSH ready on {GUEST_ADDR}:{SSH_PORT}'
+"#
+    )
+}
+
+/// Outbound pinning (DESIGN.md §5c "The control channel, and keeping the
+/// link to itself"): SMB, SSH and RDP to the private link's subnet may
+/// leave only through `paguro0`, hardened against a VPN or DHCP server
+/// that pushes an overlapping or more specific route for
+/// `169.254.244.0/30` out some other adapter. Windows Firewall has no
+/// "every interface but this one" match, so the block rule lists every
+/// *other* adapter by name, recomputed each run (adapters can change) —
+/// a machine with only `paguro0` skips it: there is nowhere else to go.
+/// Idempotent, like the other provisioning scripts here.
+pub fn windows_outbound_pin_ps1() -> String {
+    format!(
+        r#"# paguro: outbound pinning (DESIGN.md §5c). Generated.
+$ErrorActionPreference = 'Stop'
+$ports = @(445, {SSH_PORT}, {RDP_PORT})
+Get-NetFirewallRule -Name '{OUTBOUND_ALLOW_RULE}' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+Get-NetFirewallRule -Name '{OUTBOUND_BLOCK_RULE}' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+New-NetFirewallRule -Name '{OUTBOUND_ALLOW_RULE}' `
+    -DisplayName 'paguro: SMB/SSH/RDP to the link, out the private adapter' `
+    -Direction Outbound -Protocol TCP -RemotePort $ports -RemoteAddress '{LINK_NET}' `
+    -InterfaceAlias '{IFNAME}' -Action Allow | Out-Null
+$others = @(Get-NetAdapter | Where-Object Name -ne '{IFNAME}' | ForEach-Object Name)
+if ($others.Count -gt 0) {{
+    New-NetFirewallRule -Name '{OUTBOUND_BLOCK_RULE}' `
+        -DisplayName 'paguro: SMB/SSH/RDP to the link, blocked on every other adapter' `
+        -Direction Outbound -Protocol TCP -RemotePort $ports -RemoteAddress '{LINK_NET}' `
+        -InterfaceAlias $others -Action Block | Out-Null
+}}
+'paguro: SMB/SSH/RDP to {LINK_NET} pinned to {IFNAME}'
+"#
+    )
+}
+
 /// The CIFS mount options for `/mnt/c` (the password goes in through
 /// `password=` in the mount data only; never on a command line).
 pub fn cifs_options(user: &str, secret: &str, uid: u32, gid: u32) -> String {
@@ -152,6 +262,23 @@ pub fn cifs_options(user: &str, secret: &str, uid: u32, gid: u32) -> String {
 
 pub fn cifs_source() -> String {
     format!("//{GUEST_ADDR}/{C_SHARE}")
+}
+
+/// One `authorized_keys` line for the host's own sshd (DESIGN.md §5c
+/// "Shells, the same command both ways"): the Windows side's public key,
+/// restricted to its one address — the mirror of the `from=` restriction
+/// on Windows' own `authorized_keys`/`administrators_authorized_keys`.
+pub fn authorized_keys_line(windows_pubkey: &str) -> String {
+    format!("from=\"{GUEST_ADDR}\" {}", windows_pubkey.trim())
+}
+
+/// One `known_hosts` line pinning `pubkey` (a host key) to `addr`: used by
+/// both directions so neither ever falls back to trust-on-first-use
+/// (DESIGN.md §5c "The control channel, and keeping the link to itself";
+/// the agent port is what delivers the other side's host key, INTERFACES
+/// §11.3).
+pub fn known_hosts_line(addr: &str, host_pubkey: &str) -> String {
+    format!("{addr} {}", host_pubkey.trim())
 }
 
 fn run(cmd: &mut Command) -> Result<(), String> {
@@ -296,10 +423,70 @@ mod tests {
     }
 
     #[test]
+    fn ssh_windows_side_admin() {
+        let s = windows_ssh_provision_ps1(
+            "anna",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI abc paguro@host",
+            true,
+        );
+        assert!(s.starts_with("# paguro"));
+        assert!(s.contains("ListenAddress 169.254.244.2"));
+        assert!(s.contains("Port 22"));
+        assert!(s.contains("PasswordAuthentication no"));
+        assert!(s.contains("KbdInteractiveAuthentication no"));
+        assert!(s.contains("AllowUsers anna"));
+        assert!(s.contains(r"administrators_authorized_keys"));
+        assert!(!s.contains(r"Users\anna\.ssh\authorized_keys"));
+        assert!(s.contains("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI abc paguro@host"));
+        assert!(s.contains("-InterfaceAlias 'paguro0' -RemoteAddress '169.254.244.1'"));
+        assert!(s.contains("-LocalPort 22"));
+        assert!(s.contains("DefaultShell"));
+        // No secret handling needed: the key is public, so it may appear
+        // as literal text (unlike the SMB script's two parameters).
+    }
+
+    #[test]
+    fn ssh_windows_side_non_admin_and_quoting() {
+        let s = windows_ssh_provision_ps1("bob", "ssh-ed25519 AAAA it's-fine bob@x", false);
+        assert!(s.contains(r"Users\bob\.ssh\authorized_keys"));
+        assert!(!s.contains("administrators_authorized_keys"));
+        // A literal single quote in the key is escaped for PowerShell, not
+        // left to break out of the quoted string.
+        assert!(s.contains("it''s-fine"));
+        assert!(!s.contains("$LinuxPubKey = 'ssh-ed25519 AAAA it's-fine"));
+    }
+
+    #[test]
+    fn outbound_pinned_to_the_private_adapter() {
+        let s = windows_outbound_pin_ps1();
+        assert!(s.starts_with("# paguro"));
+        assert!(s.contains("$ports = @(445, 22, 3389)"));
+        assert!(s.contains("-RemoteAddress '169.254.244.0/30'"));
+        assert!(s.contains("-InterfaceAlias 'paguro0' -Action Allow"));
+        assert!(s.contains("Where-Object Name -ne 'paguro0'"));
+        assert!(s.contains("-InterfaceAlias $others -Action Block"));
+        // the block rule is skipped, not created empty, when there is
+        // nowhere else the traffic could leave from
+        assert!(s.contains("if ($others.Count -gt 0)"));
+    }
+
+    #[test]
     fn cifs() {
         let o = cifs_options("paguro-smb", "a,b", 1000, 1000);
         assert!(o.contains("password=a,,b,"));
         assert!(o.starts_with("vers=3.1.1,sign,"));
         assert_eq!(cifs_source(), "//169.254.244.2/paguro-c");
+    }
+
+    #[test]
+    fn authorized_keys_restricted_by_address() {
+        let l = authorized_keys_line(" ssh-ed25519 AAAA windows@host \n");
+        assert_eq!(l, "from=\"169.254.244.2\" ssh-ed25519 AAAA windows@host");
+    }
+
+    #[test]
+    fn known_hosts_pins_the_host_key() {
+        let l = known_hosts_line(HOST_ADDR, " ssh-ed25519 AAAA \n");
+        assert_eq!(l, "169.254.244.1 ssh-ed25519 AAAA");
     }
 }
