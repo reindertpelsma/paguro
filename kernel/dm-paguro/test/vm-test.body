@@ -283,6 +283,26 @@ umount /mnt
 for d in pa2 pa3 pa4 pvc; do dmsetup remove $d; done
 dmc pvb --table "0 $N1 paguro-volume $V1 b" && ok "view B loads once C is gone" || bad "view B: $(cat /tmp/dmerr)"
 rd /dev/mapper/pvb "$S" && bad "view B read of claimed sector" || ok "view B refuses the claimed sector"
+
+# ---- view B's tripwire (DESIGN 4.4 "Until the driver arms") ----------------------
+# State of a process: Z (killed, not yet reaped) or empty (gone) count as dead.
+pst() { awk '{ print $3 }' "/proc/$1/stat" 2>/dev/null; }
+sleep 600 & T=$!
+dmsetup message pvb 0 tripwire "$T" && ok "tripwire: set" || bad "tripwire: set"
+rd /dev/mapper/pvb "$S" && bad "tripwire: the refused read was served" || ok "tripwire: the read is still refused"
+case "$(pst "$T")" in Z|"") ok "tripwire: the named process is dead when the refusal returns" ;; *) bad "tripwire: pid $T survived ($(pst "$T"))"; kill -9 "$T" ;; esac
+wait "$T"; [ $? = 137 ] && ok "tripwire: by SIGKILL" || bad "tripwire: not SIGKILL"
+dmsetup status pvb | grep -q 'tripwire on trips 1$' && ok "tripwire: status" || bad "tripwire: status $(dmsetup status pvb)"
+rd /dev/mapper/pvb 0 && ok "tripwire: an allowed read neither fails nor trips" || bad "tripwire: allowed read failed"
+dmsetup status pvb | grep -q 'trips 1$' || bad "tripwire: an allowed read tripped"
+dmsetup message pvb 0 tripwire off && ok "tripwire: off" || bad "tripwire: off"
+sleep 600 & U=$!
+rd /dev/mapper/pvb "$S" && bad "view B read of claimed sector (off)" || ok "tripwire off: still refused"
+case "$(pst "$U")" in S|R) ok "tripwire off: nothing killed" ;; *) bad "tripwire off: pid $U is $(pst "$U")" ;; esac
+kill "$U"; wait "$U" 2>/dev/null
+dmsetup message pvb 0 tripwire 999999 2>/dev/null && bad "tripwire: a pid that does not exist accepted" || ok "tripwire: unknown pid refused"
+dmsetup message pvb 0 tripwire 1x 2>/dev/null && bad "tripwire: garbage accepted" || ok "tripwire: garbage refused"
+dmsetup message pvb 0 bogus 1 2>/dev/null && bad "tripwire: unknown message accepted" || ok "tripwire: unknown message refused"
 dmsetup remove pvb
 
 # ---- I/O errors at every sector the claim reads (dm-error splices) ---------------

@@ -17,6 +17,16 @@ read-only, as a dirty `$Volume` does, though a read-only view B is allowed), `PG
 every extent with the NTFS core below. Nothing in the request path parses
 anything: view A is a table lookup, views B/C a range test.
 
+**View B's tripwire** (DESIGN.md §4.4 "Until the driver arms"):
+`dmsetup message <view B> 0 tripwire <pid|off>`. While it is set, a refused
+request first sends `SIGKILL` to that process (the VM's QEMU). It then
+interrupts every CPU and waits, so none of the process's threads can run
+another user or guest instruction. Only then is the request failed, so the
+guest never learns of the refusal. It lives in the glue
+(`dm-paguro-main.c`), not the trusted core. `test/vm-test.body` proves it: the
+named process is dead by the time the refused read returns, an allowed read
+never trips it, and malformed messages are refused.
+
 ## Why C
 
 - The device-mapper target API is C; upstream Rust-for-Linux has no bio-remapping

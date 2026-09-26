@@ -11,10 +11,23 @@
  * request is translated through them and refused outside. paguro-volume
  * passes the volume through and refuses (EIO) any request touching any
  * claim. Nothing here parses NTFS; the request path is a range test.
+ *
+ * View B's tripwire (DESIGN.md 4.4 "Until the driver arms"): the VM's
+ * launcher names its QEMU with "dmsetup message <view B> 0 tripwire <pid>"
+ * until the guest's paguro driver has its protections in place. While set,
+ * a refused request is failed only after that process can no longer run:
+ * SIGKILL marks every one of its threads, then an interrupt on every CPU,
+ * waited for, forces any thread running in user or guest mode into the
+ * kernel, where the pending fatal signal is taken before it could return.
+ * So no QEMU thread reads the error, and the guest never learns of it
+ * (autochk's /r acts on exactly that error, 11 Q1). "tripwire off" clears it.
  */
 #include <linux/device-mapper.h>
 #include <linux/module.h>
+#include <linux/pid.h>
+#include <linux/sched/signal.h>
 #include <linux/slab.h>
+#include <linux/smp.h>
 
 #include "pg_ctl.h"
 
@@ -248,7 +261,27 @@ struct pg_view {
 	struct pg_volume *vol;
 	struct dm_dev *dev;
 	char mode;
+	spinlock_t trip_lock;	/* guards trip_pid */
+	struct pid *trip_pid;	/* the tripwire's process, or NULL */
+	atomic64_t trips;
 };
+
+static void pg_nop(void *unused)
+{
+}
+
+/*
+ * Kill the tripwire's process and return only once none of its threads can
+ * run another user or guest instruction (see the top of this file).
+ */
+static void pg_trip(struct pg_view *x, struct pid *pid)
+{
+	kill_pid(pid, SIGKILL, 1);
+	on_each_cpu(pg_nop, NULL, 1);
+	atomic64_inc(&x->trips);
+	DMWARN("view b of volume %u: tripwire: killed pid %d before it saw a refusal",
+	       x->vol->id, pid_nr(pid));
+}
 
 static int pg_volume_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
@@ -267,6 +300,8 @@ static int pg_volume_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	if (!x)
 		return -ENOMEM;
 	x->mode = argv[1][0];
+	spin_lock_init(&x->trip_lock);
+	atomic64_set(&x->trips, 0);
 	if (mutex_lock_killable(&pg_mutex)) {
 		kfree(x);
 		return -EINTR;
@@ -319,8 +354,35 @@ static void pg_volume_dtr(struct dm_target *ti)
 	if (--x->vol->view_tables == 0)
 		x->vol->view = 0;
 	mutex_unlock(&pg_mutex);
+	put_pid(x->trip_pid);
 	dm_put_device(ti, x->dev);
 	kfree(x);
+}
+
+static int pg_volume_message(struct dm_target *ti, unsigned int argc,
+			     char **argv, char *result, unsigned int maxlen)
+{
+	struct pg_view *x = ti->private;
+	struct pid *pid = NULL, *old;
+	int nr;
+	char dummy;
+
+	if (argc != 2 || strcmp(argv[0], "tripwire") || x->mode != 'b')
+		return -EINVAL;
+	if (strcmp(argv[1], "off")) {
+		if (sscanf(argv[1], "%d%c", &nr, &dummy) != 1 || nr <= 0)
+			return -EINVAL;
+		pid = find_get_pid(nr);	/* in the caller's pid namespace */
+		if (!pid)
+			return -ESRCH;
+	}
+	spin_lock(&x->trip_lock);
+	old = x->trip_pid;
+	x->trip_pid = pid;
+	spin_unlock(&x->trip_lock);
+	put_pid(old);
+	DMINFO("view b of volume %u: tripwire %s", x->vol->id, pid ? argv[1] : "off");
+	return 0;
 }
 
 static int pg_volume_map(struct dm_target *ti, struct bio *bio)
@@ -349,11 +411,20 @@ static int pg_volume_map(struct dm_target *ti, struct bio *bio)
 	if (bio->bi_opf & REQ_RAHEAD) {
 		atomic64_inc(&x->vol->readahead_hits);
 	} else {
+		struct pid *pid;
+
 		atomic64_inc(&x->vol->guard_hits);
 		DMWARN_LIMIT("view %c of volume %u: refused %s of %u sectors at %llu",
 			     x->mode, x->vol->id,
 			     op_is_write(bio_op(bio)) ? "write" : "read",
 			     bio_sectors(bio), (unsigned long long)sector);
+		spin_lock(&x->trip_lock);
+		pid = get_pid(x->trip_pid);
+		spin_unlock(&x->trip_lock);
+		if (pid) {
+			pg_trip(x, pid);
+			put_pid(pid);
+		}
 	}
 	return DM_MAPIO_KILL;
 }
@@ -367,9 +438,11 @@ static void pg_volume_status(struct dm_target *ti, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		DMEMIT("guard %lld readahead %lld",
+		DMEMIT("guard %lld readahead %lld tripwire %s trips %lld",
 		       (long long)atomic64_read(&x->vol->guard_hits),
-		       (long long)atomic64_read(&x->vol->readahead_hits));
+		       (long long)atomic64_read(&x->vol->readahead_hits),
+		       READ_ONCE(x->trip_pid) ? "on" : "off",
+		       (long long)atomic64_read(&x->trips));
 		break;
 	case STATUSTYPE_TABLE:
 		DMEMIT("%u %c", x->vol->id, x->mode);
@@ -395,11 +468,12 @@ static void pg_volume_io_hints(struct dm_target *ti, struct queue_limits *l)
 
 static struct target_type pg_volume_target = {
 	.name = "paguro-volume",
-	.version = {1, 0, 0},
+	.version = {1, 1, 0},
 	.module = THIS_MODULE,
 	.ctr = pg_volume_ctr,
 	.dtr = pg_volume_dtr,
 	.map = pg_volume_map,
+	.message = pg_volume_message,
 	.status = pg_volume_status,
 	.iterate_devices = pg_volume_iterate,
 	.io_hints = pg_volume_io_hints,
