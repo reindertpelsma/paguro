@@ -9,6 +9,7 @@ volume without loading anything into the host's kernel.
 |---|---|
 | `fve-oracle.sh` | §11 Q10: the substituted FVE metadata (one extra External Key VMK entry) and its `.BEK`, applied to generated BitLocker volumes (`test/fixtures/bde/make.sh`), are opened by **libbde** (`bdemount -s`) and **dislocker** (`dislocker-file -f`) to exactly the expected plaintext; the volume's own recovery password still opens it |
 | `split-e2e.sh` | the whole path, below |
+| `q1-probe.ps1` | §11 Q1–Q3 from inside the guest (`split-e2e.sh` with `PAGURO_Q1=1`; `PAGURO_Q1_KILL=1` ends the session with `kill -9`): writes into the image in every form, `FSCTL_MOVE_FILE` of it, the optimiser, with extents, dirty bit, bad-sector count and events before and after; a native scan afterwards |
 | `q24.py` | §11 Q24's instrument: which sectors the guest wrote where, from the disk's `dm-log-writes` log (QEMU `blklogwrites`) |
 
 ## `split-e2e.sh`
@@ -62,3 +63,11 @@ minifilter installed, testsigning **off** in the native BCD, and a 64 MiB
 file `C:\paguro\linux.img` to claim. Samba for L2 comes from an extracted
 `samba` package (`PAGURO_SAMBA_ROOT`); without it the L: step fails.
 Everything large lives under `$PAGURO_VM_WORK` (`/data/paguro-work/vm/run`).
+
+## `nested-e2e.sh`
+
+The whole product topology in one Linux VM, with Windows one level deeper. On
+this lab's cloud VM (Windows three levels down) it does not reach a usable
+desktop: enlightened, Windows booted in about 15 minutes and froze after
+logon; with `--no-hv-enlightenments` it was still booting after 55 minutes.
+Use `split-e2e.sh` for anything that needs the guest.

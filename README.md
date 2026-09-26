@@ -59,8 +59,26 @@ far, in QEMU and in CI:
 - **the kernel module's trusted core** (~800 lines of dependency-free C),
   differential-tested against a Rust reference, fuzzed, model-checked with
   CBMC, and run in a VM against real NTFS volumes;
-- in progress: BitLocker unlock, the Windows command-line tools and minifilter,
-  and the coexistence and power-loss tests.
+- **Linux booting end to end through paguro** in QEMU: plain and BitLocker
+  volumes (including partially encrypted ones), fragmented and bare-ext4
+  images, and dirty or hibernated Windows volumes (mounted read-only);
+- **coexistence and power loss**: `ntfs3` and the module on the same volume,
+  and a replay of 734 crash states, with no corruption found;
+- **the Windows side** on a real Windows 11 VM: `paguro.exe` (installer,
+  service and CLI in one), the GUI, and the minifilter, which loads and passes
+  its refusal tests;
+- **Windows as a VM under Linux**: the same BitLocker'd Windows 11 booted
+  through the module's view of its disk, unlocked by a session-only key, with
+  every BitLocker-owned sector and the image's extents unchanged on disk
+  afterwards, then booted natively again, unaffected.
+
+- **the design's go/no-go gate, first pass** (DESIGN §11 Q1–Q3): from inside
+  that Windows VM, writes into the image and relocations of it are refused
+  without NTFS remapping anything, marking the volume dirty or needing repair,
+  including after a hard kill; native Windows then scans clean.
+
+Not done: real hardware, the GPU backend, the dedicated-disk mode, and the rest
+of the gate (other error classes and disk buses, `chkdsk /r`, older builds).
 
 The design is [`docs/DESIGN.md`](docs/DESIGN.md); the exact contracts between
 components are [`docs/INTERFACES.md`](docs/INTERFACES.md).

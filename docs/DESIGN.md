@@ -4701,6 +4701,48 @@ later question sits with the ones it belongs to rather than in numeric order.
    > after a rejected write, **stop.** Do not add another protocol layer on top —
    > that failure means the enforcement approach is wrong, not incomplete.
 
+   **Measured, 2026-09-26 (Q1–Q3, first pass — not closed).**
+   `test/vm/split-e2e.sh` with `PAGURO_Q1=1`, which runs `test/vm/q1-probe.ps1`:
+   Windows 11 Enterprise 24H2 (build 26100) as a VM on view B, AHCI, the module's
+   refusals reaching the guest as `EIO`. The minifilter was loaded, but no PROTECT
+   was issued, so these are the raw paths it normally closes. There were two runs:
+   one ended with a clean shutdown, the other with `kill -9` of QEMU, Q3's
+   interruption.
+
+   | Probe (into the claimed image) | Windows' answer |
+   |---|---|
+   | buffered `WriteFile` + `FlushFileBuffers` | write accepted into the cache; the flush fails with 1117 (`ERROR_IO_DEVICE`) |
+   | write-through / unbuffered write | fails with 1117 (one run failed at the unbuffered open) |
+   | buffered write left to the lazy writer | accepted; nothing logged by NTFS before the session ended |
+   | `FSCTL_MOVE_FILE`, 16 clusters and 1, after the writes above | fails with 1117, both runs |
+   | `defrag C: /D /U` | still running after 600 s; about 2,400 refused I/Os in run 1 |
+
+   Afterwards, in both runs:
+   - **In the guest:** the image's extents were identical (`0:570657+16384`),
+     the volume was never marked dirty, and the only events were `disk 153`
+     (I/O retried). There was no NTFS event, so no delayed-write failure,
+     corruption or check-needed was ever reported.
+   - **From Linux on the raw partition:** every BitLocker-owned range and the
+     image's extents were byte-identical.
+   - **Native boot of the same disk:** not dirty, `chkdsk /scan` found no
+     problems, 0 KB in bad sectors, and the image's extents were unchanged.
+
+   On this build, a refused write is not remapped. No bad cluster was recorded
+   and the runlist never moved, so Q1's feared dynamic remapping did not occur.
+   A relocation fails at its copy, so Q2's ordering held, including with dirty
+   pages cached. A hard stop after both left nothing for recovery to reapply,
+   so Q3 held.
+
+   **Not yet covered:**
+   - other error classes (a write-protect or medium error instead of `EIO`), and
+     virtio-blk / virtio-scsi instead of AHCI;
+   - `chkdsk /r`, which is explicit and user-initiated;
+   - the lazy writer's own flush attempt observed directly, and an interruption
+     at other points (for example mid-defrag);
+   - older builds and ReFS;
+   - Q2's clean-cache case, which cannot arise while reads of the image fail
+     from boot. It could arise if pages were cached before the session.
+
 4. **Does `ntfs3` give a usable extent map without writing?** (§4.3) `FIEMAP` on
    a read-only, recovery-suppressed mount of the decrypted volume, cross-checked
    against the module's own decoder. Confirm `ro` genuinely suppresses recovery,

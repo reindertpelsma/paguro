@@ -30,6 +30,10 @@
 #   PAGURO_WIN_IMAGE         a file on C: to claim (paguro/linux.img)
 #   PAGURO_WIN_VARS, PAGURO_WIN_TPM   native boot's OVMF vars and swtpm state
 #   PAGURO_VM_WORK           big files (/data/paguro-work/vm/run)
+#   PAGURO_Q1=1              also §11 Q1-Q3: writes into the image and a
+#                            relocation of it from the guest (q1-probe.ps1)
+#   PAGURO_Q1_KILL=1         end the session by killing QEMU, not a shutdown
+#                            (Q3's "arbitrary interruption")
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=lib.sh
@@ -181,7 +185,7 @@ shim screenshot "$SHOTS/02-desktop.png" >/dev/null
 grep -a 'BEK' "$VMWORK/launch.log" | tee -a "$RES" || true
 
 say "guest checks"
-wscp "$here/guest-checks.ps1" "$here/eio-probe.ps1" paguro@127.0.0.1:C:/winvm/
+wscp "$here/guest-checks.ps1" "$here/eio-probe.ps1" "$here/q1-probe.ps1" paguro@127.0.0.1:C:/winvm/
 wssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\winvm\guest-checks.ps1' | tr -d '\r' > "$VMWORK/guest-checks.txt"
 g=$VMWORK/guest-checks.txt
 expect "BitLocker protection in the VM" "$(check bitlocker.protection "$g")" '^On$'
@@ -279,9 +283,26 @@ expect "the image's clusters do not" "$(check eio.linux.img <(echo "$out"))" '^e
 result "I/O errors reported to the guest" "$(grep -ao 'disk: [0-9]* I/O error' "$VMWORK/launch.log" | tail -1)"
 phase eio
 
+if [ "${PAGURO_Q1:-0}" = 1 ]; then
+    say "§11 Q1-Q3: writes into the image and its relocation, from the guest"
+    out=$(WSSH_TIMEOUT=2400 wssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\winvm\q1-probe.ps1' 2>&1 | tr -d '\r') || true
+    echo "$out" > "$VMWORK/q1.txt"
+    grep -a -E '^(CHECK q1\.|EVENT )' <<<"$out" | sed 's/^CHECK q1\./RESULT q1 /' | tee -a "$RES"
+    expect "Q1/Q2: the image's extents are unchanged in the guest's own view" "$(check q1.extents-unchanged <(echo "$out"))" '^yes'
+    expect "Q1/Q2: ... and after the optimiser" "$(check q1.extents-unchanged-after-defrag <(echo "$out"))" '^yes'
+    phase q1
+    shim screenshot "$SHOTS/03-q1.png" >/dev/null 2>&1 || true
+fi
+
 say "shutdown"
 qpid=$(cat "$WIN/qemu.pid")
-wssh 'shutdown /s /t 0' >/dev/null 2>&1 || true
+if [ "${PAGURO_Q1_KILL:-0}" = 1 ]; then
+    # Q3: no shutdown, no flush — whatever NTFS held stays unwritten.
+    kill -9 "$qpid" 2>/dev/null || true
+    result "session end" "QEMU killed (PAGURO_Q1_KILL)"
+else
+    wssh 'shutdown /s /t 0' >/dev/null 2>&1 || true
+fi
 for _ in $(seq 60); do [ -e "/proc/$qpid" ] || break; sleep 5; done
 sleep 3
 grep -aE 'BEK|driver|disk:|QEMU exited|memory' "$VMWORK/launch.log" | tee -a "$RES" || true
@@ -322,6 +343,17 @@ export WINVM_DIR=$nat WINVM_TPM_DIR=$ntpm WINVM_SSH_PORT=$NATIVE_SSH_PORT WINVM_
 SSH_PORT=$NATIVE_SSH_PORT
 out=$(wssh 'manage-bde -protectors -get C: & manage-bde -status C: & bcdedit /enum {current} | findstr testsigning & fltmc filters & type C:\paguro\written-in-vm.txt' | tr -d '\r')
 echo "$out" > "$VMWORK/native.txt"
+if [ "${PAGURO_Q1:-0}" = 1 ]; then
+    # Q3: native Windows after the refused writes (and, with PAGURO_Q1_KILL,
+    # the interruption): the dirty bit, an online scan, the image's extents.
+    wscp "$here/q1-probe.ps1" paguro@127.0.0.1:C:/winvm/ || true
+    q3=$(WSSH_TIMEOUT=1200 wssh 'fsutil dirty query C: & chkdsk C: /scan & fsutil file queryextents C:\paguro\linux.img' 2>&1 | tr -d '\r') || true
+    echo "$q3" > "$VMWORK/q3-native.txt"
+    result "Q3 native: dirty bit" "$(grep -a -m1 -i 'dirty' <<<"$q3")"
+    result "Q3 native: chkdsk /scan" "$(grep -a -m1 -i -E 'found no problems|found problems|errors found' <<<"$q3")"
+    result "Q3 native: bad sectors" "$(grep -a -m1 -i 'bad sectors' <<<"$q3")"
+    result "Q3 native: image extents" "$(grep -a -i 'VCN' <<<"$q3" | tr '\n' ' ')"
+fi
 "$W" screenshot "$SHOTS/04-native.png" >/dev/null
 "$W" stop >/dev/null
 expect "native: TPM unseals (booted without a prompt), protection on" "$(grep -a 'Protection Status' <<<"$out")" 'Protection On'
