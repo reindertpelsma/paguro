@@ -20,7 +20,7 @@
 #
 # Inputs (environment, with defaults):
 #   PAGURO_WINVM_BASE_DIR   the winvm build (base.qcow2, base-vars.fd, keys/)
-#   PAGURO_BDE_INPUTS       NetKVM/ and minifilter/ (the CI artifact
+#   PAGURO_BDE_INPUTS       NetKVM/, vioserial/, viosock/ (virtio-win) and minifilter/ (the CI artifact
 #                           `paguro-minifilter`: pkg/Release, paguro-test.cer)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -36,7 +36,7 @@ SIZE_GIB=${PAGURO_BDE_C_GIB:-21}
 
 base=$(realpath "$BASE_DIR/base.qcow2")
 [ -f "$base" ] || { echo "no winvm base at $BASE_DIR/base.qcow2 (test/winvm/winvm build)" >&2; exit 1; }
-for f in "$INPUTS/NetKVM/w11/amd64/netkvm.inf" "$INPUTS/minifilter/pkg/Release/paguro_flt.inf" "$INPUTS/minifilter/paguro-test.cer"; do
+for f in "$INPUTS/NetKVM/w11/amd64/netkvm.inf" "$INPUTS/vioserial/w11/amd64/vioser.inf" "$INPUTS/minifilter/pkg/Release/paguro_flt.inf" "$INPUTS/minifilter/paguro-test.cer"; do
     [ -f "$f" ] || { echo "missing input $f" >&2; exit 1; }
 done
 if [ -e "$OUT/win-bde.qcow2" ]; then
@@ -62,7 +62,7 @@ say() { printf '\n### %s\n' "$*"; }
 say "prepare: shrink C:, drivers, the image file, testsigning off"
 "$W" start --timeout 900 >/dev/null
 "$W" ssh 'mkdir C:\bde 2>nul & exit 0' >/dev/null
-for src in "$INPUTS/NetKVM" "$INPUTS/minifilter" "$here/make-bde-prepare.ps1" "$here/make-bde-encrypt.ps1"; do
+for src in "$INPUTS/NetKVM" "$INPUTS/vioserial" "$INPUTS/viosock" "$INPUTS/minifilter" "$here/make-bde-prepare.ps1" "$here/make-bde-encrypt.ps1"; do
     "$W" scp -r "$src" ":C:/bde/" >/dev/null
 done
 "$W" ssh "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\bde\\make-bde-prepare.ps1 -SizeGiB $SIZE_GIB" | tr -d '\r'

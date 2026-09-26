@@ -3111,7 +3111,12 @@ researched (`rdp-auth-research`, 2026-09-26):
   machine. **A passwordless Microsoft account (PIN only) cannot sign in to
   TermService's RDP at all.**
 - Client editions allow one interactive session, and RDP sign-in takes over
-  the console.
+  the console. **Measured (2026-09-26):** with the user signed in at the VM's
+  console, a RemoteApp connection fails with `LOGON_FAILED_OTHER
+  [LOGON_MSG_BUMP_OPTIONS]`. Windows will not turn a running desktop session
+  into RemoteApp, so the optional TermService path needs the console signed
+  out, which also takes away the VM's visible desktop. paguro's own server
+  shares the existing session instead.
 
 Our server authenticates **the way paguro chooses**: a per-session token
 issued over the agent port (§The control channel), presented by the Linux

@@ -32,7 +32,7 @@
 //! paguro-vm windows-provision [--mac MAC]           the guest's link script
 //! paguro-vm windows-rdp-setup                        the guest's RDP/RemoteApp script
 //! paguro-vm rdp --user U --cert-fingerprint FP [--app PROGRAM] [--home DIR]
-//!              [--addr HOST[:PORT]] [--client EXE] [--password-stdin]
+//!              [--addr HOST[:PORT]] [--client EXE] [--password-stdin] [--no-sound]
 //!     FreeRDP to the VM (desktop, or one program as RemoteApp)
 //! paguro-vm smb-conf --root DIR --state DIR         the netns Samba's smb.conf
 //! paguro-vm samba --root DIR --state DIR --secret-file F   L: over the link
@@ -342,6 +342,7 @@ fn main() {
             let (mut user, mut app, mut fp, mut home) = (None, None, None, None);
             let mut addr = paguro_vm::rdp::default_addr();
             let mut from_stdin = false;
+            let mut no_sound = false;
             let mut client = "xfreerdp3".to_string();
             while let Some(k) = a.it.next() {
                 match k.as_str() {
@@ -352,6 +353,7 @@ fn main() {
                     "--addr" => addr = a.val(&k),
                     "--client" => client = a.val(&k),
                     "--password-stdin" => from_stdin = true,
+                    "--no-sound" => no_sound = true,
                     _ => usage(),
                 }
             }
@@ -378,7 +380,12 @@ fn main() {
             } else {
                 paguro_vm::rdp::lookup(&user, "rdp").unwrap_or_else(|e| fail(e))
             };
-            let args = paguro_vm::rdp::freerdp_args(&addr, &user, &view, home.as_deref(), &fp);
+            let mut args = paguro_vm::rdp::freerdp_args(&addr, &user, &view, home.as_deref(), &fp);
+            if no_sound {
+                // Headless hosts (tests) have no sound server; FreeRDP aborts
+                // the connection when its sound backend cannot load.
+                args.retain(|a| !a.starts_with("/sound"));
+            }
             let mut c = std::process::Command::new(&client)
                 .args(&args)
                 .stdin(std::process::Stdio::piped())

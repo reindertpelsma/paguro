@@ -265,14 +265,20 @@ if command -v xfreerdp3 >/dev/null && command -v xvfb-run >/dev/null; then
     rport=${PAGURO_RDP_PORT:-3390}
     pwf=$(dirname "$WIN_KEY")/password
     before=$(wssh 'tasklist /fi "imagename eq notepad.exe" /nh' 2>/dev/null | tr -d '\r' | grep -ac notepad || true)
+    # Client editions allow one interactive session, and RemoteApp cannot take
+    # over a running console desktop (LOGON_MSG_BUMP_OPTIONS): sign the
+    # console out first. paguro's own server shares the session instead
+    # (DESIGN §5c), so this applies only to Windows' RemoteApp path.
+    wssh 'logoff console' >/dev/null 2>&1 || true
+    sleep 10
     # A wrong fingerprint is refused: nothing is trusted on first use.
     timeout 60 xvfb-run -a -s "-screen 0 1280x800x24" "$vm" rdp --user paguro --addr "127.0.0.1:$rport" \
-        --cert-fingerprint "$(printf '00:%.0s' $(seq 31))00" --app notepad.exe --password-stdin < "$pwf" \
+        --cert-fingerprint "$(printf '00:%.0s' $(seq 31))00" --app notepad.exe --no-sound --password-stdin < "$pwf" \
         > "$VMWORK/rdp-wrongfp.log" 2>&1 && bad_fp=accepted || bad_fp=refused
     expect "a wrong certificate fingerprint is refused" "$bad_fp" '^refused$'
     # The real one: notepad as a RemoteApp window on the host's display.
     xvfb-run -a -s "-screen 0 1280x800x24" sh -c "
-        \"$vm\" rdp --user paguro --addr 127.0.0.1:$rport --cert-fingerprint $fp --app notepad.exe \
+        \"$vm\" rdp --user paguro --addr 127.0.0.1:$rport --cert-fingerprint $fp --app notepad.exe --no-sound \
             --password-stdin < \"$pwf\" > \"$VMWORK/rdp.log\" 2>&1 & c=\$!
         sleep 45; xwd -root -silent > \"$VMWORK/rdp-window.xwd\"; kill \$c" || true
     procs=$(wssh 'tasklist /v /fi "imagename eq notepad.exe" /nh /fo csv' 2>/dev/null | tr -d '\r')
@@ -432,7 +438,8 @@ if [ "${PAGURO_Q1_CHKDSK:-0}" = 1 ]; then
     echo "$ck" > "$VMWORK/q1-chkdsk-native.txt"
     result "native autochk: stage 4" "$(grep -a -i -E 'Read failure|replace|bad clusters' <<<"$ck" | head -3 | tr '\n' '|')"
     expect "native autochk found no problems" "$ck" 'found no problems'
-    expect "native: the image's extents unchanged" "$(check ck.extents <(echo "$ck"))" 'LCN: 0x8b521'
+    lcn0=$(check image.extents "$VMWORK/guest-checks.txt" | grep -o 'LCN: 0x[0-9a-f]*')
+    expect "native: the image's extents unchanged ($lcn0 at the start)" "$(check ck.extents <(echo "$ck"))" "${lcn0:-no start value}"
 fi
 if [ "${PAGURO_Q1:-0}" = 1 ]; then
     # Q3: native Windows after the refused writes (and, with PAGURO_Q1_KILL,

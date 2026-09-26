@@ -9,8 +9,10 @@ $want = [int64]$SizeGiB * 1GB
 if ($c.Size -gt $want) { Resize-Partition -DriveLetter C -Size $want }
 "C: $((Get-Partition -DriveLetter C).Size / 1GB) GiB"
 
-'NetKVM (the VM''s network adapters)'
-pnputil /add-driver NetKVM\w11\amd64\netkvm.inf /install | Out-Null
+'virtio drivers: NetKVM (network), vioserial (the agent port), viosock (vsock)'
+foreach ($d in 'NetKVM\w11\amd64\netkvm.inf', 'vioserial\w11\amd64\vioser.inf', 'viosock\w11\amd64\viosock.inf') {
+    if (Test-Path $d) { pnputil /add-driver $d /install | Out-Null; "  $d" } else { "  missing $d" }
+}
 
 'the test certificate and the minifilter (boot-start)'
 # certutil, not Import-Certificate: over SSH (an S4U logon) the latter fails.

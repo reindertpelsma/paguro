@@ -32,3 +32,4 @@ Check 'tpm' ((Get-CimInstance -Namespace root/cimv2/Security/MicrosoftTpm Win32_
 Check 'secureboot' $(try { Confirm-SecureBootUEFI } catch { 'unsupported' })
 Check 'activation' ((Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f'" | Select-Object -First 1).LicenseStatus)
 Check 'disk.errors' ((Get-WinEvent -FilterHashtable @{LogName='System'; Id=7,153,55,98,140} -MaxEvents 20 -ErrorAction SilentlyContinue | ForEach-Object { "$($_.ProviderName)/$($_.Id)" }) -join ',')
+Check 'image.extents' ((fsutil file queryextents C:\paguro\linux.img) -join ' ')
