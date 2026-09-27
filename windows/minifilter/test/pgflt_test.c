@@ -329,9 +329,9 @@ static int active(const wchar_t *dir, const wchar_t *self)
         m = msg(PG_MSG_ARMED);
         check(SUCCEEDED(send(port, &m, sizeof(m))), "ARMED", 0);
         memset(&st, 0xcc, sizeof(st));
-        FilterSendMessage(port, &m, sizeof(m), &st, sizeof(st), &got);
         m = msg(PG_MSG_QUERY_STATUS);
-        FilterSendMessage(port, &m, sizeof(m), &st, sizeof(st), &got);
+        check(SUCCEEDED(FilterSendMessage(port, &m, sizeof(m), &st, sizeof(st), &got)) && got == sizeof(st),
+              "QUERY_STATUS after ARMED", (DWORD)got);
         check(st.Armed == 1, "ARMED is reflected back by QUERY_STATUS", st.Armed);
     }
 
@@ -365,8 +365,9 @@ static int active(const wchar_t *dir, const wchar_t *self)
         PG_STATUS_REPLY st;
         DWORD got = 0;
         PG_MESSAGE q = msg(PG_MSG_QUERY_STATUS);
-        FilterSendMessage(port, &q, sizeof(q), &st, sizeof(st), &got);
-        check(st.Protected == 1, "QUERY_STATUS counts the PROTECT", st.Protected);
+        memset(&st, 0xcc, sizeof(st));
+        check(SUCCEEDED(FilterSendMessage(port, &q, sizeof(q), &st, sizeof(st), &got)) && st.Protected == 1,
+              "QUERY_STATUS counts the PROTECT", st.Protected);
     }
     post_reads(port);
     /* The service itself stays exempt. */
