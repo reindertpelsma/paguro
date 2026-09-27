@@ -68,11 +68,12 @@ use windows::Win32::Storage::Vhd::{
 };
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Ioctl::{
-    FSCTL_GET_RETRIEVAL_POINTERS, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_LENGTH_INFO,
-    IOCTL_DISK_GET_PARTITION_INFO_EX, IOCTL_STORAGE_GET_DEVICE_NUMBER,
-    IOCTL_STORAGE_QUERY_PROPERTY, PARTITION_INFORMATION_EX, PARTITION_STYLE_GPT,
-    PropertyStandardQuery, STARTING_VCN_INPUT_BUFFER, STORAGE_DEVICE_DESCRIPTOR,
-    STORAGE_DEVICE_NUMBER, STORAGE_PROPERTY_QUERY, StorageDeviceProperty,
+    FSCTL_GET_RETRIEVAL_POINTERS, FSCTL_MARK_HANDLE, GET_LENGTH_INFORMATION,
+    IOCTL_DISK_GET_LENGTH_INFO, IOCTL_DISK_GET_PARTITION_INFO_EX, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+    IOCTL_STORAGE_QUERY_PROPERTY, MARK_HANDLE_INFO, MARK_HANDLE_PROTECT_CLUSTERS,
+    PARTITION_INFORMATION_EX, PARTITION_STYLE_GPT, PropertyStandardQuery,
+    STARTING_VCN_INPUT_BUFFER, STORAGE_DEVICE_DESCRIPTOR, STORAGE_DEVICE_NUMBER,
+    STORAGE_PROPERTY_QUERY, StorageDeviceProperty,
 };
 use windows::Win32::System::Shutdown::{
     InitiateSystemShutdownExW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER,
@@ -721,6 +722,65 @@ impl WinApi for RealApi {
             file_id: id.FileId.Identifier,
             volume_serial: id.VolumeSerialNumber,
         }))
+    }
+
+    fn pin_file(&self, path: &str) -> ApiResult<PinnedFile> {
+        // Read access only: the handle exists to hold the pin, and nothing
+        // is ever read or written through it.
+        let f = fs::OpenOptions::new()
+            .access_mode(FILE_GENERIC_READ.0)
+            .share_mode(SHARE_ALL)
+            .open(path)
+            .map_err(|e| io_err("CreateFileW", path, e))?;
+        let volume = self.volume_for_path(path)?.guid_path;
+        // `\\?\Volume{…}` without its trailing backslash opens the volume
+        // itself, drive letter or not. Read and write, as
+        // `windows/minifilter/test/pgflt_test.c` opens it for the same FSCTL.
+        let vpath = volume.trim_end_matches('\\');
+        let dev = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+            .open(vpath)
+            .map_err(|e| io_err("CreateFileW", vpath, e))?;
+        let info = MARK_HANDLE_INFO {
+            VolumeHandle: HANDLE(dev.as_raw_handle()),
+            HandleInfo: MARK_HANDLE_PROTECT_CLUSTERS,
+            ..Default::default()
+        };
+        let mut ret = 0u32;
+        // SAFETY: `info` is live and sized as passed; both handles are open
+        // for the call's duration.
+        unsafe {
+            DeviceIoControl(
+                HANDLE(f.as_raw_handle()),
+                FSCTL_MARK_HANDLE,
+                Some(&info as *const _ as *const c_void),
+                std::mem::size_of::<MARK_HANDLE_INFO>() as u32,
+                None,
+                0,
+                Some(&mut ret),
+                None,
+            )
+        }
+        .map_err(|e| win_err("FSCTL_MARK_HANDLE", e))?;
+        drop(dev);
+        let mut id = FILE_ID_INFO::default();
+        // SAFETY: `id` is exactly the size passed, for its class.
+        unsafe {
+            GetFileInformationByHandleEx(
+                HANDLE(f.as_raw_handle()),
+                FileIdInfo,
+                &mut id as *mut _ as *mut c_void,
+                std::mem::size_of::<FILE_ID_INFO>() as u32,
+            )
+        }
+        .map_err(|e| win_err("GetFileInformationByHandleEx", e))?;
+        Ok(PinnedFile {
+            file_id: id.FileId.Identifier,
+            volume_guid_path: volume,
+            hold: Box::new(f),
+        })
     }
 
     fn retrieval_pointers(&self, path: &str) -> ApiResult<Extents> {

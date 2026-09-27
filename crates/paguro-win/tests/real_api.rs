@@ -89,6 +89,33 @@ fn retrieval_pointers_cover_an_ntfs_file() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// DESIGN.md §4.4 "hold the protected handle": what the VM service pins
+/// before it sends `PROTECT` (`paguro_win::vmprotect`).
+#[test]
+fn pin_file_marks_the_handle_and_names_the_file() {
+    let api = RealApi::new();
+    if !admin(&api) {
+        return;
+    }
+    let dir = temp_dir("pin");
+    let path = format!("{dir}\\image.bin");
+    std::fs::write(&path, vec![0x5au8; 1 << 20]).unwrap();
+    let pin = api.pin_file(&path).unwrap();
+    assert_eq!(pin.file_id, api.file_facts(&path).unwrap().unwrap().file_id);
+    assert_eq!(
+        pin.volume_guid_path,
+        api.volume_for_path(&path).unwrap().guid_path
+    );
+    assert!(paguro_win::vmprotect::volume_guid(&pin.volume_guid_path).is_some());
+    // Pinned, the file is still readable by others: only its clusters are
+    // held in place.
+    assert_eq!(std::fs::read(&path).unwrap().len(), 1 << 20);
+    drop(pin);
+    let e = api.pin_file(&format!("{dir}\\absent.bin")).unwrap_err();
+    assert_eq!(e.kind, paguro_win::api::ErrorKind::NotFound, "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn volumes_and_the_system_drive() {
     let api = RealApi::new();

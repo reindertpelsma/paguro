@@ -738,6 +738,15 @@ The filter keeps no state across reboots; the service re-sends `PROTECT` for
 every image listed in `paguro.ini` at start. The filter is not a correctness
 component (DESIGN §4.4).
 
+In the VM (`paguro_win::vmprotect`), for each entry's root image on a mounted
+volume: open it and pin it (`FSCTL_MARK_HANDLE` with
+`MARK_HANDLE_PROTECT_CLUSTERS`, the handle held for the service's lifetime),
+then `PROTECT` it with every deny flag. Retried with backoff until each image
+is protected or known absent, and only then does arming start (§11.3), so
+the filter's `Protected` count is final when the driver asks to be armed.
+`QUERY_STATUS` and `ARMED` (`pg_msg.h`) are the arming bookkeeping §11.3
+uses.
+
 ### 11.2 `paguro` CLI (Windows)
 
 | Command | Effect |

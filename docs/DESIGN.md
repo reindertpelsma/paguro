@@ -3216,8 +3216,10 @@ The same `paguro service` runs on every Windows boot. **Natively** it does
 none of the following (the SMBIOS marker `paguro-vm/1` is absent, §4.4).
 **In the VM** it:
 
-1. arms the driver: sends the report on the agent port, waits for the host's
-   ack, and only then marks the minifilter armed (§4.4, INTERFACES §11.3);
+1. protects every image `paguro.ini` lists (pinned handle, then `PROTECT`,
+   INTERFACES §11.1), then arms the driver: sends the report on the agent
+   port, waits for the host's ack, and only then marks the minifilter armed
+   (§4.4, INTERFACES §11.3);
 2. provisions the link: the static address on the private adapter, the SMB
    share and account, the firewall scoping, and the `L:` mapping;
 3. provisions SSH: OpenSSH server bound to the link, the host's public key in

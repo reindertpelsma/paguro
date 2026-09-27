@@ -1,6 +1,7 @@
 //! Wires the two VM-mode-only background jobs into the service, without
-//! ever blocking its own startup (DESIGN.md §4.4): arming (`crate::arming`)
-//! and the chkdsk guard (`crate::bootexec`). Skipped entirely, at once, on
+//! ever blocking its own startup (DESIGN.md §4.4): protecting the images,
+//! then arming, on one thread (`crate::vmprotect`, `crate::arming`), and
+//! the chkdsk guard (`crate::bootexec`). Skipped entirely, at once, on
 //! a native boot (`crate::vmmode`) -- `spawn` itself does only one
 //! `smbios()` call before returning; both background threads it may start
 //! run independently of the service's own worker (`paguro-service::Worker`)
@@ -40,9 +41,18 @@ pub fn spawn(make: MakeApi, log: Log) {
             .name("paguro-arm".into())
             .spawn(move || {
                 let api = make2();
-                crate::arming::run(api.as_ref(), &|d| std::thread::sleep(d), &|m| {
-                    log2(&format!("arm: {m}"))
+                let sleep = |d| std::thread::sleep(d);
+                // Every image protected first: arming waits on the filter's
+                // count, and must not report the driver ready half-way.
+                let _pins = crate::vmprotect::run(api.as_ref(), &sleep, &|m| {
+                    log2(&format!("protect: {m}"))
                 });
+                crate::arming::run(api.as_ref(), &sleep, &|m| log2(&format!("arm: {m}")));
+                // The pins hold the images' clusters in place for as long
+                // as the service runs; this thread's only remaining job.
+                loop {
+                    std::thread::park();
+                }
             });
         if let Err(e) = spawned {
             log(&format!("arm: could not start its thread: {e}"));

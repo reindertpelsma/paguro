@@ -52,8 +52,22 @@ impl FilterPort for RealFilterPort {
         })
     }
 
+    fn protect(&mut self, volume: [u8; 16], file_id: [u8; 16], deny: u32) -> ApiResult<()> {
+        self.send(
+            fltmsg::Message::protect(volume, file_id, deny),
+            "FilterSendMessage(PROTECT)",
+        )
+    }
+
     fn send_armed(&mut self) -> ApiResult<()> {
-        let msg = fltmsg::Message::armed().encode();
+        self.send(fltmsg::Message::armed(), "FilterSendMessage(ARMED)")
+    }
+}
+
+impl RealFilterPort {
+    /// One message with no reply buffer.
+    fn send(&mut self, msg: fltmsg::Message, op: &'static str) -> ApiResult<()> {
+        let msg = msg.encode();
         let mut got = 0u32;
         // SAFETY: `msg` is a live, correctly sized buffer for the call's
         // duration; no output buffer is passed.
@@ -67,7 +81,7 @@ impl FilterPort for RealFilterPort {
                 &mut got,
             )
         }
-        .map_err(|e| win_err("FilterSendMessage(ARMED)", e))
+        .map_err(|e| win_err(op, e))
     }
 }
 

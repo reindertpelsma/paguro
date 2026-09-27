@@ -259,8 +259,33 @@ pub struct FilterStatus {
 /// held across a sleep.
 pub trait FilterPort {
     fn query_status(&mut self) -> ApiResult<FilterStatus>;
+    /// `PG_MSG_PROTECT` (INTERFACES.md §11.1): `volume` is the mount
+    /// manager's volume GUID in memory layout, `file_id` the file's
+    /// `FILE_ID_128`, `deny` a non-empty set of `crate::fltmsg::DENY_*`.
+    fn protect(&mut self, volume: [u8; 16], file_id: [u8; 16], deny: u32) -> ApiResult<()>;
     /// `PG_MSG_ARMED`: DESIGN.md §4.4's tripwire has cleared.
     fn send_armed(&mut self) -> ApiResult<()>;
+}
+
+/// A file held open with `FSCTL_MARK_HANDLE` + `MARK_HANDLE_PROTECT_CLUSTERS`
+/// (DESIGN.md §4.4 "hold the protected handle"): NTFS will not move its
+/// clusters while this lives. Dropping it closes the handle, and ends that.
+pub struct PinnedFile {
+    /// `FILE_ID_128`, read through the pinned handle itself.
+    pub file_id: [u8; 16],
+    /// The mount manager's `\\?\Volume{…}\` of the volume holding it.
+    pub volume_guid_path: String,
+    /// The open handle (whatever the platform needs to keep alive).
+    pub hold: Box<dyn std::any::Any + Send>,
+}
+
+impl fmt::Debug for PinnedFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PinnedFile")
+            .field("file_id", &self.file_id)
+            .field("volume_guid_path", &self.volume_guid_path)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A connection to the guest agent virtio-serial port (INTERFACES.md
@@ -356,6 +381,9 @@ pub trait WinApi {
     /// port (native Windows, or the filter has not started filtering yet --
     /// retried by the caller, never a hard error).
     fn open_filter_port(&self) -> ApiResult<Option<Box<dyn FilterPort>>>;
+    /// Open `path` and pin its clusters ([`PinnedFile`]); needs
+    /// `SE_MANAGE_VOLUME_NAME`. `NotFound` when the file does not exist.
+    fn pin_file(&self, path: &str) -> ApiResult<PinnedFile>;
     /// `CreateFile` on a virtio-serial port under `\\.\Global\`. `Ok(None)`:
     /// it does not exist (native Windows).
     fn open_agent_port(&self, name: &str) -> ApiResult<Option<Box<dyn AgentPort>>>;

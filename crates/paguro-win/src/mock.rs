@@ -131,6 +131,11 @@ pub struct MockApi {
     /// `open_filter_port` returns, so a test can set `protected`/`armed`
     /// between calls the way the real driver's table would change.
     pub filter_port: RefCell<Option<std::rc::Rc<Cell<FilterStatus>>>>,
+    /// Every `PROTECT` sent on `\PaguroPort` (volume, file id, deny), in
+    /// order; each also counts in `filter_port`'s `protected`.
+    pub filter_protects: std::rc::Rc<RefCell<Vec<Protected>>>,
+    /// Pins taken by `pin_file` and not yet dropped.
+    pub pins_held: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// The agent virtio-serial port: `None` means it does not exist
     /// (native Windows); `Some` is shared with every handle
     /// `open_agent_port` returns.
@@ -138,6 +143,10 @@ pub struct MockApi {
     /// `report_event` messages, in order.
     pub events: RefCell<Vec<String>>,
 }
+
+/// One `PROTECT` as the mock filter's table holds it: volume GUID, file
+/// id, deny flags.
+pub type Protected = ([u8; 16], [u8; 16], u32);
 
 /// The agent port's script: writes recorded in order, reads drained in
 /// order (`Ok(vec![])` stands in for "closed", i.e. EOF; empty is never
@@ -204,6 +213,8 @@ impl MockApi {
             exe: RefCell::new("C:\\Users\\me\\Downloads\\paguro.exe".into()),
             interactive: RefCell::default(),
             filter_port: RefCell::default(),
+            filter_protects: std::rc::Rc::default(),
+            pins_held: std::sync::Arc::default(),
             agent_port: RefCell::default(),
             events: RefCell::default(),
         }
@@ -829,11 +840,23 @@ impl WinApi for MockApi {
     }
 
     fn open_filter_port(&self) -> ApiResult<Option<Box<dyn FilterPort>>> {
-        Ok(self
-            .filter_port
-            .borrow()
-            .clone()
-            .map(|s| Box::new(MockFilterHandle(s)) as Box<dyn FilterPort>))
+        Ok(self.filter_port.borrow().clone().map(|s| {
+            Box::new(MockFilterHandle(s, self.filter_protects.clone())) as Box<dyn FilterPort>
+        }))
+    }
+
+    fn pin_file(&self, path: &str) -> ApiResult<PinnedFile> {
+        let facts = self
+            .file_facts(path)?
+            .ok_or_else(|| ApiError::not_found("CreateFileW", path))?;
+        let volume = self.volume_for_path(path)?;
+        self.pins_held
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(PinnedFile {
+            file_id: facts.file_id,
+            volume_guid_path: volume.guid_path,
+            hold: Box::new(MockPin(self.pins_held.clone())),
+        })
     }
 
     fn open_agent_port(&self, _name: &str) -> ApiResult<Option<Box<dyn AgentPort>>> {
@@ -987,17 +1010,47 @@ impl WinApi for MockApi {
 
 /// `open_filter_port`'s handle: shared state, so a test can change
 /// `protected`/`armed` between calls the way the real driver's table would.
-struct MockFilterHandle(std::rc::Rc<Cell<FilterStatus>>);
+struct MockFilterHandle(
+    std::rc::Rc<Cell<FilterStatus>>,
+    std::rc::Rc<RefCell<Vec<Protected>>>,
+);
 
 impl FilterPort for MockFilterHandle {
     fn query_status(&mut self) -> ApiResult<FilterStatus> {
         Ok(self.0.get())
+    }
+    fn protect(&mut self, volume: [u8; 16], file_id: [u8; 16], deny: u32) -> ApiResult<()> {
+        let mut log = self.1.borrow_mut();
+        // The driver's table: one entry per (volume, file); a repeat
+        // updates it in place.
+        match log
+            .iter_mut()
+            .find(|(v, f, _)| *v == volume && *f == file_id)
+        {
+            Some(e) => e.2 = deny,
+            None => {
+                log.push((volume, file_id, deny));
+                let mut s = self.0.get();
+                s.protected += 1;
+                self.0.set(s);
+            }
+        }
+        Ok(())
     }
     fn send_armed(&mut self) -> ApiResult<()> {
         let mut s = self.0.get();
         s.armed = true;
         self.0.set(s);
         Ok(())
+    }
+}
+
+/// `pin_file`'s hold: counts itself out of `MockApi::pins_held` on drop.
+struct MockPin(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for MockPin {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
