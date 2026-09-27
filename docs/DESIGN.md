@@ -5262,7 +5262,9 @@ device-bound one (§11 Q18).
 **Synthetic ESP for test-signing, if attestation is unavailable.** Compose a small
 FAT32 image into the VM's disk containing `bootmgfw.efi` and a BCD with
 `testsigning on`, instead of mapping the real ESP. `testsigning` is a boot flag,
-not persisted to the OS volume, so native boots stay clean.
+not persisted to the OS volume, so native boots stay clean. It also carries a
+copy of `EFI/paguro/paguro.ini` (and nothing else of paguro's): the service in
+the VM reads the images to protect from it (INTERFACES §11.1).
 
 Requires Secure Boot **off in the VM's OVMF** — Windows ignores `testsigning`
 under a Secure Boot policy. Native keeps Secure Boot on.

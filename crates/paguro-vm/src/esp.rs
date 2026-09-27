@@ -1,10 +1,12 @@
 //! The synthetic ESP (DESIGN.md §4.3, §12): Windows' boot files copied from
 //! the real ESP into a fresh FAT32, with `testsigning` set in this BCD only.
 //!
-//! Copied: `EFI/Microsoft/Boot/**` (boot manager, BCD, fonts, locales) and
+//! Copied: `EFI/Microsoft/Boot/**` (boot manager, BCD, fonts, locales),
 //! `bootmgfw.efi` again as the removable-media path `EFI/Boot/bootx64.efi`,
-//! so a fresh variable store boots it. Left out: every other operating
-//! system's directory, `EFI/Microsoft/Recovery` (WinRE stays absent, §4.3),
+//! so a fresh variable store boots it, and `EFI/paguro/paguro.ini` alone,
+//! when present: the paguro service in the VM reads its image list from it
+//! (INTERFACES.md §11.1, `paguro_win::vmprotect`). Left out: every other
+//! operating system's directory, the rest of `EFI/paguro` (the loader), `EFI/Microsoft/Recovery` (WinRE stays absent, §4.3),
 //! and the BCD's transaction logs — the BCD itself must be clean
 //! ([`crate::regf::RegError::Dirty`] otherwise), so they hold nothing it
 //! lacks.
@@ -24,6 +26,8 @@ pub const BOOTMGR: &str = "bootmgfw.efi";
 pub const BCD: &str = "BCD";
 /// The removable-media default path (x86_64).
 pub const FALLBACK: &str = "EFI/Boot/bootx64.efi";
+/// paguro's configuration, the one file of `EFI/paguro` the VM is shown.
+pub const PAGURO_INI: &str = "EFI/paguro/paguro.ini";
 /// Smallest ESP made: what Windows setup creates on 512-byte disks.
 pub const MIN_BYTES: u64 = 100 << 20;
 /// Files larger than this are not ESP boot files: refuse rather than copy.
@@ -121,6 +125,16 @@ pub fn build(src: &Path, testsigning: bool, min_bytes: u64) -> Result<Esp, Strin
         fs::read(&mgr).map_err(|e| format!("{}: {e}", mgr.display()))?,
     )
     .map_err(|e| e.to_string())?;
+    let mut extra = 1;
+    if let Some(ini) = find_path_ci(src, PAGURO_INI).filter(|p| p.is_file()) {
+        let data = fs::read(&ini).map_err(|e| format!("{}: {e}", ini.display()))?;
+        if data.len() as u64 > MAX_FILE {
+            return Err(format!("{}: too large for paguro.ini", ini.display()));
+        }
+        tree.mkdir("EFI/paguro").map_err(|e| e.to_string())?;
+        tree.add(PAGURO_INI, data).map_err(|e| e.to_string())?;
+        extra += 1;
+    }
     let mut object = None;
     if testsigning {
         let raw = fs::read(&bcd_path).map_err(|e| format!("{}: {e}", bcd_path.display()))?;
@@ -133,7 +147,7 @@ pub fn build(src: &Path, testsigning: bool, min_bytes: u64) -> Result<Esp, Strin
     let image = fat::build(&tree, sectors, "SYSTEM", 0x5041_4755).map_err(|e| e.to_string())?;
     Ok(Esp {
         image,
-        files: files + 1,
+        files: files + extra,
         testsigning: object,
     })
 }
@@ -167,10 +181,13 @@ mod tests {
         fs::write(b.join("en-US/bootmgfw.efi.mui"), b"mui").unwrap();
         fs::write(dir.join("EFI/Microsoft/Recovery/BCD"), b"x").unwrap();
         fs::write(dir.join("EFI/ubuntu/shimx64.efi"), b"x").unwrap();
+        fs::create_dir_all(dir.join("EFI/paguro")).unwrap();
+        fs::write(dir.join("EFI/paguro/paguro.ini"), b"[Paguro]\n").unwrap();
+        fs::write(dir.join("EFI/paguro/paguro.efi"), b"MZ loader").unwrap();
         let esp = build(&dir, true, 0).unwrap();
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(esp.image.len() as u64, MIN_BYTES);
-        assert_eq!(esp.files, 4); // bootmgfw, BCD, mui + the fallback copy
+        assert_eq!(esp.files, 5); // bootmgfw, BCD, mui, the fallback copy, paguro.ini
         assert_eq!(
             esp.testsigning.as_deref(),
             Some("{9d37057e-b92b-11f1-94f8-aa07fdcbec39}")
@@ -197,6 +214,8 @@ mod tests {
         assert!(get("\\EFI\\Microsoft\\Boot\\BCD.LOG").is_err());
         assert!(get("\\EFI\\Microsoft\\Recovery").is_err());
         assert!(get("\\EFI\\ubuntu").is_err());
+        assert!(get("\\EFI\\paguro\\paguro.ini").is_ok());
+        assert!(get("\\EFI\\paguro\\paguro.efi").is_err());
         let f = get("\\EFI\\Microsoft\\Boot\\BCD").unwrap();
         let at = ((32
             + 2 * fs_.bpb.fat_sectors
