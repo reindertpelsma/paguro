@@ -30,15 +30,40 @@ fn wsl(ctx: &Ctx<'_>) -> Value {
 /// a guess (`fltmc` and firmware variables need an administrator).
 const NEEDS_ELEVATION: &str = "unknown: needs an elevated prompt or the paguro service";
 
+/// The last outcome `crate::arming::run` saved, or `null` if it has not run
+/// this boot (native Windows, or the service has not started yet).
+fn arm_state(ctx: &Ctx<'_>) -> Value {
+    ctx.api
+        .read_file(&crate::arming::state_path(ctx.api), 1 << 16)
+        .ok()
+        .flatten()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// The last chkdsk-guard notice (`crate::bootexec::enforce`), or `null` if
+/// nothing has ever been scheduled and removed.
+fn vm_notices(ctx: &Ctx<'_>) -> Value {
+    ctx.api
+        .read_file(&crate::bootexec::notice_path(ctx.api), 1 << 16)
+        .ok()
+        .flatten()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null)
+}
+
 fn minifilter(ctx: &Ctx<'_>) -> Value {
     if !ctx.api.is_elevated() {
-        return json!({ "loaded": Value::Null, "unknown": NEEDS_ELEVATION });
+        return json!({ "loaded": Value::Null, "armed": Value::Null, "unknown": NEEDS_ELEVATION });
     }
     match ctx.api.run("fltmc.exe", &["filters"], None) {
         Ok(o) => {
-            json!({ "loaded": o.ok() && o.stdout.lines().any(|l| l.trim_start().to_ascii_lowercase().starts_with("paguroflt")) })
+            json!({
+                "loaded": o.ok() && o.stdout.lines().any(|l| l.trim_start().to_ascii_lowercase().starts_with("paguroflt")),
+                "armed": arm_state(ctx),
+            })
         }
-        Err(e) => json!({ "loaded": false, "error": e.to_string() }),
+        Err(e) => json!({ "loaded": false, "armed": Value::Null, "error": e.to_string() }),
     }
 }
 
@@ -161,6 +186,7 @@ pub fn status(ctx: &Ctx<'_>) -> CmdResult {
         "tpm": { "present": api.tpm_present(), "broken_flag": tpm_broken },
         "wsl": wsl(ctx),
         "minifilter": minifilter(ctx),
+        "vm_notices": vm_notices(ctx),
         "preflight": preflight,
     });
     let mut lines = vec![
@@ -202,6 +228,19 @@ pub fn status(ctx: &Ctx<'_>) -> CmdResult {
             }
         ),
     ];
+    if let Some(armed) = data.at("minifilter").at("armed").at("armed").as_bool() {
+        lines.push(format!(
+            "driver armed: {armed} ({})",
+            data.at("minifilter")
+                .at("armed")
+                .at("detail")
+                .as_str()
+                .unwrap_or("")
+        ));
+    }
+    if let Some(msg) = data.at("vm_notices").at("chkdsk").at("message").as_str() {
+        lines.push(format!("notice: {msg}"));
+    }
     if let Some(checks) = data.at("preflight").at("checks").as_array() {
         lines.push("pre-flight:".into());
         for c in checks {
@@ -214,4 +253,47 @@ pub fn status(ctx: &Ctx<'_>) -> CmdResult {
         }
     }
     Ok(Report::new(data).lines(lines))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{WinApi, join};
+    use crate::mock::MockApi;
+
+    #[test]
+    fn armed_and_chkdsk_notice_surface_in_status() {
+        let m = MockApi::standard();
+        let ctx = Ctx::new(&m);
+        // Neither has run yet: both read back as null, no extra lines.
+        let r = status(&ctx).unwrap();
+        assert_eq!(r.data.at("minifilter").at("armed"), &Value::Null);
+        assert_eq!(r.data.at("vm_notices"), &Value::Null);
+        assert!(!r.human.iter().any(|l| l.starts_with("driver armed")));
+
+        m.create_dir_all(&join(&m.program_data(), "paguro"))
+            .unwrap();
+        m.write_file(
+            &crate::arming::state_path(&m),
+            br#"{"armed":true,"at_unix":1,"detail":"armed after the host's ack"}"#,
+        )
+        .unwrap();
+        m.write_file(
+            &crate::bootexec::notice_path(&m),
+            br#"{"chkdsk":{"message":"a boot-time disk check was scheduled","dirty":null},"at_unix":1}"#,
+        )
+        .unwrap();
+        let r = status(&ctx).unwrap();
+        assert_eq!(r.data.at("minifilter").at("armed").at("armed"), true);
+        assert_eq!(
+            r.data.at("vm_notices").at("chkdsk").at("message"),
+            "a boot-time disk check was scheduled"
+        );
+        assert!(r.human.iter().any(|l| l.starts_with("driver armed: true")));
+        assert!(
+            r.human
+                .iter()
+                .any(|l| l == "notice: a boot-time disk check was scheduled")
+        );
+    }
 }

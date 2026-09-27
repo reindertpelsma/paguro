@@ -67,6 +67,11 @@ static PG_ENTRY g_Table[PG_MAX_PROTECTED];
 static ULONG g_Count;
 static volatile LONG g_Generation = 1;
 static volatile LONG g_AllowUnload;
+/* Set by PG_MSG_ARMED, read back by PG_MSG_QUERY_STATUS. Bookkeeping only:
+ * DESIGN.md sec. 4.4's tripwire and this filter's own refusals never read
+ * it -- the service is the one thing that needs to know, to decide when it
+ * is safe to arm (INTERFACES.md sec. 11.3). */
+static volatile LONG g_Armed;
 
 DRIVER_INITIALIZE DriverEntry;
 static DRIVER_UNLOAD PgInertUnload;
@@ -493,8 +498,6 @@ static NTSTATUS PgMessage(PVOID ConnCookie, PVOID In, ULONG InLen, PVOID Out, UL
     PG_MESSAGE m;
     static const GUID zero = {0};
     UNREFERENCED_PARAMETER(ConnCookie);
-    UNREFERENCED_PARAMETER(Out);
-    UNREFERENCED_PARAMETER(OutLen);
     *Returned = 0;
     if (In == NULL || InLen != sizeof(m))
         return STATUS_INVALID_PARAMETER;
@@ -522,6 +525,35 @@ static NTSTATUS PgMessage(PVOID ConnCookie, PVOID In, ULONG InLen, PVOID Out, UL
             return STATUS_INVALID_PARAMETER;
         InterlockedExchange(&g_AllowUnload, 1);
         return STATUS_SUCCESS;
+    case PG_MSG_ARMED:
+        if (m.DenyFlags != 0)
+            return STATUS_INVALID_PARAMETER;
+        InterlockedExchange(&g_Armed, 1);
+        return STATUS_SUCCESS;
+    case PG_MSG_QUERY_STATUS: {
+        PG_STATUS_REPLY reply;
+        if (m.DenyFlags != 0)
+            return STATUS_INVALID_PARAMETER;
+        if (Out == NULL || OutLen < sizeof(reply))
+            return STATUS_BUFFER_TOO_SMALL;
+        RtlZeroMemory(&reply, sizeof(reply));
+        reply.Magic = PG_MSG_MAGIC;
+        reply.Version = PG_MSG_VERSION;
+        reply.Type = PG_MSG_QUERY_STATUS;
+        FltAcquirePushLockShared(&g_Lock);
+        reply.Protected = g_Count;
+        FltReleasePushLock(&g_Lock);
+        reply.Armed = g_Armed ? 1 : 0;
+        __try {
+            if (ExGetPreviousMode() == UserMode)
+                ProbeForWrite(Out, sizeof(reply), 1);
+            RtlCopyMemory(Out, &reply, sizeof(reply));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return GetExceptionCode();
+        }
+        *Returned = sizeof(reply);
+        return STATUS_SUCCESS;
+    }
     default:
         return STATUS_INVALID_PARAMETER;
     }

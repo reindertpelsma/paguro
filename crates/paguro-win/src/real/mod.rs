@@ -7,8 +7,11 @@
 //! construction, and only the three the tool needs.
 #![allow(unsafe_code)]
 
+mod agentport;
 mod console;
 mod devices;
+mod eventlog;
+mod filterport;
 pub mod pipe;
 mod wmi;
 
@@ -917,6 +920,18 @@ impl WinApi for RealApi {
 
     fn pnp_devices(&self) -> ApiResult<Vec<PnpDevice>> {
         devices::pnp_devices()
+    }
+
+    fn open_filter_port(&self) -> ApiResult<Option<Box<dyn crate::api::FilterPort>>> {
+        filterport::open()
+    }
+
+    fn open_agent_port(&self, name: &str) -> ApiResult<Option<Box<dyn crate::api::AgentPort>>> {
+        agentport::open(name)
+    }
+
+    fn report_event(&self, message: &str) -> ApiResult<()> {
+        eventlog::report(message)
     }
 
     fn disks(&self) -> ApiResult<Vec<DiskDevice>> {

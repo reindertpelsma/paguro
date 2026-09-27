@@ -241,6 +241,10 @@ static void validation(HANDLE port)
     check(FAILED(send(port, &m, sizeof(m))), "refuse: UNPROTECT of an unknown file", 0);
     m = good; m.Type = PG_MSG_UNPROTECT;
     check(FAILED(send(port, &m, sizeof(m))), "refuse: UNPROTECT with flags", 0);
+    m = msg(PG_MSG_ARMED); m.DenyFlags = 1;
+    check(FAILED(send(port, &m, sizeof(m))), "refuse: ARMED with flags", 0);
+    m = msg(PG_MSG_QUERY_STATUS); m.DenyFlags = 1;
+    check(FAILED(send(port, &m, sizeof(m))), "refuse: QUERY_STATUS with flags", 0);
 }
 
 /*
@@ -311,6 +315,26 @@ static int active(const wchar_t *dir, const wchar_t *self)
         return failures;
     validation(port);
 
+    /* QUERY_STATUS / ARMED (INTERFACES.md sec. 11.3): bookkeeping the
+     * filter itself never acts on -- the service uses it to know when to
+     * arm (DESIGN.md sec. 4.4) and to report back whether it did. */
+    {
+        PG_STATUS_REPLY st;
+        DWORD got = 0;
+        memset(&st, 0xcc, sizeof(st));
+        m = msg(PG_MSG_QUERY_STATUS);
+        check(SUCCEEDED(FilterSendMessage(port, &m, sizeof(m), &st, sizeof(st), &got)) && got == sizeof(st),
+              "QUERY_STATUS before any PROTECT", (DWORD)got);
+        check(st.Protected == 0 && st.Armed == 0, "status starts at zero", st.Protected);
+        m = msg(PG_MSG_ARMED);
+        check(SUCCEEDED(send(port, &m, sizeof(m))), "ARMED", 0);
+        memset(&st, 0xcc, sizeof(st));
+        FilterSendMessage(port, &m, sizeof(m), &st, sizeof(st), &got);
+        m = msg(PG_MSG_QUERY_STATUS);
+        FilterSendMessage(port, &m, sizeof(m), &st, sizeof(st), &got);
+        check(st.Armed == 1, "ARMED is reflected back by QUERY_STATUS", st.Armed);
+    }
+
     swprintf(path, MAX_PATH, L"%ls\\pgflt-image.bin", dir);
     f = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                     CREATE_ALWAYS, 0, NULL);
@@ -337,6 +361,13 @@ static int active(const wchar_t *dir, const wchar_t *self)
     }
     WaitForSingleObject(ready, 60000);
     check(SUCCEEDED(send(port, &m, sizeof(m))), "PROTECT", 0);
+    {
+        PG_STATUS_REPLY st;
+        DWORD got = 0;
+        PG_MESSAGE q = msg(PG_MSG_QUERY_STATUS);
+        FilterSendMessage(port, &q, sizeof(q), &st, sizeof(st), &got);
+        check(st.Protected == 1, "QUERY_STATUS counts the PROTECT", st.Protected);
+    }
     post_reads(port);
     /* The service itself stays exempt. */
     h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,

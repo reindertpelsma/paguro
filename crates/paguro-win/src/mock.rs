@@ -123,6 +123,26 @@ pub struct MockApi {
     pub lines: RefCell<Vec<String>>,
     /// Interactive programs started (`run_interactive`).
     pub interactive: RefCell<Vec<String>>,
+    /// `\PaguroPort`: `None` means it does not exist (native, or the filter
+    /// has not started yet); `Some` is shared with every handle
+    /// `open_filter_port` returns, so a test can set `protected`/`armed`
+    /// between calls the way the real driver's table would change.
+    pub filter_port: RefCell<Option<std::rc::Rc<Cell<FilterStatus>>>>,
+    /// The agent virtio-serial port: `None` means it does not exist
+    /// (native Windows); `Some` is shared with every handle
+    /// `open_agent_port` returns.
+    pub agent_port: RefCell<Option<std::rc::Rc<RefCell<MockAgentState>>>>,
+    /// `report_event` messages, in order.
+    pub events: RefCell<Vec<String>>,
+}
+
+/// The agent port's script: writes recorded in order, reads drained in
+/// order (`Ok(vec![])` stands in for "closed", i.e. EOF; empty is never
+/// otherwise produced by [`MockAgentHandle::read`]).
+#[derive(Default)]
+pub struct MockAgentState {
+    pub writes: Vec<Vec<u8>>,
+    pub reads: std::collections::VecDeque<ApiResult<Vec<u8>>>,
 }
 
 fn key(path: &str) -> String {
@@ -180,6 +200,9 @@ impl MockApi {
             lines: RefCell::default(),
             exe: RefCell::new("C:\\Users\\me\\Downloads\\paguro.exe".into()),
             interactive: RefCell::default(),
+            filter_port: RefCell::default(),
+            agent_port: RefCell::default(),
+            events: RefCell::default(),
         }
     }
 
@@ -783,6 +806,27 @@ impl WinApi for MockApi {
         Ok(self.disk_devices.borrow().clone())
     }
 
+    fn open_filter_port(&self) -> ApiResult<Option<Box<dyn FilterPort>>> {
+        Ok(self
+            .filter_port
+            .borrow()
+            .clone()
+            .map(|s| Box::new(MockFilterHandle(s)) as Box<dyn FilterPort>))
+    }
+
+    fn open_agent_port(&self, _name: &str) -> ApiResult<Option<Box<dyn AgentPort>>> {
+        Ok(self
+            .agent_port
+            .borrow()
+            .clone()
+            .map(|s| Box::new(MockAgentHandle(s)) as Box<dyn AgentPort>))
+    }
+
+    fn report_event(&self, message: &str) -> ApiResult<()> {
+        self.events.borrow_mut().push(message.to_string());
+        Ok(())
+    }
+
     fn tpm_present(&self) -> bool {
         self.tpm.borrow().is_some()
     }
@@ -916,6 +960,47 @@ impl WinApi for MockApi {
             ));
         }
         Ok(Zeroizing::new(s.clone()))
+    }
+}
+
+/// `open_filter_port`'s handle: shared state, so a test can change
+/// `protected`/`armed` between calls the way the real driver's table would.
+struct MockFilterHandle(std::rc::Rc<Cell<FilterStatus>>);
+
+impl FilterPort for MockFilterHandle {
+    fn query_status(&mut self) -> ApiResult<FilterStatus> {
+        Ok(self.0.get())
+    }
+    fn send_armed(&mut self) -> ApiResult<()> {
+        let mut s = self.0.get();
+        s.armed = true;
+        self.0.set(s);
+        Ok(())
+    }
+}
+
+/// `open_agent_port`'s handle: writes recorded, reads drained, from the
+/// shared [`MockAgentState`] every open of the same mock port sees.
+struct MockAgentHandle(std::rc::Rc<RefCell<MockAgentState>>);
+
+impl AgentPort for MockAgentHandle {
+    fn write_all(&mut self, buf: &[u8]) -> ApiResult<()> {
+        self.0.borrow_mut().writes.push(buf.to_vec());
+        Ok(())
+    }
+    fn read(&mut self, buf: &mut [u8]) -> ApiResult<usize> {
+        let next = self.0.borrow_mut().reads.pop_front();
+        match next {
+            None => Ok(0), // nothing scripted: treated as closed
+            Some(Err(e)) => Err(e),
+            Some(Ok(bytes)) => {
+                let n = bytes.len().min(buf.len());
+                if let (Some(dst), Some(src)) = (buf.get_mut(..n), bytes.get(..n)) {
+                    dst.copy_from_slice(src);
+                }
+                Ok(n)
+            }
+        }
     }
 }
 

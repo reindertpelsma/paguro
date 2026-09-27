@@ -12,8 +12,11 @@
 // `unsafe` is confined to `real` (Win32 calls); everything else is safe Rust.
 #![deny(unsafe_code)]
 
+pub mod agent;
 pub mod api;
+pub mod arming;
 pub mod bootent;
+pub mod bootexec;
 pub mod cfgfile;
 pub mod cli;
 pub mod client;
@@ -31,3 +34,5 @@ pub mod preflight;
 pub mod real;
 pub mod rpc;
 pub mod tpmwin;
+pub mod vmmode;
+pub mod vmservice;

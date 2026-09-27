@@ -12,6 +12,13 @@
  *   ALLOW_UNLOAD  service -> filter   the one explicit admin request that lets
  *                                     `fltmc unload` succeed
  *   EVENT         filter  -> service  a denied operation: file id, op, process
+ *   QUERY_STATUS  service -> filter   (no fields) -> PG_STATUS_REPLY in the
+ *                                     FilterSendMessage output buffer
+ *   ARMED         service -> filter   the host acked (DESIGN.md sec. 4.4's
+ *                                     tripwire is off); bookkeeping only,
+ *                                     exposed back through QUERY_STATUS --
+ *                                     the filter's own refusals never depend
+ *                                     on it
  *
  * The volume GUID is the mount manager's (\??\Volume{GUID}), as
  * FltGetVolumeGuidName and GetVolumeNameForVolumeMountPoint report it.
@@ -28,6 +35,8 @@
 #define PG_MSG_UNPROTECT    2u
 #define PG_MSG_ALLOW_UNLOAD 3u
 #define PG_MSG_EVENT        4u
+#define PG_MSG_QUERY_STATUS 5u
+#define PG_MSG_ARMED        6u
 
 /* Deny flags (PROTECT). Unknown bits are refused. */
 #define PG_DENY_OPEN        0x01u /* IRP_MJ_CREATE, any access */
@@ -63,5 +72,25 @@ typedef struct _PG_MESSAGE {
 
 /* Compile-time layout check, for both compilers that build this header. */
 typedef char pg_message_size_check[(sizeof(PG_MESSAGE) == PG_MESSAGE_SIZE) ? 1 : -1];
+
+/*
+ * QUERY_STATUS's reply, written into FilterSendMessage's output buffer
+ * (never sent as an input message). Protected: entries in the table right
+ * now (0 means the filter has nothing pinned yet, so DESIGN.md sec. 4.4's
+ * arming must keep waiting). Armed: PG_MSG_ARMED was received.
+ */
+#pragma pack(push, 8)
+typedef struct _PG_STATUS_REPLY {
+    unsigned int Magic;     /* PG_MSG_MAGIC */
+    unsigned short Version; /* PG_MSG_VERSION */
+    unsigned short Type;    /* PG_MSG_QUERY_STATUS */
+    unsigned int Protected;
+    unsigned int Armed; /* 0 or 1 */
+} PG_STATUS_REPLY;
+#pragma pack(pop)
+
+#define PG_STATUS_REPLY_SIZE 16u
+
+typedef char pg_status_reply_size_check[(sizeof(PG_STATUS_REPLY) == PG_STATUS_REPLY_SIZE) ? 1 : -1];
 
 #endif /* PG_MSG_H */
