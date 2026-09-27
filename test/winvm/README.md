@@ -83,10 +83,18 @@ steps above, `start --keep` afterwards).
 ## Host requirements
 
 `qemu-system-x86_64` with `qemu-block-extra` (the HTTPS block driver), OVMF
-(`/usr/share/OVMF/*_4M*`), `swtpm`, `genisoimage`, `ssh`/`scp`, Python 3 with
+(`/usr/share/OVMF/*_4M*`) **2023.11 or newer**, `swtpm`, `genisoimage`, `ssh`/`scp`, Python 3 with
 `numpy` and `Pillow` (only for `wait-screen`). The VM runs in a transient
 systemd user scope with `MemoryMax=10G`; set `XDG_RUNTIME_DIR` if your shell
 has none (the tool defaults it to `/run/user/$UID`).
+
+The OVMF version matters: before edk2 2023.11-7 (Debian/Ubuntu), the
+"non-secboot" `OVMF_CODE_4M.fd` still carries Secure Boot, so with the
+Microsoft keys in the variable store Secure Boot stays enforced and the
+build's `bcdedit /set testsigning on` fails ("protected by Secure Boot
+policy"). The same goes for `paguro-vm`'s VMs (test signing comes from the
+synthetic ESP). Ubuntu 22.04 ships 2022.02: install 24.04's `ovmf` package
+(architecture `all`) over it.
 
 swtpm's AppArmor profile only lets it write under `$HOME`, so the TPM state
 (tiny) lives in `~/.cache/winvm-swtpm` (`$WINVM_TPM_DIR`).
