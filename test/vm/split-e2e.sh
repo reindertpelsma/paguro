@@ -189,12 +189,24 @@ done
 wssh 'echo up' 2>/dev/null | grep -aq up || { shim screenshot "$SHOTS/boot-failed.png" || true; die "Windows did not come up"; }
 result "boot to SSH" "$(( $(date +%s) - t0 )) s"
 result "host workloads' memory.max while the VM runs" "$(cat "$HOSTCG/memory.max") ($(grep -a 'memory:' "$VMWORK/launch.log" | tr '\n' ' '))"
-# The driver gate: the report on the agent port, before the timeout.
-wscp "$here/agent-report.ps1" paguro@127.0.0.1:C:/winvm/
-wssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\winvm\agent-report.ps1' 2>&1 | tr -d '\r' > "$VMWORK/agent.txt" || true
-tail -1 "$VMWORK/agent.txt"
-sleep 3
-expect "the launcher's driver gate saw the report" "$(grep -a 'driver:' "$VMWORK/launch.log")" 'reported after'
+# Arming (DESIGN §4.4). With the paguro service in the image
+# (make-bde-image.sh's paguro/ input), the service protects paguro.ini's
+# images and reports on its own; otherwise agent-report.ps1 stands in.
+SERVICE=0
+wssh 'sc query paguro' 2>/dev/null | grep -aq RUNNING && SERVICE=1
+if [ "$SERVICE" = 1 ]; then
+    for _ in $(seq 60); do grep -aq 'driver: reported after' "$VMWORK/launch.log" && break; sleep 2; done
+    expect "the paguro service armed the driver" "$(grep -a 'driver:' "$VMWORK/launch.log")" 'reported after.*armed'
+    expect "... and recorded it" "$(wssh 'type C:\ProgramData\paguro\vm-arm.json' 2>/dev/null | tr -d '\r')" '"armed":true'
+    expect "the image is protected: another process cannot open it" \
+        "$(wssh "type C:\\${IMAGE//\//\\} >nul 2>&1 && echo opened || echo refused" 2>&1 | tr -d '\r')" '^refused$'
+else
+    wscp "$here/agent-report.ps1" paguro@127.0.0.1:C:/winvm/
+    wssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\winvm\agent-report.ps1' 2>&1 | tr -d '\r' > "$VMWORK/agent.txt" || true
+    tail -1 "$VMWORK/agent.txt"
+    sleep 3
+    expect "the launcher's driver gate saw the report" "$(grep -a 'driver:' "$VMWORK/launch.log")" 'reported after'
+fi
 phase boot
 shim wait-screen 240 --stable 10 >/dev/null 2>&1 || true
 shim screenshot "$SHOTS/02-desktop.png" >/dev/null
@@ -356,6 +368,20 @@ if [ "${PAGURO_Q1_CHKDSK:-0}" = 1 ]; then
     # first refused read must stop it before Windows sees the refusal, so
     # autochk never gets to "replace bad clusters" in the image.
     # chkdsk exits 3 when it schedules the check for the next boot.
+    if [ "$SERVICE" = 1 ]; then
+        # The service's guard (DESIGN §4.4 "Prevention") undoes the schedule
+        # within a minute; then it is stopped so the tripwire case below runs.
+        { wssh 'echo Y| chkdsk C: /r' 2>&1 || true; } | tr -d '\r' | tail -1
+        be=""
+        for _ in $(seq 18); do
+            sleep 5
+            be=$(wssh 'reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager" /v BootExecute' 2>/dev/null | tr -d '\r' | grep -a BootExecute)
+            grep -aqi '/r' <<<"$be" || break
+        done
+        expect "the service removed the scheduled chkdsk /r" "$be" 'REG_MULTI_SZ +autocheck autochk \*$'
+        wssh 'sc stop paguro' >/dev/null 2>&1 || true
+        sleep 3
+    fi
     { wssh 'echo Y| chkdsk C: /r' 2>&1 || true; } | tr -d '\r' | tail -3 | tee -a "$RES"
     wssh 'shutdown /r /t 0' >/dev/null 2>&1 || true
     t0=$(date +%s); trips=""

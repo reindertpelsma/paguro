@@ -37,3 +37,17 @@ fsutil file queryextents $img
 'testsigning off natively (the VM''s synthetic ESP turns it on for the session)'
 bcdedit /set testsigning off | Out-Null
 bcdedit /enum '{current}' | Select-String testsigning
+
+if (Test-Path paguro\paguro.exe) {
+    'the paguro service, and paguro.ini listing the image (the VM arms through the real service)'
+    $dir = 'C:\Program Files\paguro'
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    Copy-Item paguro\paguro.exe "$dir\paguro.exe" -Force
+    # An entry needs a UEFI image; the loader is never booted from this image.
+    if (-not (Test-Path C:\paguro\linux.efi)) { Set-Content -Path C:\paguro\linux.efi -Value 'MZ' -NoNewline }
+    & "$dir\paguro.exe" --direct config set --entry linux --root $img --efi-file C:\paguro\linux.efi
+    if ($LASTEXITCODE) { throw "paguro config set: $LASTEXITCODE" }
+    & "$dir\paguro.exe" --direct service install
+    if ($LASTEXITCODE) { throw "paguro service install: $LASTEXITCODE" }
+    (sc.exe qc paguro | Select-String 'START_TYPE|BINARY') -join ' '
+}

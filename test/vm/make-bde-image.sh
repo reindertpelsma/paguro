@@ -21,7 +21,10 @@
 # Inputs (environment, with defaults):
 #   PAGURO_WINVM_BASE_DIR   the winvm build (base.qcow2, base-vars.fd, keys/)
 #   PAGURO_BDE_INPUTS       NetKVM/, vioserial/, viosock/ (virtio-win) and minifilter/ (the CI artifact
-#                           `paguro-minifilter`: pkg/Release, paguro-test.cer)
+#                           `paguro-minifilter`: pkg/Release, paguro-test.cer); optionally
+#                           paguro/paguro.exe (the CI artifact `paguro-exe`): then the image
+#                           has the paguro service and a paguro.ini listing the image, and
+#                           split-e2e.sh arms through the real service
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 W=$here/../winvm/winvm
@@ -65,6 +68,7 @@ say "prepare: shrink C:, drivers, the image file, testsigning off"
 for src in "$INPUTS/NetKVM" "$INPUTS/vioserial" "$INPUTS/viosock" "$INPUTS/minifilter" "$here/make-bde-prepare.ps1" "$here/make-bde-encrypt.ps1"; do
     "$W" scp -r "$src" ":C:/bde/" >/dev/null
 done
+[ -f "$INPUTS/paguro/paguro.exe" ] && "$W" scp -r "$INPUTS/paguro" ":C:/bde/" >/dev/null
 "$W" ssh "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\bde\\make-bde-prepare.ps1 -SizeGiB $SIZE_GIB" | tr -d '\r'
 "$W" stop --timeout 300 >/dev/null
 
