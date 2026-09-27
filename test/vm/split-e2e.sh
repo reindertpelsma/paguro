@@ -472,7 +472,7 @@ for _ in $(seq $([ "${PAGURO_Q1_CHKDSK:-0}" = 1 ] && echo 160 || echo 40)); do
     esac
 done
 WSSH_TIMEOUT=20 wssh 'echo up' 2>/dev/null | grep -aq up || { "$W" screenshot "$SHOTS/native-failed.png" || true; die "native Windows did not come up"; }
-result "native: Automatic Repair" "${repair:+answered: ${repair%, }}${repair:-not shown}"
+result "native: Automatic Repair" "$([ -n "$repair" ] && echo "answered: ${repair%, }" || echo "not shown")"
 out=$(wssh 'manage-bde -protectors -get C: & manage-bde -status C: & bcdedit /enum {current} | findstr testsigning & fltmc filters & type C:\paguro\written-in-vm.txt' | tr -d '\r')
 echo "$out" > "$VMWORK/native.txt"
 if [ "${PAGURO_Q1_CHKDSK:-0}" = 1 ]; then
