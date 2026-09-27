@@ -432,6 +432,14 @@ fn run(log: Arc<dyn Fn(&str) + Send + Sync>) -> windows_service::Result<()> {
         ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
     ))?;
     log(&format!("started, API {}", paguro_win::rpc::API_VERSION));
+    // In the paguro VM only (DESIGN.md §4.4): arms the driver once its
+    // protections are in place, and undoes a boot-time chkdsk /r or /b
+    // schedule. Runs off this thread, so a slow or absent driver never
+    // delays the pipe below.
+    paguro_win::vmservice::spawn(
+        Arc::new(|| Box::new(paguro_win::real::RealApi::new()) as Box<dyn paguro_win::api::WinApi>),
+        log.clone(),
+    );
     if let Err(e) = serve_pipe(paguro_win::rpc::PIPE_NAME, worker, stop, log.clone()) {
         log(&format!("pipe: {e}"));
     }

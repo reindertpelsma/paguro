@@ -244,6 +244,36 @@ pub struct DiskDevice {
     pub size: u64,
 }
 
+/// The minifilter's own account of itself (`PG_MSG_QUERY_STATUS`,
+/// INTERFACES.md §11.3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct FilterStatus {
+    /// Entries in its protection table right now.
+    pub protected: u32,
+    /// Whether the service has told it the host acked (`PG_MSG_ARMED`).
+    pub armed: bool,
+}
+
+/// A connection to `\PaguroPort` (INTERFACES.md §11.1). Used from one
+/// thread only, for as long as it takes to make one or two calls; never
+/// held across a sleep.
+pub trait FilterPort {
+    fn query_status(&mut self) -> ApiResult<FilterStatus>;
+    /// `PG_MSG_ARMED`: DESIGN.md §4.4's tripwire has cleared.
+    fn send_armed(&mut self) -> ApiResult<()>;
+}
+
+/// A connection to the guest agent virtio-serial port (INTERFACES.md
+/// §11.3). Used from one thread only.
+pub trait AgentPort {
+    fn write_all(&mut self, buf: &[u8]) -> ApiResult<()>;
+    /// One read call. Blocks until at least one byte arrives; `Ok(0)`
+    /// means the port was closed from the other end (EOF), not "nothing
+    /// yet" -- there is no read timeout here (see `crate::agent`'s module
+    /// documentation for why blocking is the right shape).
+    fn read(&mut self, buf: &mut [u8]) -> ApiResult<usize>;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Output {
     pub status: i32,
@@ -320,6 +350,19 @@ pub trait WinApi {
     fn cpuid(&self, leaf: u32, subleaf: u32) -> Option<[u32; 4]>;
     fn pnp_devices(&self) -> ApiResult<Vec<PnpDevice>>;
     fn disks(&self) -> ApiResult<Vec<DiskDevice>>;
+
+    // -- the minifilter and the guest agent (VM mode; DESIGN.md §4.4) -------
+    /// `FilterConnectCommunicationPort(\PaguroPort)`. `Ok(None)`: no such
+    /// port (native Windows, or the filter has not started filtering yet --
+    /// retried by the caller, never a hard error).
+    fn open_filter_port(&self) -> ApiResult<Option<Box<dyn FilterPort>>>;
+    /// `CreateFile` on a virtio-serial port under `\\.\Global\`. `Ok(None)`:
+    /// it does not exist (native Windows).
+    fn open_agent_port(&self, name: &str) -> ApiResult<Option<Box<dyn AgentPort>>>;
+    /// One line in the Windows Application event log, source `paguro`
+    /// (best effort: a failure here is logged by the caller, never acted on
+    /// — this only informs).
+    fn report_event(&self, message: &str) -> ApiResult<()>;
 
     // -- TPM (TBS) ----------------------------------------------------------
     fn tpm_present(&self) -> bool;

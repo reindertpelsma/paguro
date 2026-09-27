@@ -82,10 +82,14 @@ const TYPE_BASEBOARD_INFORMATION: u8 = 2;
 const TYPE_OEM_STRINGS: u8 = 11;
 const TYPE_END_OF_TABLE: u8 = 127;
 
-/// The OEM string paguro appends to a VM's SMBIOS table (DESIGN.md §4.4,
-/// §The paguro service in the VM; `paguro_vm::identity::MARKER`, which
-/// writes it — this is the one other reader, on the Windows side, so the
-/// text lives here once and both sides refer to it in their doc comments).
+/// The paguro VM's marker: an SMBIOS type 11 (OEM Strings) entry exactly
+/// equal to this (QEMU: `-smbios type=11,value=paguro-vm/1`), written by
+/// `paguro_vm::identity::MARKER` and read here on the Windows side, so the
+/// text lives here once. Mirrored from `windows/minifilter/pg_smbios.h`'s
+/// `PG_VM_MARKER` -- the driver's own, independent copy of this same check,
+/// in kernel mode; a test below reads that header so the two constants
+/// cannot drift. DESIGN.md §4.4 "On a native boot the driver is present and
+/// inert".
 pub const VM_MARKER: &[u8] = b"paguro-vm/1";
 
 /// The double NUL that ends a structure's string set (DSP0134 §6.1.3).
@@ -183,13 +187,9 @@ fn next<'a>(r: &mut Reader<'a>) -> Result<Structure<'a>, SmbiosError> {
     })
 }
 
-/// Parse a `RawSMBIOSData` blob. The first structure of each of types 0, 1
-/// and 2 supplies the fields; later duplicates are ignored.
-pub fn parse(blob: &[u8]) -> Result<Dmi<'_>, SmbiosError> {
-    if blob.len() > MAX_BLOB {
-        return Err(SmbiosError::TooLarge);
-    }
-    let mut r = Reader::new(blob);
+/// `RawSMBIOSData`'s header: validates it against `r`'s remaining length
+/// and returns the version. Shared by [`parse`] and [`has_vm_marker`].
+fn header(r: &mut Reader<'_>) -> Result<(u8, u8), SmbiosError> {
     r.u8().map_err(|_| SmbiosError::Truncated)?;
     let major = r.u8().map_err(|_| SmbiosError::Truncated)?;
     let minor = r.u8().map_err(|_| SmbiosError::Truncated)?;
@@ -198,6 +198,17 @@ pub fn parse(blob: &[u8]) -> Result<Dmi<'_>, SmbiosError> {
     if len != r.rest().len() {
         return Err(SmbiosError::BadLength);
     }
+    Ok((major, minor))
+}
+
+/// Parse a `RawSMBIOSData` blob. The first structure of each of types 0, 1
+/// and 2 supplies the fields; later duplicates are ignored.
+pub fn parse(blob: &[u8]) -> Result<Dmi<'_>, SmbiosError> {
+    if blob.len() > MAX_BLOB {
+        return Err(SmbiosError::TooLarge);
+    }
+    let mut r = Reader::new(blob);
+    let (major, minor) = header(&mut r)?;
     let mut dmi = Dmi {
         version: (major, minor),
         ..Dmi::default()
@@ -237,6 +248,40 @@ pub fn parse(blob: &[u8]) -> Result<Dmi<'_>, SmbiosError> {
         }
     }
     Ok(dmi)
+}
+
+/// Does `blob` (`GetSystemFirmwareTable('RSMB', 0)`) carry an SMBIOS type 11
+/// (OEM Strings) entry exactly equal to [`VM_MARKER`]? Any malformed input
+/// is "no" -- this is never a correctness boundary (DESIGN.md §4.4): it
+/// only decides whether the paguro service attempts VM-only behaviour
+/// (arming, the chkdsk guard), independently of the driver's own copy of
+/// the same check in the kernel.
+pub fn has_vm_marker(blob: &[u8]) -> bool {
+    if blob.len() > MAX_BLOB {
+        return false;
+    }
+    let mut r = Reader::new(blob);
+    if header(&mut r).is_err() {
+        return false;
+    }
+    let mut n = 0usize;
+    while !r.is_empty() {
+        n += 1;
+        if n > MAX_STRUCTURES {
+            return false;
+        }
+        let Ok(s) = next(&mut r) else {
+            return false;
+        };
+        if s.kind == TYPE_OEM_STRINGS && s.strings.split(|&b| b == 0).any(|str_| str_ == VM_MARKER)
+        {
+            return true;
+        }
+        if s.kind == TYPE_END_OF_TABLE {
+            return false;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -339,5 +384,52 @@ mod tests {
         let t = blob(&[std::vec![1, 4, 0, 0, b'a']]);
         assert_eq!(parse(&t), Err(SmbiosError::BadStrings));
         assert_eq!(parse(&[0, 3]), Err(SmbiosError::Truncated));
+    }
+
+    #[test]
+    fn vm_marker() {
+        // A type 1 (no marker) then type 11 with the marker as its second
+        // OEM string, then end-of-table.
+        let b = blob(&[
+            structure(1, &[1, 2], &["LENOVO", "20QDCTO1WW"]),
+            structure(11, &[1], &["some-other-string", "paguro-vm/1"]),
+            structure(127, &[], &[]),
+        ]);
+        assert!(has_vm_marker(&b));
+        // Absent: no type 11 at all.
+        let b = blob(&[
+            structure(1, &[1, 2], &["LENOVO", "20QDCTO1WW"]),
+            structure(127, &[], &[]),
+        ]);
+        assert!(!has_vm_marker(&b));
+        // A type 11 present, but without the exact string (a prefix match
+        // must not count).
+        let b = blob(&[structure(11, &[1], &["paguro-vm/10", "paguro-vm"])]);
+        assert!(!has_vm_marker(&b));
+        // Malformed input is "no", never a panic.
+        assert!(!has_vm_marker(&[]));
+        assert!(!has_vm_marker(&[0u8; 3]));
+        let mut huge = std::vec![0u8; MAX_BLOB + 1];
+        huge[4..8].copy_from_slice(&0u32.to_le_bytes());
+        assert!(!has_vm_marker(&huge));
+    }
+
+    /// The C driver's own, independent copy of this check
+    /// (`windows/minifilter/pg_smbios.h`) must name the exact same marker,
+    /// or the service and the kernel would disagree about which boot is the
+    /// paguro VM (DESIGN.md §4.4).
+    #[test]
+    fn matches_pg_smbios_h() {
+        let h = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../windows/minifilter/pg_smbios.h"
+        ))
+        .unwrap();
+        let marker = h
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("#define PG_VM_MARKER "))
+            .map(|s| s.trim().trim_matches('"'))
+            .expect("PG_VM_MARKER not in pg_smbios.h");
+        assert_eq!(marker.as_bytes(), VM_MARKER);
     }
 }

@@ -20,6 +20,8 @@ pub const PROTECT: u16 = 1;
 pub const UNPROTECT: u16 = 2;
 pub const ALLOW_UNLOAD: u16 = 3;
 pub const EVENT: u16 = 4;
+pub const QUERY_STATUS: u16 = 5;
+pub const ARMED: u16 = 6;
 
 pub const DENY_OPEN: u32 = 0x01;
 pub const DENY_SETINFO: u32 = 0x02;
@@ -84,6 +86,23 @@ impl Message {
         }
     }
 
+    /// `PG_MSG_QUERY_STATUS` (INTERFACES.md §11.3): no fields; the filter's
+    /// reply is a [`StatusReply`] in `FilterSendMessage`'s output buffer.
+    pub fn query_status() -> Self {
+        Message {
+            kind: QUERY_STATUS,
+            ..Message::default()
+        }
+    }
+
+    /// `PG_MSG_ARMED`: the host's ack (DESIGN.md §4.4's tripwire is off).
+    pub fn armed() -> Self {
+        Message {
+            kind: ARMED,
+            ..Message::default()
+        }
+    }
+
     pub fn encode(&self) -> [u8; SIZE] {
         let mut b = [0u8; SIZE];
         let mut put = |at: usize, v: &[u8]| {
@@ -130,6 +149,69 @@ impl Message {
             operation: u32_at(OFF_OPERATION)?,
             process_id: u32_at(OFF_PROCESS_ID)?,
             status: u32_at(OFF_STATUS)? as i32,
+        })
+    }
+}
+
+/// `PG_STATUS_REPLY` (pg_msg.h): `QUERY_STATUS`'s reply, written into
+/// `FilterSendMessage`'s output buffer -- never sent as an input message.
+#[allow(dead_code)]
+#[repr(C)]
+struct PgStatusReply {
+    magic: u32,
+    version: u16,
+    kind: u16,
+    protected: u32,
+    armed: u32,
+}
+
+pub const STATUS_REPLY_SIZE: usize = 16;
+const _: () = assert!(size_of::<PgStatusReply>() == STATUS_REPLY_SIZE);
+const REPLY_OFF_PROTECTED: usize = offset_of!(PgStatusReply, protected);
+const REPLY_OFF_ARMED: usize = offset_of!(PgStatusReply, armed);
+const _: () = assert!(REPLY_OFF_PROTECTED == 8 && REPLY_OFF_ARMED == 12);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StatusReply {
+    /// Entries in the filter's protection table right now (0: it has
+    /// nothing pinned yet -- DESIGN.md §4.4's arming keeps waiting).
+    pub protected: u32,
+    /// `PG_MSG_ARMED` was received.
+    pub armed: bool,
+}
+
+impl StatusReply {
+    #[cfg(test)]
+    fn encode(self) -> [u8; STATUS_REPLY_SIZE] {
+        let mut b = [0u8; STATUS_REPLY_SIZE];
+        let mut put = |at: usize, v: &[u8]| {
+            if let Some(d) = b.get_mut(at..at + v.len()) {
+                d.copy_from_slice(v);
+            }
+        };
+        put(0, &MAGIC.to_le_bytes());
+        put(4, &VERSION.to_le_bytes());
+        put(6, &QUERY_STATUS.to_le_bytes());
+        put(REPLY_OFF_PROTECTED, &self.protected.to_le_bytes());
+        put(REPLY_OFF_ARMED, &u32::from(self.armed).to_le_bytes());
+        b
+    }
+
+    /// `None`: the wrong size, bad magic/version/type -- never trusted
+    /// otherwise (this crosses the kernel/user-mode boundary).
+    pub fn decode(b: &[u8]) -> Option<StatusReply> {
+        let b: &[u8; STATUS_REPLY_SIZE] = b.try_into().ok()?;
+        let u32_at = |at: usize| -> Option<u32> {
+            Some(u32::from_le_bytes(
+                b.get(at..at + size_of::<u32>())?.try_into().ok()?,
+            ))
+        };
+        if u32_at(0)? != MAGIC || u16::from_le_bytes(b.get(4..6)?.try_into().ok()?) != VERSION {
+            return None;
+        }
+        Some(StatusReply {
+            protected: u32_at(REPLY_OFF_PROTECTED)?,
+            armed: u32_at(REPLY_OFF_ARMED)? != 0,
         })
     }
 }
@@ -198,12 +280,58 @@ mod tests {
         assert_eq!(def("PG_MSG_UNPROTECT"), u64::from(UNPROTECT));
         assert_eq!(def("PG_MSG_ALLOW_UNLOAD"), u64::from(ALLOW_UNLOAD));
         assert_eq!(def("PG_MSG_EVENT"), u64::from(EVENT));
+        assert_eq!(def("PG_MSG_QUERY_STATUS"), u64::from(QUERY_STATUS));
+        assert_eq!(def("PG_MSG_ARMED"), u64::from(ARMED));
         assert_eq!(def("PG_DENY_OPEN"), u64::from(DENY_OPEN));
         assert_eq!(def("PG_DENY_SETINFO"), u64::from(DENY_SETINFO));
         assert_eq!(def("PG_DENY_WRITE"), u64::from(DENY_WRITE));
         assert_eq!(def("PG_DENY_FSCTL"), u64::from(DENY_FSCTL));
         assert_eq!(def("PG_DENY_ALL"), u64::from(DENY_ALL));
         assert_eq!(def("PG_MAX_PROTECTED"), MAX_PROTECTED as u64);
+        assert_eq!(def("PG_STATUS_REPLY_SIZE"), STATUS_REPLY_SIZE as u64);
         assert!(h.contains("L\"\\\\PaguroPort\""));
+    }
+
+    #[test]
+    fn status_reply_round_trip() {
+        let r = StatusReply {
+            protected: 3,
+            armed: true,
+        };
+        let b = r.encode();
+        assert_eq!(StatusReply::decode(&b), Some(r));
+        let none = StatusReply {
+            protected: 0,
+            armed: false,
+        };
+        assert_eq!(StatusReply::decode(&none.encode()), Some(none));
+        // Wrong size, bad magic, bad version: never trusted.
+        assert_eq!(StatusReply::decode(&b[..15]), None);
+        let mut bad = b;
+        bad[0] ^= 1;
+        assert_eq!(StatusReply::decode(&bad), None);
+        let mut bad = b;
+        bad[4] = 2;
+        assert_eq!(StatusReply::decode(&bad), None);
+    }
+
+    #[test]
+    fn query_status_and_armed_carry_no_fields() {
+        let q = Message::query_status();
+        assert_eq!(
+            q,
+            Message {
+                kind: QUERY_STATUS,
+                ..Message::default()
+            }
+        );
+        let a = Message::armed();
+        assert_eq!(
+            a,
+            Message {
+                kind: ARMED,
+                ..Message::default()
+            }
+        );
     }
 }

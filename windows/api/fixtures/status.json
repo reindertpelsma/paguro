@@ -185,6 +185,7 @@
           }
         ],
         "minifilter": {
+          "armed": null,
           "loaded": false
         },
         "mok": {
@@ -246,6 +247,7 @@
           "present": true
         },
         "uefi": true,
+        "vm_notices": null,
         "volumes": [
           {
             "bitlocker": null,
