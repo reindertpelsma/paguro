@@ -115,6 +115,7 @@ mount -t ntfs3 -o ro /dev/mapper/paguro-plain /mnt/p
 pgctl ident /mnt/p/$IMAGE > /run/ident
 pgctl fiemap /mnt/p/$IMAGE > /share/fiemap
 umount /mnt/p
+dd if=/dev/mapper/paguro-plain bs=512 count=1 2>/dev/null > /share/ntfs-boot
 pgctl claim \$(tail -1 /run/vol) \$(cat /run/ident) raw > /run/claim
 pgctl crosscheck-list \$(cat /run/claim) /share/fiemap
 mount -t vfat -o ro /dev/vda1 /mnt/esp
@@ -451,9 +452,27 @@ ln -s "$(dirname "$WIN_KEY")" "$nat/keys"
 ntpm=$HOME/.cache/winvm-swtpm-e2e
 rm -rf "$ntpm" && mkdir -p "$ntpm" && cp -a "$NATIVE_TPM" "$ntpm/base-tpm"
 export WINVM_DIR=$nat WINVM_TPM_DIR=$ntpm WINVM_SSH_PORT=$NATIVE_SSH_PORT WINVM_MEM=6G
-# A chkdsk /r left scheduled by the tripwire's stop runs natively first.
-"$W" start --timeout $([ "${PAGURO_Q1_CHKDSK:-0}" = 1 ] && echo 2400 || echo 600) >/dev/null
+# A chkdsk /r left scheduled by the tripwire's stop runs natively first,
+# then (DESIGN §4.4) one Automatic Repair screen, because that boot was
+# stopped: answer it as the launcher's message tells the user to, Advanced
+# options, then Continue (winre.py reads the screen). A BitLocker recovery
+# prompt fails at once: the TPM did not unseal.
+"$W" start --no-wait >/dev/null
 SSH_PORT=$NATIVE_SSH_PORT
+repair=""
+for _ in $(seq $([ "${PAGURO_Q1_CHKDSK:-0}" = 1 ] && echo 160 || echo 40)); do
+    sleep 15
+    WSSH_TIMEOUT=20 wssh 'echo up' 2>/dev/null | grep -aq up && break
+    "$W" screenshot "$VMWORK/native-screen.png" >/dev/null 2>&1 || die "native: the VM exited before Windows came up"
+    case $(python3 "$here/winre.py" "$VMWORK/native-screen.png") in
+        repair) "$W" click 873 294 >/dev/null; repair="${repair}Advanced options, " ;;
+        options) "$W" click 350 190 >/dev/null; repair="${repair}Continue, " ;;
+        bitlocker) cp "$VMWORK/native-screen.png" "$SHOTS/native-bitlocker.png"
+            die "native: BitLocker recovery prompt (the TPM did not unseal: was win-bde built under this QEMU and OVMF?)" ;;
+    esac
+done
+WSSH_TIMEOUT=20 wssh 'echo up' 2>/dev/null | grep -aq up || { "$W" screenshot "$SHOTS/native-failed.png" || true; die "native Windows did not come up"; }
+result "native: Automatic Repair" "${repair:+answered: ${repair%, }}${repair:-not shown}"
 out=$(wssh 'manage-bde -protectors -get C: & manage-bde -status C: & bcdedit /enum {current} | findstr testsigning & fltmc filters & type C:\paguro\written-in-vm.txt' | tr -d '\r')
 echo "$out" > "$VMWORK/native.txt"
 if [ "${PAGURO_Q1_CHKDSK:-0}" = 1 ]; then
@@ -464,7 +483,17 @@ if [ "${PAGURO_Q1_CHKDSK:-0}" = 1 ]; then
     echo "$ck" > "$VMWORK/q1-chkdsk-native.txt"
     result "native autochk: stage 4" "$(grep -a -i -E 'Read failure|replace|bad clusters' <<<"$ck" | head -3 | tr '\n' '|')"
     expect "native autochk found no problems" "$ck" 'found no problems'
-    lcn0=$(check image.extents "$VMWORK/guest-checks.txt" | grep -o 'LCN: 0x[0-9a-f]*')
+    # The start value from the host's own NTFS map (fiemap, 512-byte sectors
+    # from the volume's start) and the volume's cluster size: the guest
+    # cannot read it once the paguro service protects the image.
+    lcn0=$(python3 - "$SHARE/fiemap" "$SHARE/ntfs-boot" <<'PY'
+import sys
+start = int(open(sys.argv[1]).readline().split()[0])
+b = open(sys.argv[2], "rb").read(14)
+spc = b[13] if b[13] <= 128 else 1 << (256 - b[13])
+print(f"LCN: {start * 512 // (int.from_bytes(b[11:13], 'little') * spc):#x}")
+PY
+)
     expect "native: the image's extents unchanged ($lcn0 at the start)" "$(check ck.extents <(echo "$ck"))" "${lcn0:-no start value}"
 fi
 if [ "${PAGURO_Q1:-0}" = 1 ]; then

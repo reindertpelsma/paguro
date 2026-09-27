@@ -54,7 +54,18 @@ paguro-vm launch --nbd ... ──── NBD ────── nbdkit /dev/mappe
    tears down, and loads view C now that B is gone.
 6. **Native boot** of the same disk (TPM, no marker): BitLocker unseals,
    protection on, no External Key, PaguroFlt not loaded (test-signed,
-   testsigning off natively), the file written in the VM is there.
+   testsigning off natively), the file written in the VM is there. After
+   `PAGURO_Q1_CHKDSK`'s tripwire stop, the Automatic Repair screen that
+   boot leaves is answered with Advanced options, then Continue.
+   `winre.py` reads the screen from a screenshot (Pillow). A BitLocker
+   recovery prompt fails the run at once: the image's TPM seal only holds
+   under the QEMU and OVMF it was built with.
+
+With the paguro service in the image (`make-bde-image.sh`'s `paguro/`
+input), the service arms the driver itself, and the minifilter refuses the
+image to every other process, `fsutil` in the guest included. So the
+extents' start value for the native comparison comes from L2's own NTFS
+map, not from the guest.
 
 Inputs (never committed; see `test/winvm/README.md` for the evaluation
 image), built by **`make-bde-image.sh`** from the winvm base (it writes
