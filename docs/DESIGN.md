@@ -2521,6 +2521,15 @@ the only reversible option: "clean up the orphaned home" is exactly the tidiness
 feature someone adds later, and a sync script will eventually misread the account
 list during a transient failure and fire it on a false positive.
 
+**The same caution for the listing itself.** A sync whose account list holds
+no users (only built-ins below RID 1000, or nothing) is a failed listing and
+changes nothing; an account that reappears after being locked is unlocked.
+uids are never reused, locked entries included. *(Built and unit-tested:
+`paguro_link::idmap`, the map recorded as JSON, the name derivation —
+lowercase, Latin accents folded, `_` for the rest, `user<uid>` when nothing
+is left, `name2`, `name3`, … on a collision — and the sync's actions. Not
+yet applied to a system or fed by the service.)*
+
 **Credentials.** The Windows session auto-unlocks to the logged-in Linux user, so
 a per-user secret must be stored somewhere. It goes in the **keyring, unlocked by
 the Linux login password via PAM** — not in a config file. WinApps' default is

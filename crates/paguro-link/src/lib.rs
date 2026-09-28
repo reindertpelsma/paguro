@@ -6,6 +6,8 @@
 //!
 //! Pure text and JSON; nothing here touches the system.
 
+pub mod idmap;
+
 use serde_json::{Value, json};
 
 /// The link adapter's name on both sides.
