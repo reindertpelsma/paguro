@@ -8,6 +8,7 @@
 
 pub mod idmap;
 pub mod paths;
+pub mod session;
 
 use serde_json::{Value, json};
 

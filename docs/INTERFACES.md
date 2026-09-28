@@ -870,7 +870,7 @@ exists so `detach` fails with a clear reason before even trying. `image::grow`
 always sends the request before waiting for `image-grown`, and never reloads
 view A's table unless `PG_GROW`'s `error` is `0` (append-only).
 
-**Files, programs, drives and users (DESIGN §5d) — DRAFT, not built.** The
+**Files, programs, drives and users (DESIGN §5d) — DRAFT.** *(Built so far: `open`, `open-result` and `known-folders`, parsed and checked in `paguro_link::session` — SIDs and uids against the identity mapping, paths against the fixed path mapping, arguments bounded; neither end acts on them yet.)* The
 agent port carries control messages only; program I/O never travels on it.
 The Windows end is the service (SYSTEM), which relays to the **in-session
 agent** of the user named by `sid` over a local named pipe; the Linux end is
