@@ -49,7 +49,8 @@ if ! /usr/local/bin/qemu-system-x86_64 --version 2>/dev/null | grep -q 'version 
     ./configure --prefix=/usr/local --target-list=x86_64-softmmu --enable-kvm --enable-slirp \
         --enable-png --enable-curl --enable-linux-aio --enable-linux-io-uring --enable-seccomp \
         --enable-tools --disable-docs --disable-werror >/dev/null
-    make -j"$J" >/dev/null && make install >/dev/null
+    make -j"$J" >/dev/null
+    make install >/dev/null
 fi
 
 if ! /usr/local/bin/bdeinfo -V 2>/dev/null | grep -q 20260916; then
@@ -57,18 +58,32 @@ if ! /usr/local/bin/bdeinfo -V 2>/dev/null | grep -q 20260916; then
     curl -fsSL -o libbde.tar.gz https://github.com/libyal/libbde/releases/download/20260916/libbde-alpha-20260916.tar.gz
     rm -rf libbde && mkdir libbde && tar xf libbde.tar.gz -C libbde --strip-components=1 && cd libbde
     ./configure --prefix=/usr/local --enable-shared LDFLAGS="-Wl,-rpath,/usr/local/lib" >/dev/null
-    make -j"$J" >/dev/null && make install >/dev/null && ldconfig
+    make -j"$J" >/dev/null
+    make install >/dev/null
+    ldconfig
 fi
 
 if [ ! -x /usr/local/bin/dislocker-fuse ]; then
+    # Each step on its own line: set -e ignores a failure inside an && list.
     cd "$SRC"
-    rm -rf mbedtls && git clone -q --depth 1 --branch v3.6.4 https://github.com/Mbed-TLS/mbedtls.git && cd mbedtls
+    rm -rf mbedtls
+    git clone -q --depth 1 --recurse-submodules --shallow-submodules --branch v3.6.4 \
+        https://github.com/Mbed-TLS/mbedtls.git
+    cd mbedtls
     cmake -DCMAKE_INSTALL_PREFIX=/usr/local -DUSE_SHARED_MBEDTLS_LIBRARY=On -DENABLE_TESTING=Off \
-        -DENABLE_PROGRAMS=Off . >/dev/null && make -j"$J" >/dev/null && make install >/dev/null && ldconfig
-    cd "$SRC" && rm -rf dislocker && git clone -q https://github.com/Aorimn/dislocker.git && cd dislocker
+        -DENABLE_PROGRAMS=Off . >/dev/null
+    make -j"$J" >/dev/null
+    make install >/dev/null
+    ldconfig
+    cd "$SRC"
+    rm -rf dislocker
+    git clone -q https://github.com/Aorimn/dislocker.git
+    cd dislocker
     git checkout -q "$(git rev-list -1 --before=2025-09-08 HEAD)"
     cmake -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_PREFIX_PATH=/usr/local . >/dev/null
-    make -j"$J" >/dev/null && make install >/dev/null && ldconfig
+    make -j"$J" >/dev/null
+    make install >/dev/null
+    ldconfig
 fi
 
 [ -x "$HOME/.cargo/bin/cargo" ] || curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
