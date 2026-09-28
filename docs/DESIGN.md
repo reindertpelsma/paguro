@@ -3438,11 +3438,22 @@ trust rules, no stamps, no signatures.**
 - **Where the bit lives on NTFS:** in the `$LXMOD` extended attribute, with
   `$LXUID`/`$LXGID`, the convention WSL already uses and `ntfs3` reads and
   writes. So `chmod +x` on `/mnt/c` natively just works.
-- **In VM mode** (`/mnt/c` over CIFS), the mount uses `modefromsid`: `chmod`
-  stores the mode in a special ACE that Windows ignores for access. The
-  service copies that mode into `$LXMOD` whenever it changes, so the bit
-  survives the switch to native mode. *To verify in the rig before building
-  on it:* both mount options, and that neither disturbs Windows' own ACLs.
+- **In VM mode** (`/mnt/c` over CIFS): **open.** The plan was the mount's
+  `modefromsid` option (the mode in an `S-1-5-88-3-<mode>` ACE Windows
+  ignores for access, copied into `$LXMOD` by the service). **The rig ruled
+  it out** (split-e2e, 2026-09-28, Linux 6.8 client, Windows 11 25H2):
+  `chmod 755` on a file Linux made replaced its whole DACL (the inherited
+  Administrators/SYSTEM/Users entries gone, Authenticated Users: Full plus
+  the mode ACE) and the mode still read back as 644 after a remount;
+  `chmod` on a file Windows made was refused (the share account has no
+  `WRITE_DAC` there). Stock CIFS has no option that stores a mode without
+  rewriting the ACL. The candidates, each needing a decision:
+  (a) `$LXMOD` written as an SMB extended attribute (`user.$LXMOD` over
+  CIFS) by `paguro allow` / the file manager's "Allow running", with plain
+  `chmod +x` on `/mnt/c` not persisting in VM mode; (b) a thin FUSE layer
+  over the CIFS mount that turns `chmod` into that EA write; (c) the service
+  on Windows serving `/mnt/c`'s modes itself (its own SMB-side component).
+  Natively (`ntfs3`) `chmod` writes `$LXMOD` as planned.
 - **Files with no `$LXMOD`** (made by Windows) get a mode derived from
   Windows' own view: executable when the extension is in `PATHEXT` and the
   file carries no Mark of the Web (the `Zone.Identifier` stream downloads

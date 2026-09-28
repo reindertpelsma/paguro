@@ -323,9 +323,12 @@ if [ "$SERVICE" = 1 ]; then
 fi
 l2 "umount /mnt/c" >/dev/null || true
 
-say "modefromsid (§5d: to verify before \$LXMOD builds on it)"
-# Does `chmod` on /mnt/c persist through a remount, and what does it do
-# to Windows' own ACL? One file made by Linux, one by Windows.
+say "modefromsid (§5d): recorded, not expected"
+# The question DESIGN.md §5d asked: does `chmod` on /mnt/c persist through
+# a remount, and what does it do to Windows' own ACL? One file made by
+# Linux, one by Windows. First answer (2026-09-28): no — the mode did not
+# read back, chmod replaced the whole DACL, and a Windows-made file could
+# not be chmodded at all. Kept as results, for the next option's runs.
 wssh 'echo made by windows> C:\paguro\mode-win.txt' >/dev/null 2>&1 || true
 acl() { wssh "icacls C:\\paguro\\$1" 2>&1 | tr -d '\r' | grep -a ':' | sed 's/^C:\\paguro\\[^ ]* *//; s/^ *//'; }
 acl mode-win.txt > "$VMWORK/acl-win-before.txt"
@@ -333,15 +336,15 @@ MC="paguro-vm mount-c --target /mnt/cm --secret-file /share/link/smb-secret --mo
 out=$(l2 "$MC && cd /mnt/cm/paguro && echo x > mode-lin.txt && stat -c '%a %n' mode-lin.txt mode-win.txt && chmod 755 mode-lin.txt && chmod 750 mode-win.txt && cd / && umount /mnt/cm && $MC && stat -c '%a %n' /mnt/cm/paguro/mode-lin.txt /mnt/cm/paguro/mode-win.txt; umount /mnt/cm" 2>&1) || true
 echo "$out" > "$VMWORK/modefromsid.txt"
 result "modefromsid: modes as first seen" "$(sed -n '1,2p' <<<"$out" | tr '\n' ' ')"
-expect "modefromsid: chmod +x persists (Linux's file)" "$(grep -a 'mode-lin' <<<"$out" | tail -1)" '^755 '
-expect "modefromsid: chmod persists (Windows' file)" "$(grep -a 'mode-win' <<<"$out" | tail -1)" '^750 '
+result "modefromsid: Linux's file after chmod 755 and a remount" "$(grep -a 'mode-lin' <<<"$out" | tail -1)"
+result "modefromsid: Windows' file after chmod 750 and a remount" "$(grep -a 'mode-win' <<<"$out" | tail -1)"
 acl mode-win.txt > "$VMWORK/acl-win-after.txt"
 acl mode-lin.txt > "$VMWORK/acl-lin.txt"
 result "Windows' file ACL before chmod" "$(tr '\n' ';' < "$VMWORK/acl-win-before.txt")"
 result "... after chmod 750" "$(tr '\n' ';' < "$VMWORK/acl-win-after.txt")"
 result "Linux's file ACL after chmod 755" "$(tr '\n' ';' < "$VMWORK/acl-lin.txt")"
-expect "Windows' own ACEs survive chmod (the S-1-5-88 mode ACE aside)" \
-    "$(diff <(grep -av 'S-1-5-88' "$VMWORK/acl-win-before.txt") <(grep -av 'S-1-5-88' "$VMWORK/acl-win-after.txt") >/dev/null && echo same || echo changed)" '^same$'
+result "Windows' own ACEs after chmod (the S-1-5-88 mode ACE aside)" \
+    "$(diff <(grep -av 'S-1-5-88' "$VMWORK/acl-win-before.txt") <(grep -av 'S-1-5-88' "$VMWORK/acl-win-after.txt") >/dev/null && echo same || echo changed)"
 expect "Windows still reads its file" "$(wssh 'type C:\paguro\mode-win.txt' 2>&1 | tr -d '\r')" 'made by windows'
 # Over SSH the user's credential vault is out of reach (key logon), so the
 # test connects with the credential given; the agent, in the user's

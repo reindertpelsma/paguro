@@ -93,7 +93,10 @@ fi
 S=/data/paguro-work/vm/samba-debs
 mkdir -p "$S" && cd "$S"
 ls samba_*.deb >/dev/null 2>&1 || apt-get download samba
+ls samba-vfs-modules_*.deb >/dev/null 2>&1 || apt-get download samba-vfs-modules
 [ -x root/usr/sbin/smbd ] || dpkg -x samba_*.deb root
+# catia (names Windows cannot hold, DESIGN.md §5d) is in samba-vfs-modules.
+[ -e root/usr/lib/x86_64-linux-gnu/samba/vfs/catia.so ] || dpkg -x samba-vfs-modules_*.deb root
 
 loginctl enable-linger root
 hash -r

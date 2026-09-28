@@ -416,12 +416,16 @@ pub fn parse_accounts_ack(v: &Value) -> Option<Result<Vec<Mapped>, String>> {
 /// account is absent, so its Linux user is locked, like a deleted one.
 /// Domain accounts are out of scope (personal devices, §8).
 pub fn windows_accounts_ps1() -> String {
-    r#"# paguro: the identity mapping's account list (DESIGN.md §4.7). Generated.
+    format!(
+        r#"# paguro: the identity mapping's account list (DESIGN.md §4.7). Generated.
 $ErrorActionPreference = 'Stop'
-$a = @(Get-LocalUser | Where-Object Enabled | ForEach-Object { @{ sid = $_.SID.Value; name = $_.Name } })
+# paguro's own SMB account (the link's C: share) is not a person.
+$a = @(Get-LocalUser | Where-Object {{ $_.Enabled -and $_.Name -ne '{own}' }} |
+    ForEach-Object {{ @{{ sid = $_.SID.Value; name = $_.Name }} }})
 'PAGURO-ACCOUNTS ' + (ConvertTo-Json -Compress -Depth 3 -InputObject $a)
-"#
-    .to_string()
+"#,
+        own = crate::WINDOWS_SMB_USER
+    )
 }
 
 /// What [`windows_accounts_ps1`] printed, as an `accounts` frame's list.
@@ -676,6 +680,8 @@ mod tests {
             parse_accounts_listing(&one),
             Some(Ok(vec![acct(1001, "Anna")]))
         );
-        assert!(windows_accounts_ps1().contains("Where-Object Enabled"));
+        let ps = windows_accounts_ps1();
+        assert!(ps.contains("$_.Enabled -and $_.Name -ne 'paguro-smb'"));
+        assert!(ps.contains("@{ sid = $_.SID.Value; name = $_.Name } })"));
     }
 }
