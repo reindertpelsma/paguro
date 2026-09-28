@@ -70,8 +70,12 @@ pub fn smb_conf(root: &Path, state_dir: &Path) -> String {
          \tpath = {}\n\
          \tvalid users = {LINUX_SMB_USER}\n\
          \tread only = no\n\
-         \tbrowseable = yes\n",
-        root.display()
+         \tbrowseable = yes\n\
+         \tvfs objects = catia\n\
+         \tcatia:mappings = {}\n\
+         \tmangled names = no\n",
+        root.display(),
+        paguro_link::paths::catia_mappings()
     )
 }
 
@@ -239,6 +243,8 @@ mod tests {
         assert!(c.contains("[l]\n\tpath = /mnt/l\n\tvalid users = paguro\n"));
         assert!(!c.contains("guest ok = yes"));
         assert!(c.contains("passdb backend = tdbsam:/run/paguro/samba/passdb.tdb"));
+        // Names Windows cannot hold, WSL's way (DESIGN.md §5d).
+        assert!(c.contains("\tvfs objects = catia\n\tcatia:mappings = 0x01:0xf001,"));
     }
 
     #[test]

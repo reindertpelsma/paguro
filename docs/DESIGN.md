@@ -3385,10 +3385,14 @@ is refused rather than approximated:
   FIFOs, device nodes). `/run` is an ordinary tmpfs and maps like any other
   directory; only its special files are refused. A program started in a
   refused directory is refused with the reason, never started somewhere else.
-- **Names Windows cannot hold** (`\ : * ? " < > |`, trailing dots and spaces)
+- **Names Windows cannot hold** (`\ : * ? " < > |` and control characters)
   use **WSL's convention**: each character maps to its private-use code point
   (U+F000 + the character), in Samba with the `catia` module configured to the
   same table. A file looks the same through `L:` as it does through WSL.
+  A name ending in a dot or a space is **refused** as a path that crosses:
+  `catia` maps characters, not positions, and Win32 strips a trailing dot, so
+  the path would reach a different file. *(Built: `paguro_link::paths`, both
+  directions and the `catia` table, which the link's Samba uses.)*
 - **Case:** Linux directories stay case-sensitive; Samba shows Windows a
   case-preserving view. Two names differing only in case are the one ambiguity
   left, and a working directory under such a pair is refused.

@@ -187,7 +187,7 @@ StrictModes no
 PidFile /run/sshd-link.pid
 CONF
 l2 "paguro-vm link --ifname \$(sed -n 's/.*link=//p' /share/l2-nics)" >/dev/null
-out=$(l2 "mkdir -p /mnt/l/alpine && echo 'hello from the Linux side' > /mnt/l/alpine/hello.txt && chown -R 1000:1000 /mnt/l && echo l-ready" 2>&1) || true
+out=$(l2 "mkdir -p /mnt/l/alpine && echo 'hello from the Linux side' > /mnt/l/alpine/hello.txt && echo colon > '/mnt/l/alpine/a:b.txt' && chown -R 1000:1000 /mnt/l && echo l-ready" 2>&1) || true
 expect "L2: the distributions' tree for L:" "$(tail -1 <<<"$out")" 'l-ready'
 
 say "Windows: paguro-vm launch"
@@ -349,6 +349,9 @@ expect "Windows still reads its file" "$(wssh 'type C:\paguro\mode-win.txt' 2>&1
 out=$(wssh "net use \\\\169.254.244.1\\l /user:paguro $(cat "$LINK/samba-secret") & type \\\\169.254.244.1\\l\\alpine\\hello.txt" 2>&1 | tr -d '\r') || true
 echo "$out" >> "$VMWORK/samba.txt"
 expect "L: from Windows over the link" "$(tr '\n' ' ' <<<"$out")" 'hello from the Linux side'
+# A name Windows cannot hold, WSL's way (catia, §5d): ':' is U+F03A (61498).
+out=$(wssh "net use \\\\169.254.244.1\\l /user:paguro $(cat "$LINK/samba-secret") >nul & powershell -NoProfile -Command \"Get-ChildItem \\\\169.254.244.1\\l\\alpine | ForEach-Object { ([int[]][char[]]\$_.Name) -join '.' }\"" 2>&1 | tr -d '\r') || true
+expect "L: shows 'a:b.txt' with ':' as U+F03A" "$(tr '\n' ' ' <<<"$out")" '(^| )97\.61498\.98\.46\.116\.120\.116( |$)'
 l2 "tail -30 /run/paguro/samba/log.smbd; dmesg | grep -i cifs | tail -5" >> "$VMWORK/samba.txt" 2>&1 || true
 
 if command -v xfreerdp3 >/dev/null && command -v xvfb-run >/dev/null; then

@@ -7,6 +7,7 @@
 //! Pure text and JSON; nothing here touches the system.
 
 pub mod idmap;
+pub mod paths;
 
 use serde_json::{Value, json};
 
