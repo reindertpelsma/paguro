@@ -104,6 +104,35 @@ pub fn handshake(port: &mut dyn AgentPort) -> ApiResult<bool> {
     }
 }
 
+/// Write `frame` on `port`, then read frames until `pick` accepts one
+/// (INTERFACES.md §11.3's request/reply frames: `link-request` → `link`,
+/// `ssh-keys` → `ssh-keys-ack`). Frames `pick` declines are skipped. A
+/// clean close before the reply is an error, like [`handshake`]'s.
+pub fn exchange<T>(
+    port: &mut dyn AgentPort,
+    frame: &Value,
+    pick: &dyn Fn(&Value) -> Option<T>,
+) -> ApiResult<T> {
+    port.write_all(&encode(frame))?;
+    let mut framer = Framer::default();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = port.read(&mut buf)?;
+        if n == 0 {
+            return Err(ApiError::new(
+                ErrorKind::Other,
+                "ReadFile",
+                "the agent port closed before the reply arrived",
+            ));
+        }
+        for v in framer.feed(buf.get(..n).unwrap_or(&[])) {
+            if let Some(t) = pick(&v) {
+                return Ok(t);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::indexing_slicing)]
 mod tests {

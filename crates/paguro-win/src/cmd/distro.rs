@@ -262,6 +262,16 @@ pub const SSH_LINK_CONFIG_FILE: &str = "link\\ssh.json";
 pub struct SshLinkConfig {
     pub linux_user: String,
     pub key_path: String,
+    /// The host's key, pinned: written by the service from the agent
+    /// port's `ssh-keys-ack` (INTERFACES.md §11.3), never learnt on first
+    /// use.
+    pub known_hosts: String,
+}
+
+/// For `crate::vmlink`'s tests: what `distro enter` reads back.
+#[cfg(test)]
+pub fn read_ssh_link_config_for_test(ctx: &Ctx<'_>) -> Result<SshLinkConfig, CmdError> {
+    read_ssh_link_config(ctx)
 }
 
 fn read_ssh_link_config(ctx: &Ctx<'_>) -> Result<SshLinkConfig, CmdError> {
@@ -279,14 +289,16 @@ fn read_ssh_link_config(ctx: &Ctx<'_>) -> Result<SshLinkConfig, CmdError> {
 /// VM, paguro's own Linux images are refused to Windows at the block layer
 /// (§4.3), so entering one is always the host doing it on Windows' behalf,
 /// over the private link's SSH channel.
-pub fn ssh_forward_command(key_path: &str, user: &str, name: &str) -> Vec<String> {
+pub fn ssh_forward_command(cfg: &SshLinkConfig, name: &str) -> Vec<String> {
     [
         "ssh",
         "-i",
-        key_path,
+        &cfg.key_path,
         "-o",
-        "StrictHostKeyChecking=accept-new",
-        &format!("{user}@{LINK_HOST_ADDR}"),
+        "StrictHostKeyChecking=yes",
+        "-o",
+        &format!("UserKnownHostsFile={}", cfg.known_hosts),
+        &format!("{}@{LINK_HOST_ADDR}", cfg.linux_user),
         "paguro",
         "distro",
         "enter",
@@ -319,7 +331,7 @@ fn forward_to_host(
         return Ok(None);
     }
     let cfg = read_ssh_link_config(ctx)?;
-    let cmd = ssh_forward_command(&cfg.key_path, &cfg.linux_user, n);
+    let cmd = ssh_forward_command(&cfg, n);
     let data = json!({ "name": n, "forwarded": true, "command": cmd });
     Ok(Some(if ctx.dry_run {
         Ok(Report::new(data).line(format!("would forward over SSH: {}", cmd.join(" "))))
@@ -451,9 +463,17 @@ mod tests {
         assert!(!should_forward(true, &d, "nope"));
     }
 
+    fn cfg() -> SshLinkConfig {
+        SshLinkConfig {
+            linux_user: "anna".into(),
+            key_path: r"C:\key".into(),
+            known_hosts: r"C:\ProgramData\paguro\link\known_hosts".into(),
+        }
+    }
+
     #[test]
     fn ssh_forward_command_shape() {
-        let c = ssh_forward_command(r"C:\key", "anna", "myimage");
+        let c = ssh_forward_command(&cfg(), "myimage");
         assert_eq!(
             c,
             vec![
@@ -461,7 +481,9 @@ mod tests {
                 "-i",
                 r"C:\key",
                 "-o",
-                "StrictHostKeyChecking=accept-new",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                r"UserKnownHostsFile=C:\ProgramData\paguro\link\known_hosts",
                 "anna@169.254.244.1",
                 "paguro",
                 "distro",
@@ -505,11 +527,19 @@ mod tests {
         assert!(read_ssh_link_config(&ctx).is_err(), "not provisioned yet");
         api.put_file(
             &join(&ctx.data_dir(), SSH_LINK_CONFIG_FILE),
-            br#"{"linux_user":"anna","key_path":"C:\\ProgramData\\paguro\\link\\id_ed25519"}"#,
+            br#"{"linux_user":"anna","key_path":"C:\\ProgramData\\paguro\\link\\id_ed25519","known_hosts":"C:\\kh"}"#,
         );
         let c = read_ssh_link_config(&ctx).unwrap();
         assert_eq!(c.linux_user, "anna");
         assert_eq!(c.key_path, r"C:\ProgramData\paguro\link\id_ed25519");
+        assert_eq!(c.known_hosts, r"C:\kh");
+        // The old shape, with no pinned host key, is refused, not used
+        // with trust-on-first-use.
+        api.put_file(
+            &join(&ctx.data_dir(), SSH_LINK_CONFIG_FILE),
+            br#"{"linux_user":"anna","key_path":"C:\\key"}"#,
+        );
+        assert!(read_ssh_link_config(&ctx).is_err());
     }
 
     #[test]
@@ -518,7 +548,7 @@ mod tests {
         *api.smbios_blob.borrow_mut() = fake_smbios(Some("paguro-vm/1"));
         api.put_file(
             &join("C:\\ProgramData", "paguro\\link\\ssh.json"),
-            br#"{"linux_user":"anna","key_path":"C:\\key"}"#,
+            br#"{"linux_user":"anna","key_path":"C:\\key","known_hosts":"C:\\ProgramData\\paguro\\link\\known_hosts"}"#,
         );
         let mut ctx = Ctx::new(&api);
         ctx.dry_run = true;
@@ -531,7 +561,7 @@ mod tests {
         assert_eq!(r.data["forwarded"], json!(true));
         assert_eq!(
             r.data["command"],
-            json!(ssh_forward_command("C:\\key", "anna", "myimage"))
+            json!(ssh_forward_command(&cfg(), "myimage"))
         );
 
         // Native: forward_to_host stands aside (None), so `enter` would run

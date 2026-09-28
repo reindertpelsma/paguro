@@ -785,7 +785,33 @@ side's SSH keys travel — never the network, never `known_hosts`/
 | Direction | Frame | Meaning |
 |---|---|---|
 | guest → host | `{"type":"ssh-keys","windows_user_pub":"ssh-ed25519 AAAA… paguro@windows","windows_host_pub":"ssh-ed25519 AAAA… "}` | Windows' own client key (for `authorized_keys` on the host, `from="169.254.244.2"`) and its sshd host key (for the host's `known_hosts`, pinned) |
-| host → guest | `{"type":"ssh-keys-ack","linux_user_pub":"ssh-ed25519 AAAA… paguro@host","linux_host_pub":"ssh-ed25519 AAAA… "}` | the host's own client key (for Windows' `authorized_keys`/`administrators_authorized_keys`) and the host's sshd host key (for Windows' `known_hosts`, pinned) |
+| host → guest | `{"type":"ssh-keys-ack","linux_user":"alice","linux_user_pub":"ssh-ed25519 AAAA… paguro@host","linux_host_pub":"ssh-ed25519 AAAA… "}` | the Linux account the link's sshd admits (its `AllowUsers`), the host's own client key (for Windows' `authorized_keys`/`administrators_authorized_keys`) and the host's sshd host key (for Windows' `known_hosts`, pinned) |
+| host → guest | `{"type":"ssh-keys-ack","error":"…"}` | the host could not take part (its link was never set up); the service retries |
+
+Built, both ends (`paguro_vm::session::handle_ssh_keys`,
+`paguro_win::vmlink::provision_ssh`), unit-tested with fakes; not yet run in
+the VM rig. Every field is checked before use (`paguro_link`): keys are one
+`ssh-…` line (a newline would add an unrestricted `authorized_keys` line),
+the Linux user is `[a-z_][a-z0-9_-]*`. On the Windows side the key pair
+lives in the signed-in user's profile (`.ssh\paguro_link_ed25519`, that
+user and SYSTEM only); `%ProgramData%\paguro\link\known_hosts` and
+`ssh.json` (`linux_user`, `key_path`, `known_hosts`) are what `paguro distro
+enter` uses, with `StrictHostKeyChecking=yes`.
+
+**The link itself (DESIGN.md §5c, the service's duty 2).** Built, both ends,
+unit-tested; not yet run in the VM rig:
+
+| Direction | Frame | Meaning |
+|---|---|---|
+| guest → host | `{"type":"link-request"}` | the service, once armed, asks for the link's settings |
+| host → guest | `{"type":"link","smb_secret":"…","host_secret":"…"}` | the per-installation secrets (`/etc/paguro/link/smb-secret` and `samba-secret`, 0600, generated on first request): the password of Windows' dedicated SMB account (`/mnt/c`) and of the host's share (`L:`) |
+| host → guest | `{"type":"link","error":"…"}` | this host's link is not set up; the service retries |
+| guest → host | `{"type":"link-ready","ok":true}` / `{"type":"link-ready","ok":false,"error":"…"}` | the Windows side (address, the C: share and account, firewall scoping, `L:`) is in place, or why not |
+
+Secrets are 24–128 characters of `[A-Za-z0-9_-]` or refused, so they can
+never break out of the quoting they are embedded in. The service passes
+them to PowerShell on **stdin** (`paguro_link::PS_STDIN_ARGS`), never on a
+command line.
 
 Both sides thus reach `StrictHostKeyChecking yes` with a pre-populated
 `known_hosts` from the very first connection — no TOFU on either end. A side

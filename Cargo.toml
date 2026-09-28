@@ -7,6 +7,7 @@ members = [
     "crates/paguro-efi",
     "crates/paguro-initrd",
     "crates/paguro-vm",
+    "crates/paguro-link",
     "crates/paguro-linux",
     "crates/paguro-win",
     "crates/paguro-service",
@@ -25,6 +26,7 @@ default-members = [
     "crates/paguro-crypto",
     "crates/paguro-initrd",
     "crates/paguro-vm",
+    "crates/paguro-link",
     "crates/paguro-linux",
     "crates/paguro-win",
     "crates/paguro-service",
@@ -48,6 +50,7 @@ paguro-crypto = { path = "crates/paguro-crypto" }
 paguro-boot = { path = "crates/paguro-boot" }
 paguro-theme = { path = "crates/paguro-theme" }
 paguro-ui = { path = "crates/paguro-ui" }
+paguro-link = { path = "crates/paguro-link" }
 sha2 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
 

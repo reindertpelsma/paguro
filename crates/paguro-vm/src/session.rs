@@ -683,24 +683,7 @@ pub fn is_ssh_keys(v: &Value) -> bool {
     field(v, "type") == "ssh-keys"
 }
 
-/// guest → host: Windows' own client key (for the host's `authorized_keys`)
-/// and its sshd host key (for the host's `known_hosts`).
-pub fn ssh_keys_frame(windows_user_pub: &str, windows_host_pub: &str) -> Value {
-    json!({
-        "type": "ssh-keys",
-        "windows_user_pub": windows_user_pub,
-        "windows_host_pub": windows_host_pub,
-    })
-}
-
-/// host → guest: the mirror, the host's own client key and host key.
-pub fn ssh_keys_ack_frame(linux_user_pub: &str, linux_host_pub: &str) -> Value {
-    json!({
-        "type": "ssh-keys-ack",
-        "linux_user_pub": linux_user_pub,
-        "linux_host_pub": linux_host_pub,
-    })
-}
+pub use paguro_link::{ssh_keys_ack_frame, ssh_keys_frame};
 
 /// The host's side of the handshake: fold the guest's keys into the link's
 /// own `authorized_keys`/`known_hosts` (`net::LINK_STATE_DIR`, the same
@@ -712,11 +695,19 @@ pub fn handle_ssh_keys(state_dir: &Path, req: &Value) -> R<Value> {
     let user_pub = req
         .get("windows_user_pub")
         .and_then(Value::as_str)
-        .ok_or("ssh-keys: no windows_user_pub")?;
+        .ok_or("ssh-keys: no windows_user_pub")?
+        .trim();
     let host_pub = req
         .get("windows_host_pub")
         .and_then(Value::as_str)
-        .ok_or("ssh-keys: no windows_host_pub")?;
+        .ok_or("ssh-keys: no windows_host_pub")?
+        .trim();
+    // One `ssh-…` line each: a newline here would append a second,
+    // unrestricted line to `authorized_keys`.
+    if !paguro_link::pubkey_ok(user_pub) || !paguro_link::pubkey_ok(host_pub) {
+        return Err("ssh-keys: a key is not one ssh-… line".into());
+    }
+    let linux_user = link_user(state_dir)?;
 
     let akey = state_dir.join("authorized_keys");
     let line = net::authorized_keys_line(user_pub);
@@ -747,9 +738,74 @@ pub fn handle_ssh_keys(state_dir: &Path, req: &Value) -> R<Value> {
     let linux_host_pub = fs::read_to_string(state_dir.join("ssh_host_ed25519_key.pub"))
         .map_err(|e| format!("this installation's own host key: {e}"))?;
     Ok(ssh_keys_ack_frame(
+        &linux_user,
         linux_user_pub.trim(),
         linux_host_pub.trim(),
     ))
+}
+
+/// The one Linux account the link's sshd admits: `link setup`'s own
+/// `sshd_config` (`AllowUsers`), so there is a single record of it.
+fn link_user(state_dir: &Path) -> R<String> {
+    let conf = fs::read_to_string(state_dir.join("sshd_config"))
+        .map_err(|e| format!("the link's sshd_config (paguro link setup): {e}"))?;
+    conf.lines()
+        .find_map(|l| l.strip_prefix("AllowUsers "))
+        .map(str::trim)
+        .filter(|u| paguro_link::linux_user_ok(u))
+        .map(str::to_string)
+        .ok_or_else(|| "the link's sshd_config names no usable AllowUsers".into())
+}
+
+/// Answers `link-request` (INTERFACES.md §11.3): the per-installation
+/// secrets, generated on first use and kept next to the link's SSH state
+/// (0600): `smb-secret`, Windows' dedicated account's password (`/mnt/c`),
+/// and `samba-secret`, the host share's (`L:`). A host whose link was
+/// never set up answers with an error and the service tries again later.
+pub fn handle_link_request(state_dir: &Path) -> Value {
+    if !state_dir.is_dir() {
+        return paguro_link::link_error("the link is not set up on this host (paguro link setup)");
+    }
+    match (
+        secret(state_dir, "smb-secret"),
+        secret(state_dir, "samba-secret"),
+    ) {
+        (Ok(smb_secret), Ok(host_secret)) => paguro_link::link_frame(&paguro_link::LinkConfig {
+            smb_secret,
+            host_secret,
+        }),
+        (Err(e), _) | (_, Err(e)) => paguro_link::link_error(&e),
+    }
+}
+
+/// `name` in `state_dir`, created (0600, 32 random bytes as hex) if absent.
+/// A file that exists but is not a usable secret is an error, never
+/// silently replaced: the other side may already hold it.
+pub fn secret(state_dir: &Path, name: &str) -> R<String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let p = state_dir.join(name);
+    if let Ok(s) = fs::read_to_string(&p) {
+        let s = s.trim().to_string();
+        return if paguro_link::secret_ok(&s) {
+            Ok(s)
+        } else {
+            Err(format!("{}: not a usable secret", p.display()))
+        };
+    }
+    let mut b = [0u8; 32];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .map_err(|e| format!("/dev/urandom: {e}"))?;
+    let s: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&p)
+        .map_err(|e| format!("{}: {e}", p.display()))?;
+    f.write_all(s.as_bytes())
+        .map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(s)
 }
 
 fn wait_for(p: &Path, t: Duration) -> bool {
@@ -1063,6 +1119,24 @@ fn supervise(
                 abuf.extend_from_slice(b.get(..n).unwrap_or(&[]));
                 for f in agent_frames(&mut abuf) {
                     log(&format!("agent: {f}"));
+                    if paguro_link::is_link_request(&f) {
+                        let reply = handle_link_request(Path::new(net::LINK_STATE_DIR));
+                        match paguro_link::parse_link(&reply) {
+                            Some(Ok(_)) => log("link: settings sent to the service"),
+                            _ => log(&format!("link: {}", field(&reply, "error"))),
+                        }
+                        if let Err(e) = a.write_all(&agent_frame(&reply)) {
+                            log(&format!("agent: link: {e}"));
+                        }
+                        continue;
+                    }
+                    if let Some(r) = paguro_link::parse_link_ready(&f) {
+                        match r {
+                            Ok(()) => log("link: Windows' side is ready"),
+                            Err(e) => log(&format!("link: Windows' side failed: {e}")),
+                        }
+                        continue;
+                    }
                     if is_ssh_keys(&f) {
                         let ack = match handle_ssh_keys(Path::new(net::LINK_STATE_DIR), &f) {
                             Ok(ack) => {
@@ -1338,7 +1412,11 @@ mod tests {
         assert!(is_ssh_keys(&f));
         assert_eq!(f["windows_user_pub"], "ssh-ed25519 AAAA windows-user");
         assert_eq!(f["windows_host_pub"], "ssh-ed25519 AAAA windows-host");
-        let ack = ssh_keys_ack_frame("ssh-ed25519 AAAA linux-user", "ssh-ed25519 AAAA linux-host");
+        let ack = ssh_keys_ack_frame(
+            "alice",
+            "ssh-ed25519 AAAA linux-user",
+            "ssh-ed25519 AAAA linux-host",
+        );
         assert!(!is_ssh_keys(&ack));
         assert_eq!(field(&ack, "type"), "ssh-keys-ack");
     }
@@ -1354,11 +1432,13 @@ mod tests {
             "ssh-ed25519 AAAA linux-host\n",
         )
         .unwrap();
+        fs::write(d.join("sshd_config"), "Port 22\nAllowUsers alice\n").unwrap();
 
         let req = ssh_keys_frame("ssh-ed25519 AAAA win-user", "ssh-ed25519 AAAA win-host");
         let ack = handle_ssh_keys(&d, &req).unwrap();
         assert_eq!(ack["linux_user_pub"], "ssh-ed25519 AAAA linux-user");
         assert_eq!(ack["linux_host_pub"], "ssh-ed25519 AAAA linux-host");
+        assert_eq!(ack["linux_user"], "alice");
 
         let akey = fs::read_to_string(d.join("authorized_keys")).unwrap();
         assert_eq!(akey, "from=\"169.254.244.2\" ssh-ed25519 AAAA win-user\n");
@@ -1370,6 +1450,47 @@ mod tests {
         assert_eq!(fs::read_to_string(d.join("authorized_keys")).unwrap(), akey);
 
         assert!(handle_ssh_keys(&d, &json!({"type": "ssh-keys"})).is_err());
+        // A key with a newline would add an unrestricted line: refused.
+        let evil = ssh_keys_frame("ssh-ed25519 AAAA x\nssh-ed25519 BBBB", "ssh-ed25519 AAAA h");
+        assert!(handle_ssh_keys(&d, &evil).is_err());
+        assert_eq!(fs::read_to_string(d.join("authorized_keys")).unwrap(), akey);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn link_request_generates_secrets_once() {
+        let d = std::env::temp_dir().join(format!("paguro-vm-link-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        let r = handle_link_request(&d);
+        assert!(
+            matches!(paguro_link::parse_link(&r), Some(Err(_))),
+            "no state dir: an error"
+        );
+        fs::create_dir_all(&d).unwrap();
+        let a = paguro_link::parse_link(&handle_link_request(&d))
+            .unwrap()
+            .unwrap();
+        let b = paguro_link::parse_link(&handle_link_request(&d))
+            .unwrap()
+            .unwrap();
+        assert_eq!(a, b, "generated once, then reused");
+        assert_ne!(a.smb_secret, a.host_secret);
+        assert_eq!(a.smb_secret.len(), 64);
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(d.join("smb-secret"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        fs::write(d.join("samba-secret"), "x").unwrap();
+        assert!(
+            matches!(
+                paguro_link::parse_link(&handle_link_request(&d)),
+                Some(Err(_))
+            ),
+            "a bad file is not replaced"
+        );
         let _ = fs::remove_dir_all(&d);
     }
 }

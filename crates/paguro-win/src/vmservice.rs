@@ -1,6 +1,7 @@
 //! Wires the two VM-mode-only background jobs into the service, without
 //! ever blocking its own startup (DESIGN.md §4.4): protecting the images,
-//! then arming, on one thread (`crate::vmprotect`, `crate::arming`), and
+//! arming, then the link and SSH, on one thread (`crate::vmprotect`,
+//! `crate::arming`, `crate::vmlink`), and
 //! the chkdsk guard (`crate::bootexec`). Skipped entirely, at once, on
 //! a native boot (`crate::vmmode`) -- `spawn` itself does only one
 //! `smbios()` call before returning; both background threads it may start
@@ -48,6 +49,8 @@ pub fn spawn(make: MakeApi, log: Log) {
                     log2(&format!("protect: {m}"))
                 });
                 crate::arming::run(api.as_ref(), &sleep, &|m| log2(&format!("arm: {m}")));
+                // Then the link and SSH over it (DESIGN.md §5c duties 2-3).
+                crate::vmlink::run(api.as_ref(), &sleep, &|m| log2(&format!("vm: {m}")));
                 // The pins hold the images' clusters in place for as long
                 // as the service runs; this thread's only remaining job.
                 loop {

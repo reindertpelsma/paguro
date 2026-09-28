@@ -84,6 +84,7 @@ impl MockFile {
 
 type TpmFn = Box<dyn FnMut(&[u8]) -> ApiResult<Vec<u8>>>;
 type RunFn = Box<dyn Fn(&str, &[&str]) -> Option<Output>>;
+type StdinRunFn = Box<dyn Fn(&str, &[&str], &[u8]) -> Option<Output>>;
 
 pub struct MockApi {
     pub elevated: Cell<bool>,
@@ -104,6 +105,11 @@ pub struct MockApi {
     pub tpm: RefCell<Option<TpmFn>>,
     pub log: RefCell<Vec<u8>>,
     pub runner: RefCell<Option<RunFn>>,
+    /// Consulted first for runs that feed stdin (scripts the service pipes
+    /// to `powershell.exe`, secrets included): gets the stdin too.
+    pub stdin_runner: RefCell<Option<StdinRunFn>>,
+    /// What each run fed on stdin, in order (lossy UTF-8).
+    pub stdins: RefCell<Vec<String>>,
     pub secrets: RefCell<Vec<String>>,
     pub stdin: RefCell<Vec<u8>>,
     pub now: Cell<u64>,
@@ -197,6 +203,8 @@ impl MockApi {
             tpm: RefCell::new(None),
             log: RefCell::default(),
             runner: RefCell::new(None),
+            stdin_runner: RefCell::new(None),
+            stdins: RefCell::default(),
             secrets: RefCell::default(),
             stdin: RefCell::default(),
             now: Cell::new(1_760_000_000),
@@ -449,6 +457,10 @@ impl MockApi {
 
     pub fn set_runner(&self, f: impl Fn(&str, &[&str]) -> Option<Output> + 'static) {
         *self.runner.borrow_mut() = Some(Box::new(f));
+    }
+
+    pub fn set_stdin_runner(&self, f: impl Fn(&str, &[&str], &[u8]) -> Option<Output> + 'static) {
+        *self.stdin_runner.borrow_mut() = Some(Box::new(f));
     }
 
     pub fn set_tpm(&self, f: impl FnMut(&[u8]) -> ApiResult<Vec<u8>> + 'static) {
@@ -891,14 +903,23 @@ impl WinApi for MockApi {
         Ok(l.clone())
     }
 
-    fn run(&self, program: &str, args: &[&str], _stdin: Option<&[u8]>) -> ApiResult<Output> {
+    fn run(&self, program: &str, args: &[&str], stdin: Option<&[u8]>) -> ApiResult<Output> {
         let line = std::iter::once(program)
             .chain(args.iter().copied())
             .collect::<Vec<_>>()
             .join(" ");
         self.commands.borrow_mut().push(line.clone());
         self.mutated(format!("run {line}"));
-        let r = self.runner.borrow().as_ref().and_then(|f| f(program, args));
+        let from_stdin = stdin.and_then(|i| {
+            self.stdins
+                .borrow_mut()
+                .push(String::from_utf8_lossy(i).into_owned());
+            self.stdin_runner
+                .borrow()
+                .as_ref()
+                .and_then(|f| f(program, args, i))
+        });
+        let r = from_stdin.or_else(|| self.runner.borrow().as_ref().and_then(|f| f(program, args)));
         Ok(r.unwrap_or(Output {
             status: 0,
             stdout: String::new(),

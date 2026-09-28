@@ -9,6 +9,7 @@ on:
   push:
     paths:
       - 'crates/paguro-win/**'
+      - 'crates/paguro-link/**'
       - 'crates/paguro-service/**'
       - 'crates/paguro-core/**'
       - 'crates/paguro-crypto/**'

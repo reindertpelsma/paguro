@@ -3240,9 +3240,13 @@ none of the following (the SMBIOS marker `paguro-vm/1` is absent, §4.4).
    port, waits for the host's ack, and only then marks the minifilter armed
    (§4.4, INTERFACES §11.3);
 2. provisions the link: the static address on the private adapter, the SMB
-   share and account, the firewall scoping, and the `L:` mapping;
-3. provisions SSH: OpenSSH server bound to the link, the host's public key in
-   `authorized_keys`, and the Windows key for reaching Linux;
+   share and account, the firewall scoping, and the `L:` mapping, with the
+   per-installation secrets the host sends over the agent port;
+3. provisions SSH for the signed-in user: OpenSSH server bound to the link,
+   the host's public key in `authorized_keys`, and the user's own key for
+   reaching Linux, host keys pinned both ways. *(2 and 3 are built and
+   unit-tested, `paguro_win::vmlink`; the scripts are `paguro-link`'s, shared
+   with the Linux side. Not yet run in the VM rig.)*
 4. runs paguro's own RDP server in the user's session (§The control channel):
    link-only, token-authenticated, its certificate's fingerprint sent over the
    agent port for the host to pin. Windows' own Remote Desktop settings are

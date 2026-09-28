@@ -35,6 +35,7 @@ pub mod real;
 pub mod rpc;
 pub mod tpm_auth;
 pub mod tpmwin;
+pub mod vmlink;
 pub mod vmmode;
 pub mod vmprotect;
 pub mod vmservice;
