@@ -36,7 +36,7 @@
 //!     FreeRDP to the VM (desktop, or one program as RemoteApp)
 //! paguro-vm smb-conf --root DIR --state DIR         the netns Samba's smb.conf
 //! paguro-vm samba --root DIR --state DIR --secret-file F   L: over the link
-//! paguro-vm mount-c --target DIR --secret-file F [--uid N --gid N]
+//! paguro-vm mount-c --target DIR --secret-file F [--uid N --gid N] [--modefromsid]
 //! paguro-vm link --ifname IF                        IF into netns paguro as paguro0
 //! paguro-vm net-up --tap IF --wan IF --subnet CIDR [--mac MAC] [--dmz]
 //!                  [--pin-port PORT:linux|windows]...
@@ -435,8 +435,10 @@ fn main() {
         "mount-c" => {
             let (mut target, mut secret) = (None, None);
             let (mut uid, mut gid) = (0u32, 0u32);
+            let mut mode = net::CifsModes::Fixed;
             while let Some(k) = a.it.next() {
                 match k.as_str() {
+                    "--modefromsid" => mode = net::CifsModes::FromSid,
                     "--target" => target = Some(PathBuf::from(a.val(&k))),
                     "--secret-file" => secret = Some(read_secret(Path::new(&a.val(&k)))),
                     "--uid" => uid = a.num(&k),
@@ -449,6 +451,7 @@ fn main() {
                 &secret.unwrap_or_else(|| usage()),
                 uid,
                 gid,
+                mode,
             )
             .unwrap_or_else(|e| fail(e));
         }

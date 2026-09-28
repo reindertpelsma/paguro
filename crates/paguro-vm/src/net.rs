@@ -77,13 +77,29 @@ pub fn smb_conf(root: &Path, state_dir: &Path) -> String {
 
 /// The CIFS mount options for `/mnt/c` (the password goes in through
 /// `password=` in the mount data only; never on a command line).
-pub fn cifs_options(user: &str, secret: &str, uid: u32, gid: u32) -> String {
+/// `mode`: how Linux modes are kept. [`CifsModes::Fixed`] gives every file
+/// 0644 and every directory 0755; [`CifsModes::FromSid`] (DESIGN.md §5d
+/// "The execute bit is the one trust flag") stores `chmod`'s mode in an
+/// ACE Windows ignores for access (`S-1-5-88-3-<mode>`), so the bit
+/// persists. *Still being verified in the rig* (test/vm/split-e2e.sh's
+/// "modefromsid" checks) before anything builds on it.
+pub fn cifs_options(user: &str, secret: &str, uid: u32, gid: u32, mode: CifsModes) -> String {
     // A comma would end the option: Samba's convention doubles it.
     let pw = secret.replace(',', ",,");
+    let modes = match mode {
+        CifsModes::Fixed => "file_mode=0644,dir_mode=0755",
+        CifsModes::FromSid => "modefromsid",
+    };
     format!(
         "vers=3.1.1,sign,username={user},password={pw},uid={uid},gid={gid},\
-         file_mode=0644,dir_mode=0755,noserverino,nosharesock,soft,echo_interval=10"
+         {modes},noserverino,nosharesock,soft,echo_interval=10"
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CifsModes {
+    Fixed,
+    FromSid,
 }
 
 pub fn cifs_source() -> String {
@@ -194,9 +210,15 @@ const SMBD_POLLS: u32 = 30;
 const SMBD_POLL_MS: u64 = 200;
 
 /// Mount `/mnt/c` (Mode 1) from inside the netns.
-pub fn mount_c(target: &Path, secret: &str, uid: u32, gid: u32) -> Result<(), String> {
+pub fn mount_c(
+    target: &Path,
+    secret: &str,
+    uid: u32,
+    gid: u32,
+    mode: CifsModes,
+) -> Result<(), String> {
     let target = target.to_path_buf();
-    let data = cifs_options(WINDOWS_SMB_USER, secret, uid, gid);
+    let data = cifs_options(WINDOWS_SMB_USER, secret, uid, gid, mode);
     in_netns(move || {
         std::fs::create_dir_all(&target).map_err(|e| format!("{}: {e}", target.display()))?;
         paguro_initrd::sys::mount(&cifs_source(), &target, "cifs", 0, &data)
@@ -221,8 +243,11 @@ mod tests {
 
     #[test]
     fn cifs() {
-        let o = cifs_options("paguro-smb", "a,b", 1000, 1000);
+        let o = cifs_options("paguro-smb", "a,b", 1000, 1000, CifsModes::Fixed);
         assert!(o.contains("password=a,,b,"));
+        assert!(o.contains(",file_mode=0644,dir_mode=0755,"));
+        let o = cifs_options("paguro-smb", "x", 0, 0, CifsModes::FromSid);
+        assert!(o.contains(",modefromsid,") && !o.contains("file_mode"));
         assert!(o.starts_with("vers=3.1.1,sign,"));
         assert_eq!(cifs_source(), "//169.254.244.2/paguro-c");
     }
