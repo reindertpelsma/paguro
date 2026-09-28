@@ -32,6 +32,10 @@ What that gives, in the order it matters to people:
   a VM on the Linux desktop (§1b, §5b).
 - **Windows can reach Linux, even on a single-disk laptop**: the image is a file
   WSL2 mounts, which a Linux partition on the Windows disk never is (§1).
+- **One set of files, programs and drives across both**: the same working
+  directory on each side, the other system's programs and shortcuts opening
+  from either file manager, USB drives appearing on both, and each person the
+  same user on both (§5d).
 - **Your WSL2 distributions on the metal**, as they are (§8b).
 - **BitLocker keeps working** without recovery-key prompts, because Windows' boot
   path is never touched (§6).
@@ -2524,6 +2528,12 @@ plaintext in `~/.config/winapps/winapps.conf`; copying that would make the Linux
 path weaker than the Windows one, which §6 forbids. Provision a generated
 per-user credential rather than reusing the user's real Windows password.
 
+**The mapping is also what makes the shares per-user** (§5d "Users on both
+sides"): `/mnt/c` with CIFS `multiuser`, each Linux user with their own
+Windows credential; `L:` mapped by each Windows logon with its own
+credential; elevated sessions reading everything but writing as the user by
+default, and "administrator = root" only as a per-user opt-in.
+
 **One interactive session, total.** Windows client SKUs permit a single
 interactive session — connecting over RDP disconnects the console session. This
 design is therefore single-user-at-a-time by construction, and two Linux users
@@ -2820,6 +2830,15 @@ which is the failure this whole section exists to prevent.
 > **Never both.** If the VM is running, Linux cannot mount C:. If Linux has C:
 > mounted, the VM will not start. Enforced in the module, not by convention — one
 > component owns both views.
+
+**The switch is automatic, and so is the gap.** `/mnt/c` is a systemd
+automount whose backing mount paguro changes with the VM's state: CIFS while
+the VM runs, `ntfs3` on view C while it is off (when mode 2 is enabled). Before
+the VM starts, the `ntfs3` mount is released; if a process holds files open
+there, the start is refused **naming the process**, never forced. In native
+mode `ntfs3` enforces no NTFS ACLs, so each Windows profile folder is
+accessible only to its mapped Linux user and the rest of C: to root (§5d
+"Users on both sides").
 
 ### Edition limit: RemoteApp needs a Pro-or-better host
 
@@ -3228,11 +3247,15 @@ none of the following (the SMBIOS marker `paguro-vm/1` is absent, §4.4).
    link-only, token-authenticated, its certificate's fingerprint sent over the
    agent port for the host to pin. Windows' own Remote Desktop settings are
    left alone;
-5. keeps (2)–(4) correct on every VM boot, and **removes nothing that
+5. for each user who logs on, runs the in-session agent that §5d relies on:
+   the user's own `L:` mappings (ordinary and elevated), opening files and
+   programs forwarded from Linux, the app list and known folders, and drive
+   letters for Linux's drives (INTERFACES §11.3, "Files, programs, drives
+   and users");
+6. keeps (2)–(5) correct on every VM boot, and **removes nothing that
    native Windows needs**. The link adapter only exists in the VM, so its
    rules are inert natively.
 
-### Adding WSL distributions for bare metal
 ### Adding WSL distributions for bare metal
 
 A WSL distribution becomes bootable by being **registered with the paguro host
@@ -3304,6 +3327,240 @@ sync client's port), like a DMZ host behind the Linux one:
 - the VM's LAN adapter carries the host's MAC (§4.5), so the network sees one
   machine, as it does when Windows is booted natively; Windows' firewall still
   applies to what reaches it.
+
+## 5d. Files, programs, drives and users across both systems
+
+§5b and §5c make each system's files reachable from the other. This section
+is what makes them *usable* from the other: the same working directory on both
+sides, the other system's programs and shortcuts opening from a file manager
+or a shell, removable drives appearing on both sides, and each person being the
+same person on both.
+
+**One rule runs through all of it: forward, don't translate.** A `.lnk` is
+opened by Windows' own shell and a `.desktop` file by the distribution's own
+launcher, with the file handed over as it is. The side that owns a format
+handles every edge case of it by construction. A local parser exists only to
+*show* the other side's files (a name, an icon), never to decide what running
+one does.
+
+### The same path on both sides
+
+Because C: is `/mnt/c` in Linux and every distribution's root is `L:\d` in
+Windows (§5c), **any working directory on either side exists on the other**.
+The mapping is fixed and total in both directions, and anything it cannot map
+is refused rather than approximated:
+
+| From | To | Rule |
+|---|---|---|
+| Linux `/mnt/c/X` (any NTFS volume `/mnt/v`) | Windows | `C:\X` (`V:\X`) |
+| Linux, any other path `/X` in distribution *d* | Windows | `L:\d\X` |
+| Windows `C:\X` | Linux | `/mnt/c/X` |
+| Windows `L:\d\X` | Linux | `/X` in *d* itself; `/mnt/l/d/X` from another distribution |
+
+- **Refused:** `/proc`, `/sys`, `/dev`, and special files anywhere (sockets,
+  FIFOs, device nodes). `/run` is an ordinary tmpfs and maps like any other
+  directory; only its special files are refused. A program started in a
+  refused directory is refused with the reason, never started somewhere else.
+- **Names Windows cannot hold** (`\ : * ? " < > |`, trailing dots and spaces)
+  use **WSL's convention**: each character maps to its private-use code point
+  (U+F000 + the character), in Samba with the `catia` module configured to the
+  same table. A file looks the same through `L:` as it does through WSL.
+- **Case:** Linux directories stay case-sensitive; Samba shows Windows a
+  case-preserving view. Two names differing only in case are the one ambiguity
+  left, and a working directory under such a pair is refused.
+
+### Running the other system's programs
+
+| On | The other side's program | How |
+|---|---|---|
+| Linux | a Windows `.exe` (terminal, script, file manager) | **`binfmt_misc`**, the kernel's stock mechanism Wine uses: the `MZ` signature routes `./setup.exe` to paguro's handler |
+| Windows | a Linux ELF | the **extension-less file type** (`assoc .=…`, where ELF binaries live) plus `.AppImage`, `.sh`, `.run`; the handler checks the ELF signature and shows "Open with" for anything else |
+| Windows shells | an ELF typed into cmd or PowerShell | `paguro run ./prog` (a short alias is a user setting). **Transparent execution is out of scope:** it needs hooks on process creation, which is exactly what EDR products flag (§8) |
+
+**What the handler forwards:** the program, its arguments with paths mapped as
+above, the working directory, and the environment minus variables that only
+mean something on one side (`PATH`, `HOME`, `USERPROFILE`, …; `WSLENV`'s
+convention for the ones that should cross).
+
+**Which channel:**
+
+- **Console programs run over the per-user SSH channel** (§5c "Shells"):
+  stdin, stdout and stderr are streamed, the exit status comes back, and Ctrl-C
+  arrives as an interrupt. `foo.exe | grep x` and `make` calling `cl.exe` work
+  like WSL interop, the other way round.
+- **Windows GUI programs start through the in-session agent**, because an SSH
+  logon cannot put a window on the user's desktop. The handler tells the two
+  apart from the PE header's subsystem field. The window then arrives through
+  the per-window path (§5c, §1b).
+- **Linux programs started from Windows** run as the user's mapped Linux
+  account (below); a Linux GUI program appears on the Linux desktop, which is
+  where the user is when Windows is the VM.
+- **Native Windows** (Linux not running): Linux programs run in the WSL helper
+  (§5c) with WSLg, from the same distribution root.
+- **Windows not running** (Linux on the metal, VM off): the handler offers to
+  start the VM, headless if nothing else needs its screen.
+
+### The execute bit is the one trust flag
+
+A file runs on the other side only if it is **executable**, exactly as on
+Linux. Downloaded files arrive without the bit, so a double-click on something
+from the internet does nothing until the user allows it. **No per-format
+trust rules, no stamps, no signatures.**
+
+- **Where the bit lives on NTFS:** in the `$LXMOD` extended attribute, with
+  `$LXUID`/`$LXGID`, the convention WSL already uses and `ntfs3` reads and
+  writes. So `chmod +x` on `/mnt/c` natively just works.
+- **In VM mode** (`/mnt/c` over CIFS), the mount uses `modefromsid`: `chmod`
+  stores the mode in a special ACE that Windows ignores for access. The
+  service copies that mode into `$LXMOD` whenever it changes, so the bit
+  survives the switch to native mode. *To verify in the rig before building
+  on it:* both mount options, and that neither disturbs Windows' own ACLs.
+- **Files with no `$LXMOD`** (made by Windows) get a mode derived from
+  Windows' own view: executable when the extension is in `PATHEXT` and the
+  file carries no Mark of the Web (the `Zone.Identifier` stream downloads
+  get), otherwise not.
+- **Allowing a file** is the same act on both sides: `chmod +x` in Linux, or
+  "Allow running" in Explorer's menu. Either sets `$LXMOD` and removes the
+  Mark of the Web, so Windows itself stops warning about the file too.
+
+### Shortcuts: `.lnk` on Linux, `.desktop` on Windows
+
+Shared folders (below) mean both kinds of shortcut sit in the *same* Desktop.
+They are shown natively and opened by forwarding. Converting them would leave
+two copies to drift and break on the next move.
+
+| | `.lnk` on Linux | `.desktop` on Windows |
+|---|---|---|
+| **file type** | `application/x-ms-shortcut` (shared-mime-info), default application `paguro open` | a `paguro.desktop` file type, opened by `paguro open` |
+| **shown with** | a thumbnailer drawing the target's icon (from `IconLocation`, or the target `.exe`/`.ico` through `/mnt/c`) | a shell icon handler reading the icon cache below, and a tooltip from `Name`/`Comment` |
+| **opened by** | the VM's shell: the agent calls `ShellExecute` on the file's Windows path (a temp copy if it is outside the mapped paths). Windows' own parser resolves ID lists, known folders and environment variables | the distribution's own launcher (`gio launch`): `Exec` field codes, `Terminal=`, `TryExec` and the desktop's own trust checks |
+| **files dropped on it** | passed as arguments, paths mapped | passed as `%f`/`%u`, paths mapped |
+| **local parser** | a small MS-SHLLINK reader in `paguro-core`, fuzzed like every other format, for the name and icon only | the desktop-entry keys it shows, nothing more |
+
+**Which distribution opens a `.desktop` file.** A file on a shared folder
+belongs to no distribution by location. In order:
+
+1. the distribution named by its **`X-Paguro-Distro`** key. "Always open with
+   this distribution" writes that key; the desktop-entry spec allows `X-` keys,
+   and the key travels with the file;
+2. otherwise the distribution that is running;
+3. otherwise the only one whose app index has the `Exec`/`TryExec` program;
+4. otherwise ask, with "always" writing the key.
+
+**Icons without Linux running:** each distribution renders the icons its
+`.desktop` files name into a cache on NTFS
+(`C:\ProgramData\paguro\icons\<d>\`), refreshed when apps change. Windows'
+icon handler reads only the cache, so a Desktop full of Linux shortcuts looks
+right when Windows is booted natively.
+
+### Windows' apps in Linux's app search
+
+Linux's launchers (GNOME Shell, KRunner, rofi, …) find applications through
+`.desktop` entries. The in-session agent sends Windows' app list, the Start
+menu and `shell:AppsFolder` (so Store apps too) with icons, and sends changes
+on install and uninstall. The Linux side keeps it as private entries in
+`~/.local/share/applications/paguro-windows/`, each starting its app by its
+Windows app ID through the per-window path. It is a local index, not files in
+a shared folder, so nothing here contradicts "forward, don't translate".
+
+**One direction only.** Windows' search is not given Linux's apps: there may
+be several distributions, and in practice Linux is the side that lacks
+applications, not Windows.
+
+### Shared user folders
+
+**Desktop, Documents, Downloads, Pictures, Videos and Music are one folder
+each, on NTFS.** Each distribution's XDG user directories point at the
+Windows known folders of the mapped Windows user, resolved from Windows
+(`SHGetKnownFolderPath`, including OneDrive or a redirected Documents), never
+guessed from `C:\Users\<name>`:
+
+- **VM mode:** bind mounts of the `/mnt/c` paths the agent reports, set up at
+  login.
+- **Native mode:** the same paths over `ntfs3`, recorded from the last
+  session; a known folder outside C: that is not mounted stays unset rather
+  than pointing at an empty directory.
+- **Each side hides the other's metadata:** `desktop.ini` is listed in the
+  folder's `.hidden` for Linux file managers; `.directory` and `.hidden` get
+  the Windows hidden attribute.
+
+### Drives
+
+**Linux → Windows** (Linux on the metal, VM running). paguro watches udev for
+new block devices and mounts them as usual (udisks). Each mounted filesystem
+gets a Samba share on the link, and the agent port's `drive-added` makes the
+service map it to a free letter **non-persistently** (`/persistent:no`), so
+it never reappears as a broken drive at the next boot. Explorer gives mapped
+drives no AutoPlay, so the service shows a notification instead ("KINGSTON is
+available as E:"). Ejecting from either side unmaps first, then unmounts.
+
+**"Give to Windows"**, per device, is the alternative: USB passthrough of the
+whole device into the VM. Windows then gets real AutoPlay, BitLocker To Go
+and full speed, and Linux does not see the device until it is given back.
+It is the right choice for things like phones and cameras that Windows' own
+tools expect locally.
+
+**Windows → Linux.** Drives Windows owns (a passed-through device, a BitLocker
+To Go drive unlocked in Windows, a network drive) are shared back over the
+link and mounted at **`/run/media/$USER/<label>`** with `x-gvfs-show`. That is
+where Linux file managers already show removable drives; a path like
+`/mnt/drives` would not appear in them. Natively (Windows on the metal, a
+distribution in WSL), the WSL helper watches for new drive letters and mounts
+them the same way.
+
+### Users on both sides
+
+The identity mapping of §4.7 (SID ↔ uid) is what makes the shares per-user.
+It replaces the single `paguro-smb` account of the first implementation.
+
+| Direction | Mechanism (stock tools only) |
+|---|---|
+| Linux user → Windows (`/mnt/c`, VM mode) | CIFS **`multiuser`**: each Linux user's access uses their own Windows credential from their kernel keyring (`cifscreds`), and Windows enforces NTFS ACLs as that Windows user |
+| Linux root → Windows | CIFS **`backupuid=0`** with a credential holding Backup/Restore privileges: root's opens use backup intent and pass every ACL, the closest Windows has to root |
+| Windows user → Linux (`L:`) | each Windows logon maps `L:` with that user's own generated credential; Samba's `username map` turns it into the mapped Linux user, and Unix permissions apply |
+| elevated Windows session → Linux | **read everything, write as the user** by default: the elevated mapping holds Backup/Restore rights, which Samba honours by opening as root for reads. An explicit step is needed to change a file the user does not own, like Take Ownership on Windows |
+| "Windows administrators are root in Linux" | **opt-in per user**: the elevated session's mapping is in Samba's `admin users` |
+
+- **Why elevated is not root by default.** An elevated Windows process is not
+  root on Windows either: it passes ACLs that grant Administrators, is
+  refused by TrustedInstaller's files and folders like `WindowsApps`, and
+  bypasses ACLs only through explicit privileges (Take Ownership,
+  Backup/Restore with backup intent). And the design's baseline is that Linux
+  is more privileged than the Windows guest. Root on `L:` for every elevated
+  process would make any compromise of Windows a compromise of Linux.
+- **Windows keeps elevated and non-elevated drive mappings apart**, so the
+  two `L:` identities fall out of Windows' own behaviour: an elevated
+  PowerShell sees the elevated mapping, ordinary programs the ordinary one.
+- **Never on the share, even opted in:** paguro's own state and the host's
+  boot chain (`/boot`, `/etc/paguro`, the module's configuration), so a
+  compromise of Windows cannot make itself permanent in Linux.
+- **Native mode enforces no NTFS ACLs.** `ntfs3` knows the mount's owner and
+  `$LXMOD`, not Windows' ACLs. So natively each Windows profile folder is
+  mounted accessible only to its mapped Linux user, and the rest of C: is
+  root's. "Alice cannot read Bob's Documents" holds in both modes.
+- The Linux → Windows direction weakens nothing: Linux already controls the
+  VM completely.
+
+### Not done
+
+- **Transparent ELF execution from cmd and PowerShell** (above): process
+  creation hooks.
+- **Converting shortcuts into copies** (above).
+- **Linux windows shown in Windows.** Linux on the metal is the primary
+  topology and its windows are already on the real screen; natively, WSLg
+  covers it.
+
+### Order of work
+
+1. The service's VM duties (§5c "The paguro service in the VM", items 2–3:
+   link and SSH provisioning), which the channels above ride on.
+2. `/mnt/c` switching between CIFS and `ntfs3` (§5b), per-user identities,
+   and the `$LXMOD` bit.
+3. The program bridge (`binfmt_misc`, the extension-less file type, `paguro
+   run`), then shortcuts, shared folders, drives and the app index; icons
+   last.
+
+---
 
 ## 6. Encryption model
 

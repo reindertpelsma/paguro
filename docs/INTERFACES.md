@@ -842,6 +842,32 @@ exists so `detach` fails with a clear reason before even trying. `image::grow`
 always sends the request before waiting for `image-grown`, and never reloads
 view A's table unless `PG_GROW`'s `error` is `0` (append-only).
 
+**Files, programs, drives and users (DESIGN §5d) — DRAFT, not built.** The
+agent port carries control messages only; program I/O never travels on it.
+The Windows end is the service (SYSTEM), which relays to the **in-session
+agent** of the user named by `sid` over a local named pipe; the Linux end is
+the launcher, which relays to that user's session.
+
+| Direction | Frame | Meaning |
+|---|---|---|
+| host → guest | `{"type":"user-keys","sid":"S-1-5-21-…","linux_user":"alice","linux_user_pub":"ssh-ed25519 …","smb_secret_ref":"…"}` | per-user extension of `ssh-keys`: this Windows user's Linux identity (§4.7 mapping), the public key the host accepts for them, and a reference to their generated `L:` credential (the secret itself is written by the service into the user's Credential Manager, never logged) |
+| guest → host | `{"type":"user-keys-ack","sid":"…","windows_user_pub":"ssh-ed25519 …"}` | the key this Windows user's SSH client presents; `authorized_keys` of the mapped Linux user only |
+| host → guest | `{"type":"open","sid":"…","path":"C:\\Users\\alice\\Desktop\\Word.lnk","args":["…"],"cwd":"C:\\…"}` | `ShellExecute` in that user's session (a `.lnk`, a document, or a GUI `.exe`); paths already mapped (DESIGN §5d "The same path on both sides") |
+| guest → host | `{"type":"open","uid":5001,"path":"/home/alice/Desktop/gimp.desktop","distro":"fedora","args":["…"],"cwd":"/…"}` | the mapped Linux user's launcher (`gio launch`) in `distro` (resolved by the Windows side per DESIGN §5d; absent: the running one) |
+| either | `{"type":"open-result","id":N,"ok":bool,"error":"…"}` | every `open` carries an `id`; refusals name the reason (a refused path, not executable, no such distribution) |
+| guest → host | `{"type":"apps","sid":"…","apps":[{"id":"Microsoft.WindowsCalculator_8wekyb3d8bbwe!App","name":"Calculator","icon":"sha256:…"}]}` | the user's full app list (Start menu and `shell:AppsFolder`); `apps-changed` carries the same shape with only the differences |
+| host → guest | `{"type":"icon-request","hash":"sha256:…"}` / guest → host `{"type":"icon","hash":"…","png":"base64…"}` | icons fetched once each by content hash, cached on the host |
+| host → guest | `{"type":"drive-added","id":"…","label":"KINGSTON","share":"\\\\169.254.244.1\\drive-…","sid":"…"}` | map it for that user, non-persistently, and notify; `drive-removed` with the same `id` unmaps (sent before the host unmounts) |
+| guest → host | `{"type":"drive-added","id":"…","label":"…","share":"\\\\169.254.244.2\\drive-…"}` | a drive Windows owns, shared back; the host mounts it at `/run/media/<user>/<label>`; `drive-removed` likewise |
+| host → guest | `{"type":"give-device","id":"…"}` / `{"type":"device-returned","id":"…"}` | USB passthrough of a whole device into the VM, and back |
+| guest → host | `{"type":"known-folders","sid":"…","folders":{"Desktop":"C:\\Users\\alice\\OneDrive\\Desktop","Documents":"…","Downloads":"…","Pictures":"…","Videos":"…","Music":"…"}}` | resolved with `SHGetKnownFolderPath` at logon and on change; the host binds the mapped Linux user's XDG directories to them |
+
+Rules: a frame naming a `sid` or `uid` with no §4.7 mapping is refused; `open`
+never runs anything the mapping refuses or that is not executable (DESIGN §5d
+"The execute bit is the one trust flag"); console programs are not started
+with `open` — they run over the user's SSH channel, where stdio, the exit
+status and interrupts belong.
+
 ### 11.4 Installing a distribution: the distribution's ISO, in a WSL2 container — DRAFT
 
 **WSL2 is a requirement** (Windows 10 2004+ / 11, any edition). **No
