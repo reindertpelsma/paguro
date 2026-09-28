@@ -3461,6 +3461,8 @@ two copies to drift and break on the next move.
 | **files dropped on it** | passed as arguments, paths mapped | passed as `%f`/`%u`, paths mapped |
 | **local parser** | a small MS-SHLLINK reader in `paguro-core`, fuzzed like every other format, for the name and icon only | the desktop-entry keys it shows, nothing more |
 
+*(The `.lnk` reader is built: `paguro_core::shllink`, fuzz target `shllink` — description, target path, icon location and index, and their `%VAR%` forms; ID lists skipped by length.)*
+
 **Which distribution opens a `.desktop` file.** A file on a shared folder
 belongs to no distribution by location. In order:
 

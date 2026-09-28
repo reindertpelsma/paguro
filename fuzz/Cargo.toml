@@ -174,3 +174,12 @@ path = "fuzz_targets/win_formats.rs"
 test = false
 doc = false
 bench = false
+
+# ---- Files Linux shows from shared folders (DESIGN §5d) --------------------
+
+[[bin]]
+name = "shllink"
+path = "fuzz_targets/shllink.rs"
+test = false
+doc = false
+bench = false

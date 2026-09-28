@@ -25,6 +25,7 @@
 //! | [`hwid`]    | §11.5 — Windows hardware IDs → PCI/USB/ACPI identities and Linux modaliases |
 //! | [`recorded`] | §4.6 — what Linux recorded for the pre-flight (PROPOSED) |
 //! | [`tcglog`]  | §4.6 — the TCG event log's PCR 7 driver-config prefix (pre-flight) |
+//! | [`shllink`] | §5d — Windows shortcuts (`.lnk`): the name and the icon only |
 #![no_std]
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::indexing_slicing))]
@@ -49,6 +50,7 @@ pub mod range;
 pub mod recorded;
 pub mod runlist;
 pub mod seal;
+pub mod shllink;
 pub mod smbios;
 pub mod tcglog;
 pub mod tpm;
