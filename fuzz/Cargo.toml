@@ -183,3 +183,10 @@ path = "fuzz_targets/shllink.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "pe"
+path = "fuzz_targets/pe.rs"
+test = false
+doc = false
+bench = false

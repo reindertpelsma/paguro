@@ -29,7 +29,7 @@ parser is fuzzed" is a project rule (see the root
 | Loader UI input (§13.2a) | `edid`, `vt100` |
 | Loader's NTFS names (§3.2, §13.4) | `ntfs_index`, `ntfs_lookup` |
 | Windows tool's inputs (§11.5, §11.6; DESIGN §4.6) | `win_formats` |
-| Files Linux shows from shared folders (DESIGN §5d) | `shllink` |
+| Files Linux shows or runs from shared folders (DESIGN §5d) | `shllink`, `pe` |
 
 ## Invariants
 

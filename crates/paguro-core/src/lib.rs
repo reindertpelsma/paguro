@@ -25,6 +25,7 @@
 //! | [`hwid`]    | §11.5 — Windows hardware IDs → PCI/USB/ACPI identities and Linux modaliases |
 //! | [`recorded`] | §4.6 — what Linux recorded for the pre-flight (PROPOSED) |
 //! | [`tcglog`]  | §4.6 — the TCG event log's PCR 7 driver-config prefix (pre-flight) |
+//! | [`pe`]      | §5d — a Windows program's subsystem (console or GUI) |
 //! | [`shllink`] | §5d — Windows shortcuts (`.lnk`): the name and the icon only |
 #![no_std]
 #![forbid(unsafe_code)]
@@ -46,6 +47,7 @@ pub mod hwid;
 pub mod ini;
 pub mod layout;
 pub mod ntfs;
+pub mod pe;
 pub mod range;
 pub mod recorded;
 pub mod runlist;
