@@ -140,13 +140,13 @@ pub fn provision_ssh(api: &dyn WinApi, log: &dyn Fn(&str)) -> Result<(), String>
     let mut port = open_port(api)?;
     let ack = agent::exchange(
         &mut *port,
-        &link::ssh_keys_frame(&prep.user_pub, &prep.host_pub),
+        &link::ssh_keys_frame(short, &prep.user_pub, &prep.host_pub),
         &link::parse_ssh_keys_ack,
     )
     .map_err(|e| e.to_string())??;
     let out = powershell(
         api,
-        &link::windows_ssh_provision_ps1_detect(short, &ack.linux_user_pub),
+        &link::windows_ssh_provision_ps1(short, &ack.linux_user_pub),
     )?;
     if !out.contains("paguro: SSH ready") {
         return Err("the SSH provisioning script stopped before the end".into());
@@ -269,7 +269,7 @@ mod tests {
             m.stdins
                 .borrow()
                 .iter()
-                .any(|i| i.contains("AllowUsers anna") && i.contains("ssh-ed25519 LLLL"))
+                .any(|i| i.contains("$User = 'anna'") && i.contains("ssh-ed25519 LLLL"))
         );
 
         let kh = join(&join(&m.program_data(), "paguro"), KNOWN_HOSTS_FILE);

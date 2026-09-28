@@ -784,8 +784,8 @@ side's SSH keys travel — never the network, never `known_hosts`/
 
 | Direction | Frame | Meaning |
 |---|---|---|
-| guest → host | `{"type":"ssh-keys","windows_user_pub":"ssh-ed25519 AAAA… paguro@windows","windows_host_pub":"ssh-ed25519 AAAA… "}` | Windows' own client key (for `authorized_keys` on the host, `from="169.254.244.2"`) and its sshd host key (for the host's `known_hosts`, pinned) |
-| host → guest | `{"type":"ssh-keys-ack","linux_user":"alice","linux_user_pub":"ssh-ed25519 AAAA… paguro@host","linux_host_pub":"ssh-ed25519 AAAA… "}` | the Linux account the link's sshd admits (its `AllowUsers`), the host's own client key (for Windows' `authorized_keys`/`administrators_authorized_keys`) and the host's sshd host key (for Windows' `known_hosts`, pinned) |
+| guest → host | `{"type":"ssh-keys","windows_user":"anna","windows_user_pub":"ssh-ed25519 AAAA… paguro@windows","windows_host_pub":"ssh-ed25519 AAAA… "}` | the Windows account Linux signs in as (short name; the host keeps it for `paguro shell windows`), Windows' own client key (for `authorized_keys` on the host, `from="169.254.244.2"`) and the host key of paguro's sshd there (for the host's `known_hosts`, pinned) |
+| host → guest | `{"type":"ssh-keys-ack","linux_user":"alice","linux_user_pub":"ssh-ed25519 AAAA… paguro@host","linux_host_pub":"ssh-ed25519 AAAA… "}` | the Linux account the link's sshd admits (its `AllowUsers`), the host's own client key (for the per-user `authorized_keys` of paguro's own sshd on Windows, `paguro-sshd`) and the host's sshd host key (for Windows' `known_hosts`, pinned) |
 | host → guest | `{"type":"ssh-keys-ack","error":"…"}` | the host could not take part (its link was never set up); the service retries |
 
 Built, both ends (`paguro_vm::session::handle_ssh_keys`,

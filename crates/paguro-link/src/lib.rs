@@ -98,106 +98,90 @@ try {{
     )
 }
 
-/// PowerShell run once in the guest: the Windows side of "Shells, the same
-/// command both ways" (DESIGN.md §5c). Idempotent, like
-/// [`windows_provision_ps1`]. `linux_pubkey` is the Linux side's public key
-/// line (`ssh-ed25519 AAAA... comment`); `admin` selects
-/// `administrators_authorized_keys` (OpenSSH-on-Windows always consults this
-/// one file for a member of Administrators, whichever admin account signs
-/// in — never that account's own `authorized_keys`) or the plain per-user
-/// file for a non-admin account. Nothing here is reachable except from the
-/// private link: `ListenAddress` and the firewall rule both scope to it.
-pub fn windows_ssh_provision_ps1(user: &str, linux_pubkey: &str, admin: bool) -> String {
-    ssh_script(
-        user,
-        linux_pubkey,
-        &format!("\"{}\"", akey_path(user, admin)),
-    )
-}
+/// paguro's own sshd on Windows (DESIGN.md §5c "Shells"): a second,
+/// independent instance, like the Linux side's. Windows' own `sshd` service,
+/// its `sshd_config` and the global `DefaultShell` are never touched, so a
+/// user's own OpenSSH Server keeps working natively, where the link address
+/// does not exist.
+pub const WINDOWS_SSHD_SERVICE: &str = "paguro-sshd";
 
-/// The same, deciding `administrators_authorized_keys` or the user's own
-/// file when it runs (membership of Administrators, S-1-5-32-544): the
-/// paguro service provisions for whoever signs in, without knowing in
-/// advance which kind of account that is.
-pub fn windows_ssh_provision_ps1_detect(user: &str, linux_pubkey: &str) -> String {
-    let who = ps_single_quoted(user);
-    ssh_script(
-        user,
-        linux_pubkey,
-        &format!(
-            "if ([bool](Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction SilentlyContinue | \
-             Where-Object {{ ($_.Name -split '\\\\')[-1] -eq {who} }})) {{ \"{}\" }} else {{ \"{}\" }}",
-            akey_path(user, true),
-            akey_path(user, false)
-        ),
-    )
-}
+/// PowerShell that sets `$ossh` to the folder holding `sshd.exe`: the
+/// Win32-OpenSSH MSI's (Program Files) or Windows' own capability's
+/// (System32), installing the capability only when neither exists.
+/// Installing it creates Windows' own `sshd` service as Manual; paguro
+/// leaves it that way.
+const FIND_OPENSSH: &str = r#"$ossh = @("$env:ProgramFiles\OpenSSH", "$env:SystemRoot\System32\OpenSSH") |
+    Where-Object { Test-Path "$_\sshd.exe" } | Select-Object -First 1
+if (-not $ossh) {
+    $cap = Get-WindowsCapability -Online -Name OpenSSH.Server*
+    Add-WindowsCapability -Online -Name $cap.Name | Out-Null
+    $ossh = "$env:SystemRoot\System32\OpenSSH"
+}"#;
 
-/// Where OpenSSH-on-Windows reads a user's authorized keys: one shared file
-/// for every member of Administrators, the profile's own file otherwise.
-/// Double-quoted when used: PowerShell expands `$env:` only there.
-fn akey_path(user: &str, admin: bool) -> String {
-    if admin {
-        r"$env:ProgramData\ssh\administrators_authorized_keys".to_string()
-    } else {
-        format!(r"$env:SystemDrive\Users\{user}\.ssh\authorized_keys")
-    }
+/// The Windows side of "Shells, the same command both ways" (DESIGN.md
+/// §5c), after the key exchange: paguro's own sshd ([`WINDOWS_SSHD_SERVICE`])
+/// with its own configuration, host key and per-user authorized-keys files
+/// under `%ProgramData%\paguro\link`, bound to the link address and allowed
+/// in by a firewall rule scoped to the link. The service is Manual: the
+/// paguro service (re)starts it on every VM boot, and natively nothing
+/// starts it. Admins and non-admins alike use the per-user file (Windows'
+/// `administrators_authorized_keys` special case lives only in Windows' own
+/// configuration). Idempotent. `user` must pass [`windows_user_ok`] (its
+/// short name is what Linux signs in as); `linux_pubkey` is the host's
+/// client key, one line.
+pub fn windows_ssh_provision_ps1(user: &str, linux_pubkey: &str) -> String {
+    let short = user.rsplit('\\').next().unwrap_or(user);
+    let who = ps_single_quoted(short);
+    let key = ps_single_quoted(linux_pubkey.trim());
+    format!(
+        r#"# paguro: the private link, SSH Windows side (DESIGN.md §5c). Generated.
+$ErrorActionPreference = 'Stop'
+$User = {who}
+$LinuxPubKey = {key}
+{FIND_OPENSSH}
+$link = "$env:ProgramData\paguro\link"
+$akdir = "$link\authorized_keys"
+New-Item -ItemType Directory -Force -Path $akdir | Out-Null
+$ak = Join-Path $akdir $User
+# Exactly the host's key for this user, from its one address, replaced
+# rather than appended.
+Set-Content -Path $ak -Value ('from="{HOST_ADDR}" ' + $LinuxPubKey) -Encoding ascii
+# sshd refuses an authorized-keys file others can write.
+icacls $ak /inheritance:r /grant '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+$conf = "$link\sshd_config"
+@(
+    '# paguro: the private link''s own sshd (DESIGN.md §5c). Generated.',
+    '# Windows'' own sshd and its configuration are untouched.',
+    'ListenAddress {GUEST_ADDR}',
+    'Port {SSH_PORT}',
+    'HostKey __PROGRAMDATA__/paguro/link/ssh_host_ed25519_key',
+    'AuthorizedKeysFile __PROGRAMDATA__/paguro/link/authorized_keys/%u',
+    "AllowUsers $User",
+    'PubkeyAuthentication yes',
+    'PasswordAuthentication no',
+    'KbdInteractiveAuthentication no',
+    'Subsystem sftp sftp-server.exe'
+) | Set-Content -Path $conf -Encoding ascii
+$bin = "`"$ossh\sshd.exe`" -f `"$conf`""
+if (Get-Service -Name '{WINDOWS_SSHD_SERVICE}' -ErrorAction SilentlyContinue) {{
+    sc.exe config {WINDOWS_SSHD_SERVICE} binPath= $bin start= demand | Out-Null
+}} else {{
+    New-Service -Name '{WINDOWS_SSHD_SERVICE}' -BinaryPathName $bin -StartupType Manual `
+        -DisplayName 'paguro: SSH on the private link' | Out-Null
+}}
+# A restart, so a changed configuration takes effect.
+Restart-Service -Name '{WINDOWS_SSHD_SERVICE}'
+Get-NetFirewallRule -Name '{WINDOWS_SSH_FIREWALL_RULE}' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+New-NetFirewallRule -Name '{WINDOWS_SSH_FIREWALL_RULE}' -DisplayName 'paguro: SSH on the private link' -Direction Inbound `
+    -Protocol TCP -LocalPort {SSH_PORT} -InterfaceAlias '{IFNAME}' -RemoteAddress '{HOST_ADDR}' -Action Allow | Out-Null
+'paguro: SSH ready on {GUEST_ADDR}:{SSH_PORT}'
+"#
+    )
 }
 
 /// A PowerShell single-quoted string literal (`'` doubled).
 pub fn ps_single_quoted(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
-}
-
-fn ssh_script(user: &str, linux_pubkey: &str, akey_expr: &str) -> String {
-    // Not a secret: embedded like the MAC, not passed as a parameter.
-    // PowerShell's single-quoted strings escape `'` by doubling it.
-    let linux_pubkey = linux_pubkey.trim().replace('\'', "''");
-    format!(
-        r#"# paguro: the private link, SSH Windows side (DESIGN.md §5c). Generated.
-$ErrorActionPreference = 'Stop'
-$LinuxPubKey = '{linux_pubkey}'
-$cap = Get-WindowsCapability -Online -Name OpenSSH.Server*
-if ($cap.State -ne 'Installed') {{ Add-WindowsCapability -Online -Name $cap.Name | Out-Null }}
-Set-Service -Name sshd -StartupType Automatic
-Start-Service sshd -ErrorAction SilentlyContinue
-$conf = "$env:ProgramData\ssh\sshd_config"
-$body = Get-Content $conf -Raw -ErrorAction SilentlyContinue
-if (-not $body) {{ $body = '' }}
-$lines = @(
-    'ListenAddress {GUEST_ADDR}',
-    'Port {SSH_PORT}',
-    'PubkeyAuthentication yes',
-    'PasswordAuthentication no',
-    'KbdInteractiveAuthentication no',
-    "AllowUsers {user}"
-)
-foreach ($l in $lines) {{
-    $key = ($l -split '\s+')[0]
-    $body = ($body -split "`n" | Where-Object {{ $_ -notmatch "^\s*$key\s" }}) -join "`n"
-    $body += "`n$l"
-}}
-Set-Content -Path $conf -Value $body -Encoding ascii
-$akey = {akey_expr}
-New-Item -ItemType Directory -Force -Path (Split-Path $akey) | Out-Null
-if (-not (Select-String -Path $akey -Pattern ([regex]::Escape($LinuxPubKey)) -ErrorAction SilentlyContinue)) {{
-    Add-Content -Path $akey -Value $LinuxPubKey
-}}
-# OpenSSH refuses a world- or group-writable authorized-keys file.
-icacls $akey /inheritance:r | Out-Null
-icacls $akey /grant 'SYSTEM:F' 'Administrators:F' | Out-Null
-Set-Service -Name sshd -Status Running
-# Default shell: PowerShell, not cmd.exe.
-$pwsh = (Get-Command powershell.exe).Source
-New-Item -Path 'HKLM:\SOFTWARE\OpenSSH' -Force | Out-Null
-Set-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value $pwsh
-# In on this adapter only, key-only (PasswordAuthentication no above).
-Get-NetFirewallRule -Name '{WINDOWS_SSH_FIREWALL_RULE}' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-New-NetFirewallRule -Name '{WINDOWS_SSH_FIREWALL_RULE}' -DisplayName 'paguro: SSH on the private link' -Direction Inbound `
-    -Protocol TCP -LocalPort {SSH_PORT} -InterfaceAlias 'paguro0' -RemoteAddress '{HOST_ADDR}' -Action Allow | Out-Null
-'paguro: SSH ready on {GUEST_ADDR}:{SSH_PORT}'
-"#
-    )
 }
 
 /// Outbound pinning (DESIGN.md §5c "The control channel, and keeping the
@@ -235,7 +219,8 @@ if ($others.Count -gt 0) {{
 /// One `authorized_keys` line for the host's own sshd (DESIGN.md §5c
 /// "Shells, the same command both ways"): the Windows side's public key,
 /// restricted to its one address — the mirror of the `from=` restriction
-/// on Windows' own `authorized_keys`/`administrators_authorized_keys`.
+/// in the per-user file of paguro's sshd on Windows
+/// ([`windows_ssh_provision_ps1`]).
 pub fn authorized_keys_line(windows_pubkey: &str) -> String {
     format!("from=\"{GUEST_ADDR}\" {}", windows_pubkey.trim())
 }
@@ -275,9 +260,9 @@ pub fn windows_user_ok(s: &str) -> bool {
 }
 
 /// The service's SSH preparation for one Windows user, before the key
-/// exchange (DESIGN.md §5c "Shells"): OpenSSH Server installed and started
-/// once (its first start generates the host keys), and the user's link key
-/// in their own profile, readable by them and SYSTEM only. Prints one line,
+/// exchange (DESIGN.md §5c "Shells"): `sshd.exe` present, paguro's own host
+/// key (SYSTEM and Administrators only), and the user's link key in their
+/// own profile, readable by them and SYSTEM only. Prints one line,
 /// `PAGURO-SSH {json}` ([`parse_ssh_prepare`]), with both public keys and
 /// the private key's path. Idempotent. `user` must pass
 /// [`windows_user_ok`].
@@ -287,23 +272,29 @@ pub fn windows_ssh_prepare_ps1(user: &str) -> String {
         r#"# paguro: SSH, the service's preparation for one user (DESIGN.md §5c). Generated.
 $ErrorActionPreference = 'Stop'
 $User = {who}
-$cap = Get-WindowsCapability -Online -Name OpenSSH.Server*
-if ($cap.State -ne 'Installed') {{ Add-WindowsCapability -Online -Name $cap.Name | Out-Null }}
-Start-Service sshd
-$hostPub = "$env:ProgramData\ssh\ssh_host_ed25519_key.pub"
-for ($i = 0; -not (Test-Path $hostPub) -and $i -lt 50; $i++) {{ Start-Sleep -Milliseconds 200 }}
+{FIND_OPENSSH}
+$keygen = "$ossh\ssh-keygen.exe"
+# paguro's own host key (its sshd is a separate instance; Windows' own
+# host keys are not used or touched).
+$link = "$env:ProgramData\paguro\link"
+New-Item -ItemType Directory -Force -Path $link | Out-Null
+$hk = "$link\ssh_host_ed25519_key"
+if (-not (Test-Path $hk)) {{
+    & $keygen -q -t ed25519 -N '""' -C "paguro-link@$env:COMPUTERNAME" -f $hk | Out-Null
+}}
+icacls $hk /inheritance:r /grant '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
 $sid = (New-Object System.Security.Principal.NTAccount($User)).Translate([System.Security.Principal.SecurityIdentifier]).Value
-$profile = (Get-CimInstance Win32_UserProfile | Where-Object SID -eq $sid).LocalPath
-if (-not $profile) {{ throw "paguro: $User has no profile yet" }}
-$dir = Join-Path $profile '.ssh'
+$prof = (Get-CimInstance Win32_UserProfile | Where-Object SID -eq $sid).LocalPath
+if (-not $prof) {{ throw "paguro: $User has no profile yet" }}
+$dir = Join-Path $prof '.ssh'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $key = Join-Path $dir 'paguro_link_ed25519'
 if (-not (Test-Path $key)) {{
-    & "$env:SystemRoot\System32\OpenSSH\ssh-keygen.exe" -q -t ed25519 -N '""' -C "paguro@$env:COMPUTERNAME" -f $key | Out-Null
+    & $keygen -q -t ed25519 -N '""' -C "paguro@$env:COMPUTERNAME" -f $key | Out-Null
 }}
 # OpenSSH refuses a private key others can read.
 icacls $key /inheritance:r /grant "*${{sid}}:F" '*S-1-5-18:F' | Out-Null
-'PAGURO-SSH ' + (@{{ user_pub = (Get-Content "$key.pub" -Raw).Trim(); host_pub = (Get-Content $hostPub -Raw).Trim(); key = $key }} | ConvertTo-Json -Compress)
+'PAGURO-SSH ' + (@{{ user_pub = (Get-Content "$key.pub" -Raw).Trim(); host_pub = (Get-Content "$hk.pub" -Raw).Trim(); key = $key }} | ConvertTo-Json -Compress)
 "#
     )
 }
@@ -438,9 +429,12 @@ pub fn provision_invocation(c: &LinkConfig) -> String {
 }
 
 /// guest → host: Windows' client key and its sshd host key.
-pub fn ssh_keys_frame(windows_user_pub: &str, windows_host_pub: &str) -> Value {
+/// guest → host: the Windows account Linux signs in as (short name, per
+/// [`windows_user_ok`]), its link key and the link sshd's host key.
+pub fn ssh_keys_frame(windows_user: &str, windows_user_pub: &str, windows_host_pub: &str) -> Value {
     json!({
         "type": "ssh-keys",
+        "windows_user": windows_user,
         "windows_user_pub": windows_user_pub,
         "windows_host_pub": windows_host_pub,
     })
@@ -542,37 +536,45 @@ mod tests {
     }
 
     #[test]
-    fn ssh_windows_side_admin() {
+    fn ssh_windows_side() {
         let s = windows_ssh_provision_ps1(
-            "anna",
+            r"DESKTOP-1\anna",
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI abc paguro@host",
-            true,
         );
         assert!(s.starts_with("# paguro"));
-        assert!(s.contains("ListenAddress 169.254.244.2"));
-        assert!(s.contains("Port 22"));
-        assert!(s.contains("PasswordAuthentication no"));
-        assert!(s.contains("KbdInteractiveAuthentication no"));
-        assert!(s.contains("AllowUsers anna"));
-        assert!(s.contains(r"administrators_authorized_keys"));
-        assert!(!s.contains(r"Users\anna\.ssh\authorized_keys"));
-        assert!(s.contains("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI abc paguro@host"));
+        assert!(s.contains("$User = 'anna'"));
+        assert!(s.contains("'ListenAddress 169.254.244.2'"));
+        assert!(s.contains("'Port 22'"));
+        assert!(s.contains("'PasswordAuthentication no'"));
+        assert!(s.contains("'KbdInteractiveAuthentication no'"));
+        assert!(s.contains(r#""AllowUsers $User""#));
+        assert!(s.contains("AuthorizedKeysFile __PROGRAMDATA__/paguro/link/authorized_keys/%u"));
+        assert!(
+            s.contains("$LinuxPubKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI abc paguro@host'")
+        );
         assert!(s.contains("-InterfaceAlias 'paguro0' -RemoteAddress '169.254.244.1'"));
         assert!(s.contains("-LocalPort 22"));
-        assert!(s.contains("DefaultShell"));
-        // No secret handling needed: the key is public, so it may appear
-        // as literal text (unlike the SMB script's two parameters).
+        assert!(s.contains(r#"('from="169.254.244.1" ' + $LinuxPubKey)"#));
+        // A separate instance: Windows' own sshd, its configuration and
+        // DefaultShell are left alone.
+        assert!(s.contains("New-Service -Name 'paguro-sshd'"));
+        assert!(s.contains("-StartupType Manual"));
+        assert!(!s.contains("DefaultShell"));
+        assert!(!s.contains(r"ssh\sshd_config"));
+        assert!(!s.contains("administrators_authorized_keys\""));
+        assert!(!s.contains("Set-Service -Name sshd"));
     }
 
     #[test]
-    fn ssh_windows_side_non_admin_and_quoting() {
-        let s = windows_ssh_provision_ps1("bob", "ssh-ed25519 AAAA it's-fine bob@x", false);
-        assert!(s.contains(r"Users\bob\.ssh\authorized_keys"));
-        assert!(!s.contains("administrators_authorized_keys"));
+    fn ssh_windows_side_quoting() {
+        let s = windows_ssh_provision_ps1("bob", "ssh-ed25519 AAAA it's-fine bob@x");
         // A literal single quote in the key is escaped for PowerShell, not
         // left to break out of the quoted string.
         assert!(s.contains("it''s-fine"));
         assert!(!s.contains("$LinuxPubKey = 'ssh-ed25519 AAAA it's-fine"));
+        // Paths PowerShell must expand are double-quoted.
+        assert!(s.contains(r#"$link = "$env:ProgramData\paguro\link""#));
+        assert!(!s.contains("'$env:"));
     }
 
     #[test]
@@ -683,18 +685,6 @@ mod tests {
             parse_ssh_keys_ack(&json!({"type": "ssh-keys-ack", "error": "no state"})),
             Some(Err("no state".into()))
         );
-    }
-
-    #[test]
-    fn ssh_script_expands_its_paths() {
-        // Double quotes: PowerShell expands $env: only there.
-        let s = windows_ssh_provision_ps1("anna", "ssh-ed25519 AAAA", true);
-        assert!(s.contains(r#"$akey = "$env:ProgramData\ssh\administrators_authorized_keys""#));
-        assert!(!s.contains("'$env:"));
-        let d = windows_ssh_provision_ps1_detect("o'neil", "ssh-ed25519 AAAA");
-        assert!(d.contains("Get-LocalGroupMember -SID 'S-1-5-32-544'"));
-        assert!(d.contains("-eq 'o''neil'"));
-        assert!(d.contains(r#"{ "$env:ProgramData\ssh\administrators_authorized_keys" } else { "$env:SystemDrive\Users\o'neil\.ssh\authorized_keys" }"#));
     }
 
     #[test]

@@ -189,7 +189,10 @@ pub fn enter_container<B: ImageBackend, L: ContainerLauncher>(
 /// delivers Windows' host key ahead of time (INTERFACES.md §11.3's
 /// "ssh-keys" frame, `crate::link::known_hosts_path`), so
 /// `StrictHostKeyChecking` can be `yes` from the very first connection.
-pub fn windows_ssh_argv(key_path: &Path, known_hosts: &Path) -> Vec<String> {
+///
+/// paguro's sshd on Windows leaves OpenSSH's default shell (`cmd`) alone
+/// (DESIGN.md §5c "Shells"), so the session asks for PowerShell itself.
+pub fn windows_ssh_argv(key_path: &Path, known_hosts: &Path, user: &str) -> Vec<String> {
     vec![
         "ssh".into(),
         "-i".into(),
@@ -198,7 +201,12 @@ pub fn windows_ssh_argv(key_path: &Path, known_hosts: &Path) -> Vec<String> {
         "StrictHostKeyChecking=yes".into(),
         "-o".into(),
         format!("UserKnownHostsFile={}", known_hosts.display()),
+        "-l".into(),
+        user.into(),
+        "-t".into(),
         net::GUEST_ADDR.into(),
+        "powershell.exe".into(),
+        "-NoLogo".into(),
     ]
 }
 
@@ -282,6 +290,12 @@ mod tests {
         let a = windows_ssh_argv(
             Path::new("/etc/paguro/link/id_ed25519"),
             Path::new("/etc/paguro/link/known_hosts"),
+            "anna",
+        );
+        assert!(a.windows(2).any(|w| w == ["-l", "anna"]));
+        assert_eq!(
+            a[a.len() - 3..],
+            ["169.254.244.2", "powershell.exe", "-NoLogo"]
         );
         assert_eq!(a[0], "ssh");
         assert!(a.contains(&"169.254.244.2".to_string()));

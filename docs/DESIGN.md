@@ -3209,9 +3209,15 @@ claimed by the host and refused to Windows at the block layer (§4.3), so
 - **Windows VM ↔ Linux host: SSH over the private link, both directions.**
   This is standard tooling that users already have: PowerShell over OpenSSH,
   `scp`, and editors' remote modes.
-  - **Linux → Windows:** Windows' OpenSSH server, `ListenAddress
-    169.254.244.2` only, firewall-scoped to the private adapter, key-only.
-    The default shell is PowerShell.
+  - **Linux → Windows:** paguro's own instance of Windows' OpenSSH server
+    (service `paguro-sshd`, its own `sshd_config`, host key and per-user
+    `authorized_keys` under `%ProgramData%\paguro\link`), `ListenAddress
+    169.254.244.2` only, firewall-scoped to the private adapter, key-only,
+    Manual start: the paguro service starts it on each VM boot, and natively
+    nothing does. Windows' own `sshd` service, its configuration and the
+    global `DefaultShell` are never touched, so a user's own OpenSSH Server
+    works as before. The shell is OpenSSH's default (`cmd`); `paguro shell
+    windows` asks for PowerShell explicitly.
   - **Windows → Linux:** the listener must exist only on the link, but an
     `sshd` *running* in netns `paguro` would start shells cut off from the
     network. So a **systemd socket unit with
@@ -3242,8 +3248,8 @@ none of the following (the SMBIOS marker `paguro-vm/1` is absent, §4.4).
 2. provisions the link: the static address on the private adapter, the SMB
    share and account, the firewall scoping, and the `L:` mapping, with the
    per-installation secrets the host sends over the agent port;
-3. provisions SSH for the signed-in user: OpenSSH server bound to the link,
-   the host's public key in `authorized_keys`, and the user's own key for
+3. provisions SSH for the signed-in user: `paguro-sshd` bound to the link,
+   the host's public key in that user's `authorized_keys` there, and the user's own key for
    reaching Linux, host keys pinned both ways. *(2 and 3 are built and
    unit-tested, `paguro_win::vmlink`; the scripts are `paguro-link`'s, shared
    with the Linux side. Not yet run in the VM rig.)*

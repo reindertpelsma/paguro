@@ -707,7 +707,20 @@ pub fn handle_ssh_keys(state_dir: &Path, req: &Value) -> R<Value> {
     if !paguro_link::pubkey_ok(user_pub) || !paguro_link::pubkey_ok(host_pub) {
         return Err("ssh-keys: a key is not one ssh-… line".into());
     }
+    let windows_user = req
+        .get("windows_user")
+        .and_then(Value::as_str)
+        .ok_or("ssh-keys: no windows_user")?;
+    // Short names only: it becomes `ssh -l`'s argument and a file's content.
+    if windows_user.contains('\\')
+        || windows_user.starts_with('-')
+        || !paguro_link::windows_user_ok(windows_user)
+    {
+        return Err("ssh-keys: windows_user is not a usable account name".into());
+    }
     let linux_user = link_user(state_dir)?;
+    let wu = state_dir.join("windows_user");
+    fs::write(&wu, format!("{windows_user}\n")).map_err(|e| format!("{}: {e}", wu.display()))?;
 
     let akey = state_dir.join("authorized_keys");
     let line = net::authorized_keys_line(user_pub);
@@ -1406,6 +1419,7 @@ mod tests {
     #[test]
     fn ssh_keys_frames_carry_both_keys() {
         let f = ssh_keys_frame(
+            "anna",
             "ssh-ed25519 AAAA windows-user",
             "ssh-ed25519 AAAA windows-host",
         );
@@ -1434,11 +1448,19 @@ mod tests {
         .unwrap();
         fs::write(d.join("sshd_config"), "Port 22\nAllowUsers alice\n").unwrap();
 
-        let req = ssh_keys_frame("ssh-ed25519 AAAA win-user", "ssh-ed25519 AAAA win-host");
+        let req = ssh_keys_frame(
+            "anna",
+            "ssh-ed25519 AAAA win-user",
+            "ssh-ed25519 AAAA win-host",
+        );
         let ack = handle_ssh_keys(&d, &req).unwrap();
         assert_eq!(ack["linux_user_pub"], "ssh-ed25519 AAAA linux-user");
         assert_eq!(ack["linux_host_pub"], "ssh-ed25519 AAAA linux-host");
         assert_eq!(ack["linux_user"], "alice");
+        assert_eq!(
+            fs::read_to_string(d.join("windows_user")).unwrap(),
+            "anna\n"
+        );
 
         let akey = fs::read_to_string(d.join("authorized_keys")).unwrap();
         assert_eq!(akey, "from=\"169.254.244.2\" ssh-ed25519 AAAA win-user\n");
@@ -1451,8 +1473,16 @@ mod tests {
 
         assert!(handle_ssh_keys(&d, &json!({"type": "ssh-keys"})).is_err());
         // A key with a newline would add an unrestricted line: refused.
-        let evil = ssh_keys_frame("ssh-ed25519 AAAA x\nssh-ed25519 BBBB", "ssh-ed25519 AAAA h");
+        let evil = ssh_keys_frame(
+            "anna",
+            "ssh-ed25519 AAAA x\nssh-ed25519 BBBB",
+            "ssh-ed25519 AAAA h",
+        );
         assert!(handle_ssh_keys(&d, &evil).is_err());
+        for bad in [r"DOM\anna", "-oProxyCommand=x", "-x", "a b", ""] {
+            let f = ssh_keys_frame(bad, "ssh-ed25519 AAAA w", "ssh-ed25519 AAAA h");
+            assert!(handle_ssh_keys(&d, &f).is_err(), "{bad}");
+        }
         assert_eq!(fs::read_to_string(d.join("authorized_keys")).unwrap(), akey);
         let _ = fs::remove_dir_all(&d);
     }

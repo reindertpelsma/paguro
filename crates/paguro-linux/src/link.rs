@@ -71,6 +71,11 @@ pub fn sshd_config_path(state_dir: &Path) -> PathBuf {
 pub fn known_hosts_path(state_dir: &Path) -> PathBuf {
     state_dir.join("known_hosts")
 }
+/// The Windows account `paguro shell windows` signs in as: written by the
+/// same handshake (the "ssh-keys" frame's `windows_user`).
+pub fn windows_user_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("windows_user")
+}
 
 /// The socket: link-only by construction (`NetworkNamespacePath`), one
 /// connection per instance.

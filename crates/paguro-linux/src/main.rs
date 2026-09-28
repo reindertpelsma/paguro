@@ -372,8 +372,14 @@ fn run_shell(target: &str, key_override: Option<PathBuf>) -> ! {
         shell::Plan::Windows => {
             let key = key_override
                 .unwrap_or_else(|| link::client_key_path(Path::new(link::DEFAULT_STATE_DIR)));
-            let known_hosts = link::known_hosts_path(Path::new(link::DEFAULT_STATE_DIR));
-            let argv = shell::windows_ssh_argv(&key, &known_hosts);
+            let state = Path::new(link::DEFAULT_STATE_DIR);
+            let known_hosts = link::known_hosts_path(state);
+            let user = std::fs::read_to_string(link::windows_user_path(state))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| {
+                    fail("the Windows side has not provisioned SSH yet (no windows_user)")
+                });
+            let argv = shell::windows_ssh_argv(&key, &known_hosts, &user);
             shell::run_in_netns(&argv).unwrap_or_else(|e| fail(&e))
         }
         shell::Plan::LocalShell => fail(&shell::exec_local_shell()),
