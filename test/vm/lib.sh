@@ -52,6 +52,9 @@ l2_root() {
     vm_bin "$(command -v ntfsls)" bin/ntfsls
     vm_bin "$(command -v ntfscat)" bin/ntfscat
     vm_bin "$(command -v sha256sum)" bin/sha256sum.gnu
+    # SSH over the link, both directions (split-e2e.sh).
+    [ -x /usr/sbin/sshd ] && vm_bin /usr/sbin/sshd usr/sbin/sshd
+    command -v ssh >/dev/null && vm_bin "$(command -v ssh)" bin/ssh
     # Samba for L: (DESIGN.md §5c), when an extracted `samba` package is at
     # hand (apt-get download samba; dpkg -x ... $PAGURO_SAMBA_ROOT): smbd
     # from it, its libraries from there and the host (samba-libs).
@@ -86,8 +89,9 @@ l2_root() {
     vm_init_head > "$r/init"
     cat "$top/test/vm/l2-init.body" >> "$r/init"
     chmod +x "$r/init"
-    printf 'root:x:0:0::/root:/bin/sh\npaguro:x:1000:1000::/mnt/l:/bin/false\nnobody:x:65534:65534::/nonexistent:/bin/false\n' > "$r/etc/passwd"
+    printf 'root:x:0:0::/root:/bin/sh\npaguro:x:1000:1000::/mnt/l:/bin/false\nsshd:x:74:65534::/run/sshd:/bin/false\nnobody:x:65534:65534::/nonexistent:/bin/false\n' > "$r/etc/passwd"
     printf 'root:x:0:\npaguro:x:1000:\nnogroup:x:65534:\n' > "$r/etc/group"
+    mkdir -p "$r/root"
     (cd "$r" && find . | cpio -o -H newc 2>/dev/null | gzip -1) > "$r.cpio.gz"
 }
 

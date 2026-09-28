@@ -11,7 +11,7 @@
 //!                  [--nat-model M] [--net user|tap] [--nat-hostfwd RULE]...  (user mode only)
 //!                  [--lan-ifname IF] [--lan-subnet CIDR] [--lan-wan IF]      (tap mode; DESIGN.md §5c)
 //!                  [--dmz] [--pin-port PORT:linux|windows]...
-//!                  [--hostonly tap:IF|socket:PATH|none]
+//!                  [--hostonly tap:IF|socket:PATH|none] [--link-state DIR]
 //!                  [--vsock-cid N | --no-vsock] [--record-writes FILE]
 //!                  [--ovmf-code F] [--ovmf-vars F] [--system-partition NAME]
 //!                  [--vnc ADDR] [--host-cgroup DIR] [--driver-timeout S]
@@ -589,6 +589,7 @@ fn launch(mut a: Args) {
         hv_enlightenments: true,
         extra: Vec::new(),
         tripwire: None,
+        link_state: net::LINK_STATE_DIR.into(),
     };
     let mut tripwire_set = false;
     let mut bus_set = false;
@@ -645,6 +646,7 @@ fn launch(mut a: Args) {
                 };
             }
             "--hostonly-model" => o.hostonly_model = a.val(&k),
+            "--link-state" => o.link_state = a.val(&k).into(),
             "--vsock-cid" => o.vsock_cid = Some(a.num(&k)),
             "--no-vsock" => o.vsock_cid = None,
             "--record-writes" => o.record_writes = Some(PathBuf::from(a.val(&k))),

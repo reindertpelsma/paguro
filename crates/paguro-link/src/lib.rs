@@ -152,8 +152,8 @@ $conf = "$link\sshd_config"
 @(
     '# paguro: the private link''s own sshd (DESIGN.md §5c). Generated.',
     '# Windows'' own sshd and its configuration are untouched.',
-    'ListenAddress {GUEST_ADDR}',
     'Port {SSH_PORT}',
+    'ListenAddress {GUEST_ADDR}',
     'HostKey __PROGRAMDATA__/paguro/link/ssh_host_ed25519_key',
     'AuthorizedKeysFile __PROGRAMDATA__/paguro/link/authorized_keys/%u',
     "AllowUsers $User",

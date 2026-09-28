@@ -537,6 +537,10 @@ pub struct LaunchOpts {
     /// View B's tripwire (DESIGN.md §4.4 "Until the driver arms"): set on
     /// every QEMU before it runs, cleared when the driver arms.
     pub tripwire: Option<Tripwire>,
+    /// The link's state (secrets, keys, `sshd_config`) the agent-port
+    /// handshakes read and fill in: `net::LINK_STATE_DIR`, or the split
+    /// test's shared directory.
+    pub link_state: PathBuf,
 }
 
 /// Who sets and clears the tripwire.
@@ -1133,7 +1137,7 @@ fn supervise(
                 for f in agent_frames(&mut abuf) {
                     log(&format!("agent: {f}"));
                     if paguro_link::is_link_request(&f) {
-                        let reply = handle_link_request(Path::new(net::LINK_STATE_DIR));
+                        let reply = handle_link_request(&o.link_state);
                         match paguro_link::parse_link(&reply) {
                             Some(Ok(_)) => log("link: settings sent to the service"),
                             _ => log(&format!("link: {}", field(&reply, "error"))),
@@ -1151,7 +1155,7 @@ fn supervise(
                         continue;
                     }
                     if is_ssh_keys(&f) {
-                        let ack = match handle_ssh_keys(Path::new(net::LINK_STATE_DIR), &f) {
+                        let ack = match handle_ssh_keys(&o.link_state, &f) {
                             Ok(ack) => {
                                 log("ssh-keys: Windows' keys folded in, replied with the host's");
                                 ack
