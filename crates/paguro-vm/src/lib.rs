@@ -24,3 +24,4 @@ pub mod qmp;
 pub mod rdp;
 pub mod regf;
 pub mod session;
+pub mod users;

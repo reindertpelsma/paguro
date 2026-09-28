@@ -325,6 +325,121 @@ impl IdMap {
     }
 }
 
+// ---- Agent-port frames (INTERFACES.md §11.3) -------------------------------
+
+/// A Windows account name as a frame may carry it: 1-256 characters, no
+/// control characters (it only ever reaches [`derive_name`] and the map).
+pub fn windows_name_ok(s: &str) -> bool {
+    !s.is_empty() && s.chars().count() <= 256 && !s.chars().any(char::is_control)
+}
+
+/// guest → host: Windows' enabled local accounts.
+pub fn accounts_frame(accounts: &[WindowsAccount]) -> Value {
+    json!({
+        "type": "accounts",
+        "accounts": accounts.iter().map(|a| json!({"sid": a.sid, "name": a.name})).collect::<Vec<_>>(),
+    })
+}
+
+/// `None`: not an `accounts` frame. Entries that are not people
+/// ([`mapped_sid`]) are dropped; a malformed one refuses the frame.
+pub fn parse_accounts(v: &Value) -> Option<Result<Vec<WindowsAccount>, String>> {
+    if crate::kind(v) != Some("accounts") {
+        return None;
+    }
+    let Some(list) = v.get("accounts").and_then(Value::as_array) else {
+        return Some(Err("accounts: no list".into()));
+    };
+    let mut out = Vec::new();
+    for a in list {
+        let sid = a.get("sid").and_then(Value::as_str).unwrap_or("");
+        let name = a.get("name").and_then(Value::as_str).unwrap_or("");
+        if sid.len() > 184 || !sid.starts_with("S-1-") || !windows_name_ok(name) {
+            return Some(Err("accounts: a malformed entry".into()));
+        }
+        if mapped_sid(sid) {
+            out.push(WindowsAccount {
+                sid: sid.into(),
+                name: name.into(),
+            });
+        }
+    }
+    Some(Ok(out))
+}
+
+/// host → guest: who each Windows account is on Linux (locked ones left
+/// out), or the host's error.
+pub fn accounts_ack_frame(map: &IdMap) -> Value {
+    json!({
+        "type": "accounts-ack",
+        "users": map.entries.iter().filter(|e| !e.locked).map(|e| json!({
+            "sid": e.sid, "uid": e.uid, "linux_user": e.linux_user,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// One mapped account as the host reports it: (SID, uid, Linux user).
+pub type Mapped = (String, u32, String);
+
+/// `None`: not an `accounts-ack`. `Some(Ok)`: (sid, uid, linux_user) for
+/// each mapped account, every field checked.
+pub fn parse_accounts_ack(v: &Value) -> Option<Result<Vec<Mapped>, String>> {
+    if crate::kind(v) != Some("accounts-ack") {
+        return None;
+    }
+    if let Some(e) = v.get("error").and_then(Value::as_str) {
+        return Some(Err(e.to_string()));
+    }
+    let Some(list) = v.get("users").and_then(Value::as_array) else {
+        return Some(Err("accounts-ack: no users".into()));
+    };
+    let mut out = Vec::new();
+    for u in list {
+        let sid = u.get("sid").and_then(Value::as_str).unwrap_or("");
+        let user = u.get("linux_user").and_then(Value::as_str).unwrap_or("");
+        let uid = u
+            .get("uid")
+            .and_then(Value::as_u64)
+            .and_then(|x| u32::try_from(x).ok())
+            .unwrap_or(0);
+        if !mapped_sid(sid) || !linux_name_ok(user) || uid < FIRST_UID {
+            return Some(Err("accounts-ack: a malformed entry".into()));
+        }
+        out.push((sid.to_string(), uid, user.to_string()));
+    }
+    Some(Ok(out))
+}
+
+/// The service's account listing (DESIGN.md §4.7): Windows' **enabled**
+/// local accounts (Microsoft accounts are local accounts too), one line
+/// `PAGURO-ACCOUNTS [json]` ([`parse_accounts_listing`]). A disabled
+/// account is absent, so its Linux user is locked, like a deleted one.
+/// Domain accounts are out of scope (personal devices, §8).
+pub fn windows_accounts_ps1() -> String {
+    r#"# paguro: the identity mapping's account list (DESIGN.md §4.7). Generated.
+$ErrorActionPreference = 'Stop'
+$a = @(Get-LocalUser | Where-Object Enabled | ForEach-Object { @{ sid = $_.SID.Value; name = $_.Name } })
+'PAGURO-ACCOUNTS ' + (ConvertTo-Json -Compress -Depth 3 -InputObject $a)
+"#
+    .to_string()
+}
+
+/// What [`windows_accounts_ps1`] printed, as an `accounts` frame's list.
+pub fn parse_accounts_listing(stdout: &str) -> Option<Result<Vec<WindowsAccount>, String>> {
+    let j = stdout
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("PAGURO-ACCOUNTS "))?;
+    let v: Value = serde_json::from_str(j).ok()?;
+    // ConvertTo-Json of a one-element array still gives an array with
+    // -InputObject; an object is accepted all the same.
+    let list = match v {
+        Value::Array(a) => a,
+        o @ Value::Object(_) => vec![o],
+        _ => return None,
+    };
+    parse_accounts(&json!({"type": "accounts", "accounts": list}))
+}
+
 #[cfg(test)]
 #[allow(clippy::indexing_slicing)]
 mod tests {
@@ -523,5 +638,44 @@ mod tests {
         v["users"][0]["sid"] = json!("S-1-5-18");
         assert!(IdMap::from_json(&v).is_err());
         assert!(IdMap::from_json(&json!({"version": 2, "users": []})).is_err());
+    }
+
+    #[test]
+    fn frames() {
+        let list = vec![acct(1001, "Anna"), acct(500, "Administrator")];
+        let f = accounts_frame(&list);
+        assert_eq!(parse_accounts(&f), Some(Ok(vec![acct(1001, "Anna")])));
+        assert_eq!(parse_accounts(&json!({"type": "ssh-keys"})), None);
+        let bad = accounts_frame(&[acct(1001, "a\nb")]);
+        assert!(matches!(parse_accounts(&bad), Some(Err(_))));
+        let bad = json!({"type": "accounts", "accounts": [{"sid": "x", "name": "a"}]});
+        assert!(matches!(parse_accounts(&bad), Some(Err(_))));
+
+        let mut m = IdMap::default();
+        m.sync(&[acct(1001, "Anna"), acct(1002, "Bob")], &[], &[])
+            .unwrap();
+        m.entries[1].locked = true;
+        let ack = parse_accounts_ack(&accounts_ack_frame(&m))
+            .unwrap()
+            .unwrap();
+        assert_eq!(ack, vec![(format!("{M}-1001"), 5000, "anna".to_string())]);
+        assert_eq!(
+            parse_accounts_ack(&json!({"type": "accounts-ack", "error": "no"})),
+            Some(Err("no".into()))
+        );
+
+        let out = format!(
+            "junk\r\nPAGURO-ACCOUNTS [{{\"sid\":\"{M}-1001\",\"name\":\"Anna\"}},{{\"sid\":\"{M}-501\",\"name\":\"Guest\"}}]\r\n"
+        );
+        assert_eq!(
+            parse_accounts_listing(&out),
+            Some(Ok(vec![acct(1001, "Anna")]))
+        );
+        let one = format!("PAGURO-ACCOUNTS {{\"sid\":\"{M}-1001\",\"name\":\"Anna\"}}");
+        assert_eq!(
+            parse_accounts_listing(&one),
+            Some(Ok(vec![acct(1001, "Anna")]))
+        );
+        assert!(windows_accounts_ps1().contains("Where-Object Enabled"));
     }
 }

@@ -275,6 +275,11 @@ if [ "$SERVICE" = 1 ]; then
     expect "the host pinned paguro-sshd's host key" "$(cat "$LINK/known_hosts" 2>&1)" '^169\.254\.244\.2 ssh-ed25519 '
     expect "... and authorized the Windows user's key, from the link only" "$(cat "$LINK/authorized_keys" 2>&1)" '^from="169\.254\.244\.2" ssh-ed25519 '
     expect "the Windows account it signs in as" "$(cat "$LINK/windows_user" 2>&1)" '^paguro$'
+    # The identity mapping (§4.7): Windows' accounts become Linux users
+    # (on this rig's host, where the launcher runs), marked as paguro's.
+    for _ in $(seq 60); do grep -aq 'accounts:' "$VMWORK/launch.log" && break; sleep 2; done
+    expect "the service sent Windows' accounts; the host mapped them" "$(grep -a 'accounts:' "$VMWORK/launch.log")" 'account\(s\) mapped'
+    expect "... as a Linux user marked with its SID" "$(getent passwd paguro)" '^paguro:x:5[0-9]{3}:[0-9]+:paguro S-1-5-21-'
     out=$(wssh 'sc qc paguro-sshd & sc query paguro-sshd & sc qc sshd & netstat -an -p tcp | findstr ":22 "' 2>&1 | tr -d '\r') || true
     echo "$out" > "$VMWORK/ssh-service.txt"
     expect "paguro-sshd runs, started on demand" "$(tr '\n' ' ' <<<"$out")" 'SERVICE_NAME: paguro-sshd.*DEMAND_START.*paguro\\link\\sshd_config.*RUNNING'

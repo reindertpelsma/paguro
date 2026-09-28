@@ -2524,11 +2524,16 @@ list during a transient failure and fire it on a false positive.
 **The same caution for the listing itself.** A sync whose account list holds
 no users (only built-ins below RID 1000, or nothing) is a failed listing and
 changes nothing; an account that reappears after being locked is unlocked.
-uids are never reused, locked entries included. *(Built and unit-tested:
-`paguro_link::idmap`, the map recorded as JSON, the name derivation —
+uids are never reused, locked entries included. The service sends Windows'
+enabled local accounts on every VM boot (a disabled account counts as
+deleted); the host syncs, applies with `useradd`/`usermod` (a lock also
+expires the account, so key-based SSH is refused too) and marks its users'
+GECOS `paguro <SID>`, so a sync that stopped halfway is simply run again
+(INTERFACES §11.3 `accounts`). *(Built and unit-tested:
+`paguro_link::idmap` — the map recorded as JSON, the name derivation:
 lowercase, Latin accents folded, `_` for the rest, `user<uid>` when nothing
-is left, `name2`, `name3`, … on a collision — and the sync's actions. Not
-yet applied to a system or fed by the service.)*
+is left, `name2`, `name3`, … on a collision — `paguro_vm::users` and
+`paguro_win::vmlink::provision_accounts`. Not yet run in the VM rig.)*
 
 **Credentials.** The Windows session auto-unlocks to the logged-in Linux user, so
 a per-user secret must be stored somewhere. It goes in the **keyring, unlocked by

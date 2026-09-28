@@ -1154,6 +1154,24 @@ fn supervise(
                         }
                         continue;
                     }
+                    if paguro_link::idmap::parse_accounts(&f).is_some() {
+                        let ack = crate::users::handle_accounts(
+                            &o.link_state,
+                            Path::new("/etc/passwd"),
+                            &mut crate::users::SystemAccounts,
+                            &f,
+                        );
+                        match paguro_link::idmap::parse_accounts_ack(&ack) {
+                            Some(Ok(u)) => {
+                                log(&format!("accounts: {} Windows account(s) mapped", u.len()))
+                            }
+                            _ => log(&format!("accounts: {}", field(&ack, "error"))),
+                        }
+                        if let Err(e) = a.write_all(&agent_frame(&ack)) {
+                            log(&format!("agent: accounts ack: {e}"));
+                        }
+                        continue;
+                    }
                     if is_ssh_keys(&f) {
                         let ack = match handle_ssh_keys(&o.link_state, &f) {
                             Ok(ack) => {

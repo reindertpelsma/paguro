@@ -430,7 +430,6 @@ pub fn provision_invocation(c: &LinkConfig) -> String {
     )
 }
 
-/// guest → host: Windows' client key and its sshd host key.
 /// guest → host: the Windows account Linux signs in as (short name, per
 /// [`windows_user_ok`]), its link key and the link sshd's host key.
 pub fn ssh_keys_frame(windows_user: &str, windows_user_pub: &str, windows_host_pub: &str) -> Value {
@@ -518,7 +517,7 @@ pub fn pubkey_ok(s: &str) -> bool {
             .all(|c| (0x20..0x7f).contains(&c) && c != b'\'' && c != b'"')
 }
 
-fn kind(v: &Value) -> Option<&str> {
+pub(crate) fn kind(v: &Value) -> Option<&str> {
     v.get("type").and_then(Value::as_str)
 }
 #[cfg(test)]

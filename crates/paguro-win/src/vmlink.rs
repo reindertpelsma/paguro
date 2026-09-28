@@ -45,6 +45,7 @@ pub const PUBLIC_SDDL: &str = "O:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;AU)";
 pub fn run(api: &dyn WinApi, sleep: &dyn Fn(Duration), log: &dyn Fn(&str)) {
     retry(sleep, log, "link", &|| provision_link(api, log));
     retry(sleep, log, "ssh", &|| provision_ssh(api, log));
+    retry(sleep, log, "accounts", &|| provision_accounts(api, log));
 }
 
 fn retry(
@@ -114,6 +115,32 @@ pub fn provision_link(api: &dyn WinApi, log: &dyn Fn(&str)) -> Result<(), String
         log("link: Windows' side in place (address, the C: share, firewall, L:)");
     }
     r
+}
+
+/// The identity mapping (DESIGN.md §4.7): Windows' enabled local
+/// accounts to the host, which creates, renames or locks their Linux
+/// users and replies with the mapping. Done on every VM boot; the host's
+/// sync is idempotent.
+pub fn provision_accounts(api: &dyn WinApi, log: &dyn Fn(&str)) -> Result<(), String> {
+    let out = powershell(api, &link::idmap::windows_accounts_ps1())?;
+    let accounts = link::idmap::parse_accounts_listing(&out)
+        .ok_or("the account listing printed nothing usable")??;
+    let mut port = open_port(api)?;
+    let users = agent::exchange(
+        &mut *port,
+        &link::idmap::accounts_frame(&accounts),
+        &link::idmap::parse_accounts_ack,
+    )
+    .map_err(|e| e.to_string())??;
+    let names: Vec<String> = users
+        .iter()
+        .map(|(_, uid, u)| format!("{u} ({uid})"))
+        .collect();
+    log(&format!(
+        "accounts: mapped on Linux as {}",
+        names.join(", ")
+    ));
+    Ok(())
 }
 
 /// The user signed in at the console, `DOMAIN\name` as Windows reports it.
@@ -214,6 +241,8 @@ mod tests {
                 ok("paguro: private link ready")
             } else if s.contains("SSH Windows side") {
                 ok("paguro: SSH ready on 169.254.244.2:22")
+            } else if s.contains("the identity mapping's account list") {
+                ok("PAGURO-ACCOUNTS [{\"sid\":\"S-1-5-21-1-2-3-1001\",\"name\":\"anna\"},{\"sid\":\"S-1-5-21-1-2-3-500\",\"name\":\"Administrator\"}]")
             } else {
                 None
             }
@@ -244,16 +273,32 @@ mod tests {
                     "ssh-ed25519 LLLL paguro@host",
                     "ssh-ed25519 KKKK",
                 ),
+                json!({"type": "accounts-ack", "users": [
+                    {"sid": "S-1-5-21-1-2-3-1001", "uid": 5000, "linux_user": "anna"}
+                ]}),
             ],
             "DESKTOP-1\\anna\r\n",
         );
-        run(&m, &|_| panic!("no retry needed"), &|_| {});
+        let logs = RefCell::new(Vec::new());
+        run(&m, &|_| panic!("no retry needed"), &|l| {
+            logs.borrow_mut().push(l.to_string())
+        });
+        assert!(
+            logs.borrow()
+                .iter()
+                .any(|l| l == "accounts: mapped on Linux as anna (5000)")
+        );
 
         let w = written(&port);
         assert!(link::is_link_request(&w[0]));
         assert_eq!(link::parse_link_ready(&w[1]), Some(Ok(())));
         assert_eq!(w[2]["type"], "ssh-keys");
         assert_eq!(w[2]["windows_user_pub"], "ssh-ed25519 WWWW paguro@VM");
+        // Only people: the built-in Administrator is not sent.
+        assert_eq!(
+            w[3],
+            json!({"type": "accounts", "accounts": [{"sid": "S-1-5-21-1-2-3-1001", "name": "anna"}]})
+        );
 
         // Secrets only ever on stdin, never in a command line.
         let cmds = m.commands.borrow().join("\n");
