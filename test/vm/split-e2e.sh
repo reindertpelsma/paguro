@@ -283,7 +283,7 @@ if [ "$SERVICE" = 1 ]; then
     out=$(wssh 'sc qc paguro-sshd & sc query paguro-sshd & sc qc sshd & netstat -an -p tcp | findstr ":22 "' 2>&1 | tr -d '\r') || true
     echo "$out" > "$VMWORK/ssh-service.txt"
     expect "paguro-sshd runs, started on demand" "$(tr '\n' ' ' <<<"$out")" 'SERVICE_NAME: paguro-sshd.*DEMAND_START.*paguro\\link\\sshd_config.*RUNNING'
-    expect "... listening on the link address" "$(tr '\n' ' ' <<<"$out")" '169\.254\.244\.2:22 .*LISTENING'
+    expect "... listening on the link address" "$(grep -a '169\.254\.244\.2:22 ' <<<"$out")" 'LISTENING'
     expect "Windows' own sshd keeps its own configuration" \
         "$(grep -a -A6 '^SERVICE_NAME: sshd$' <<<"$out" | grep -a BINARY_PATH_NAME)" 'OpenSSH\\sshd\.exe"? *$'
 else
