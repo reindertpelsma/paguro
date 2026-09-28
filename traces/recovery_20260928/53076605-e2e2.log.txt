@@ -1,0 +1,236 @@
+
+### build
+
+### L2: the paguro host stack
+paguro-vm: PG_VOLUME_ADD: volume 1 (44040184 sectors, 8 segments decrypted)
+claim 1: 1 extents, 131072 sectors, state 0
+state 2
+paguro-vm: FVE: external key protector 8F4B8586-3FB1-4C0F-8081-4D70C95A21C6 added to the substitute; 6 owned ranges (544 sectors) served from the session
+paguro-vm: ESP: 140 files, 260 MiB, testsigning on {80453bca-bb22-11f1-aaa5-9be62f751655}
+paguro-vm: view B paguro-vmdisk-b: 252:1 (volume 1)
+paguro-vm: paguro-vmdisk: 252:2 (22839050752 bytes, 14 segments)
+volume 1 sectors 44040184 flags 0 view b tables 1 guard 0 readahead 0
+claim 1 volume 1 record 154163 seq 1 state 0x2 extents 1 sectors 131072 refused 0 tables 0
+RESULT owned ranges: volume-header@0+16, metadata-0@297800+128, relocated-boot-sectors@297928+16, extra-region@297944+128, metadata-1@2168832+128, metadata-2@4311248+128
+PASS: view B: the image's first sectors through paguro-vmdisk: dd: /dev/mapper/paguro-vmdisk: Input/output error
+PASS: view B: the sectors after it: 8+0 records out
+PASS: view B: the sectors before it: 8+0 records out
+PASS: view C refused while view B is loaded: rc=1
+PASS: the guest is served substituted metadata, not the disk's: -FVE-FS- substituted 
+PASS: libbde opens the real volume through the stack with the session's .BEK: libbde NTFS
+PASS: dislocker too: dislocker NTFS
+
+### the private link, host side (§5c): before Windows boots
+PASS: L2: the distributions' tree for L:: l-ready
+
+### Windows: paguro-vm launch
+RESULT boot to SSH: 74 s
+RESULT host workloads' memory.max while the VM runs: 99298398208 (paguro-vm: memory: /sys/fs/cgroup/paguro-vm-e2e-host/memory.max = 99298398208 paguro-vm: memory: QEMU oom_score_adj -1000 )
+PASS: the paguro service armed the driver: paguro-vm: driver: reported after 72.2s; armed: the tripwire is off, refusals reach Windows as EIO
+PASS: ... and recorded it: {"armed":true,"at_unix":1790565408,"detail":"armed after the host's ack"}
+PASS: the image is protected: another process cannot open it: refused
+paguro-vm: BEK: read by the guest after 4.5s (7 reads)
+paguro-vm: BEK: device_del sent
+paguro-vm: BEK: removed from the guest
+
+### guest checks
+PASS: BitLocker protection in the VM: On
+PASS: the session's external key is a protector: RecoveryPassword={A97D9162-EC76-49E0-A920-F4D808295A31},Tpm={7A61477C-3E28-406D-B72F-C0801F7C3C29},ExternalKey={8F4B8586-3FB1-4C0F-8081-4D70C95A21C6}
+PASS: testsigning (synthetic ESP only): testsigning Yes
+PASS: the minifilter is loaded and attached: PaguroFlt 1 409010 0
+PASS: SMBIOS type 11 marker: paguro-vm/1
+PASS: SMBIOS UUID = the host's: e7ec21eb-4989-45f2-8c9a-cd06fbf5ee8c
+PASS: the NAT adapter carries the host's MAC: CHECK nic.paguro0: Red Hat VirtIO Ethernet Adapter #2 02-70-67-00-00-02 Up CHECK nic.Ethernet 2: Red Hat VirtIO Ethernet Adapter 52-54-00-12-34-56 Up 
+PASS: no WinRE, three partitions: 3
+PASS: no TPM in the VM: 0
+PASS: a guest write lands: paguro-vm 2026-09-28T03:17:33.9939095+00:00
+RESULT guest facts: smbios.vendor: QEMU / Standard PC (i440FX + PIIX, 1996);cpu: AMD EPYC 7K62 48-Core Processor                ;hypervisor.present: True;disk.0: serial=QM00001 size=22839050752 guid={62b43f7f-0037-4b9f-8ac3-8ee2fd6be5f8};winre:  Windows RE status: Disabled;secureboot: unsupported;activation: 1;disk.errors: Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Ntfs/98,Microsoft-Windows-Kernel-Boot/153,Microsoft-Windows-Ntfs/98,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Ntfs/98,Microsoft-Windows-Kernel-Boot/153,Microsoft-Windows-Ntfs/98,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Ntfs/98,Microsoft-Windows-Kernel-Boot/153;
+
+### the private link (§5c): provisioned by the service, /mnt/c (§5b Mode 1), L:, SSH
+PASS: the service asked for the link's settings: paguro-vm: link: settings sent to the service
+PASS: ... and provisioned Windows' side: paguro-vm: link: Windows' side is ready
+PASS: the service exchanged SSH keys: paguro-vm: ssh-keys: Windows' keys folded in, replied with the host's
+PASS: the host pinned paguro-sshd's host key: 169.254.244.2 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPR14UxM82VOxfrYMvp5lnN/2BMGMNzTPZ5Xy2h8suh8 paguro-link@PAGURO-WINVM
+PASS: ... and authorized the Windows user's key, from the link only: from="169.254.244.2" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHfEZ3WgJuuuoNFEyvLqVkcwZptwyCXNpnbTz/q+fqd6 paguro@PAGURO-WINVM
+PASS: the Windows account it signs in as: paguro
+PASS: the service sent Windows' accounts; the host mapped them: paguro-vm: accounts: 2 Windows account(s) mapped
+PASS: ... as a Linux user marked with its SID: paguro:x:5000:5000:paguro S-1-5-21-413343020-2849516233-1589874559-1000:/home/paguro:/bin/sh
+PASS: paguro-sshd runs, started on demand: [SC] QueryServiceConfig SUCCESS  SERVICE_NAME: paguro-sshd         TYPE               : 10  WIN32_OWN_PROCESS          START_TYPE         : 3   DEMAND_START         ERROR_CONTROL      : 1   NORMAL         BINARY_PATH_NAME   : "C:\Program Files\OpenSSH\sshd.exe" -f "C:\ProgramData\paguro\link\sshd_config"         LOAD_ORDER_GROUP   :          TAG                : 0         DISPLAY_NAME       : paguro: SSH on the private link         DEPENDENCIES       :          SERVICE_START_NAME : LocalSystem  SERVICE_NAME: paguro-sshd          TYPE               : 10  WIN32_OWN_PROCESS           STATE              : 4  RUNNING                                  (STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)         WIN32_EXIT_CODE    : 0  (0x0)         SERVICE_EXIT_CODE  : 0  (0x0)         CHECKPOINT         : 0x0         WAIT_HINT          : 0x0 [SC] QueryServiceConfig SUCCESS  SERVICE_NAME: sshd         TYPE               : 10  WIN32_OWN_PROCESS          START_TYPE         : 2   AUTO_START         ERROR_CONTROL      : 3   CRITICAL         BINARY_PATH_NAME   : "C:\Program Files\OpenSSH\sshd.exe"         LOAD_ORDER_GROUP   :          TAG                : 0         DISPLAY_NAME       : OpenSSH SSH Server         DEPENDENCIES       :          SERVICE_START_NAME : LocalSystem   TCP    0.0.0.0:22             0.0.0.0:0              LISTENING   TCP    10.0.2.15:22           10.0.2.2:60696         ESTABLISHED   TCP    169.254.244.2:22       0.0.0.0:0              LISTENING 
+PASS: ... listening on the link address:   TCP    169.254.244.2:22       0.0.0.0:0              LISTENING
+PASS: Windows' own sshd keeps its own configuration:         BINARY_PATH_NAME   : "C:\Program Files\OpenSSH\sshd.exe"
+PASS: Samba in netns paguro, with the handshake's secret: samba-up
+PASS: /mnt/c: C: over SMB from the VM, mounted inside netns paguro: linux.efi linux.img written-in-vm.txt paguro-vm 2026-09-28T03:17:33.9939095+00:00
+ //169.254.244.2/paguro-c /mnt/c cifs rw,relatime,vers=3.1.1,cache=strict,username=paguro-smb,uid=0,forceuid,gid=0,forcegid,addr=169.254.244.2,file_mode=0644,dir_mode=0755,soft,nounix,mapposix,rsize=4194304,wsize=4194304,bsize=1048576,retrans=1,echo_interval=10,nosharesock,actimeo=1,closetimeo=1 0 0 
+PASS: the link exists only in netns paguro: lo               UNKNOWN        127.0.0.1/8 ::1/128  paguro0          UP             169.254.244.1/30 fe80::70:67ff:fe00:1/64  0 
+PASS: SSH Linux -> Windows over the link, host key pinned: paguro-winvm\paguro PAGURO-WINVM 
+PASS: L2: the host's link sshd (stand-in for the socket unit): sshd-up
+PASS: SSH Windows -> Linux over the link, host key pinned: {"key_path":"C:\\Users\\paguro\\.ssh\\paguro_link_ed25519","known_hosts":"C:\\ProgramData\\paguro\\link\\known_hosts","linux_user":"root"}hello from the Linux side 
+
+### modefromsid (§5d): recorded, not expected
+RESULT modefromsid: modes as first seen: 644 mode-lin.txt 1707 mode-win.txt 
+RESULT modefromsid: Linux's file after chmod 755 and a remount: 644 mode-lin.txt
+RESULT modefromsid: Windows' file after chmod 750 and a remount: chmod: mode-win.txt: Permission denied
+RESULT Windows' file ACL before chmod: BUILTIN\Administrators:(I)(F);NT AUTHORITY\SYSTEM:(I)(F);BUILTIN\Users:(I)(RX);NT AUTHORITY\Authenticated Users:(I)(M);
+RESULT ... after chmod 750: BUILTIN\Administrators:(I)(F);NT AUTHORITY\SYSTEM:(I)(F);BUILTIN\Users:(I)(RX);NT AUTHORITY\Authenticated Users:(I)(M);
+RESULT Linux's file ACL after chmod 755: S-1-5-88-3-493:(DENY);NT AUTHORITY\Authenticated Users:(F);
+RESULT Windows' own ACEs after chmod (the S-1-5-88 mode ACE aside): same
+PASS: Windows still reads its file: made by windows
+PASS: L: from Windows over the link: The command completed successfully.  hello from the Linux side 
+PASS: L: shows 'a:b.txt' with ':' as U+F03A: 97.61498.98.46.116.120.116 104.101.108.108.111.46.116.120.116 
+
+### BitLocker in the guest (absorbed, §6; Q24)
+PASS: suspend in the session (clear key):     Protection Status:    Protection Off (1 reboots left)
+RESULT resume in the session:  Protection Status: Protection Off (1 reboots left) / ERROR: An error occurred (code 0x8028400f): A compatible Trusted Platform Module (TPM) Security Device cannot be found on this computer. 
+RESULT protector added in the session: {134C3E1B-503B-453C-BF27-63B8156EFC1B}
+
+### S3 suspend and resume (Q24)
+RESULT S3: not offered by the guest:  Standby (S3) An internal system component has disabled this standby state. Graphics Standby (S3) is not available. Hibernation is not available. 
+
+### the image from the guest (view B's EIO)
+PASS: an ordinary file reads: read 824 bytes: # Copyright (c) 1993-2009 Mi (1 s)
+PASS: the image's clusters do not: error: Access to the path 'C:\paguro\linux.img' is denied. (4 s)
+RESULT I/O errors reported to the guest: disk: 1 I/O error
+
+### shutdown
+paguro-vm: memory: /sys/fs/cgroup/paguro-vm-e2e-host/memory.max = 99298398208
+paguro-vm: memory: QEMU oom_score_adj -1000
+paguro-vm: BEK: read by the guest after 4.5s (7 reads)
+paguro-vm: BEK: device_del sent
+paguro-vm: BEK: removed from the guest
+paguro-vm: agent: {"driver":"PaguroFlt","state":"ok","type":"driver"}
+paguro-vm: driver: reported after 72.2s; armed: the tripwire is off, refusals reach Windows as EIO
+paguro-vm: disk: 1 I/O error(s) reported to the guest (last: read Input/output error)
+paguro-vm: disk: 5 I/O error(s) reported to the guest in all
+paguro-vm: QEMU exited: exit status: 0
+PASS: memory.max restored after the VM: max
+
+### Q24: what Windows wrote to BitLocker's sectors
+writes logged: 13938
+  gpt-head          0 writes        0.0 MiB
+  gpt-tail          0 writes        0.0 MiB
+  esp+msr          87 writes        0.5 MiB
+  C:data        13841 writes      283.6 MiB
+  C:owned          10 writes        0.6 MiB
+writes into BitLocker-owned ranges: 10
+  #     40 boot             write   extra-region             +   0 x 128 
+  #  10563 suspend          write   metadata-0               +   0 x 128 
+  #  10565 suspend          write   metadata-1               +   0 x 128 
+  #  10567 suspend          write   metadata-2               +   0 x 128 
+  #  10653 add-protector    write   metadata-0               +   0 x 128 
+  #  10655 add-protector    write   metadata-1               +   0 x 128 
+  #  10657 add-protector    write   metadata-2               +   0 x 128 
+  #  10676 delete-protector write   metadata-0               +   0 x 128 
+  #  10678 delete-protector write   metadata-1               +   0 x 128 
+  #  10680 delete-protector write   metadata-2               +   0 x 128 
+
+### L2: nothing reached the disk's BitLocker sectors or the image
+RESULT absorbed (buffer vs served): [["metadata-0",0,1],["metadata-0",32,2],["metadata-1",0,1],["metadata-1",32,2],["metadata-2",0,1],["metadata-2",32,2]]
+PASS: every BitLocker-owned sector and the image's extents unchanged on disk (7 ranges)
+paguro-vm: FVE: the guest wrote 1 sector(s) of metadata-0 at +0: absorbed, not kept (BitLocker changes belong in native Windows)
+paguro-vm: FVE: the guest wrote 2 sector(s) of metadata-0 at +32: absorbed, not kept (BitLocker changes belong in native Windows)
+paguro-vm: FVE: the guest wrote 1 sector(s) of metadata-1 at +0: absorbed, not kept (BitLocker changes belong in native Windows)
+paguro-vm: FVE: the guest wrote 2 sector(s) of metadata-1 at +32: absorbed, not kept (BitLocker changes belong in native Windows)
+paguro-vm: FVE: the guest wrote 1 sector(s) of metadata-2 at +0: absorbed, not kept (BitLocker changes belong in native Windows)
+paguro-vm: FVE: the guest wrote 2 sector(s) of metadata-2 at +32: absorbed, not kept (BitLocker changes belong in native Windows)
+volume 1 sectors 44040184 flags 0 view - tables 0 guard 48 readahead 2
+claim 1 volume 1 record 154163 seq 1 state 0x2 extents 1 sectors 131072 refused 0 tables 0
+view-c-loads
+paguro-vm 2026-09-28T03:17:33.9939095+00:00
+fiemap-same
+PASS: view C loads once view B is gone: view-c-loads
+PASS: the guest's file is on the volume: paguro-vm 2026-09-28T03:17:33.9939095+00:00
+PASS: the image's NTFS extent map is the one claimed at the start: fiemap-same
+
+### native boot of the same disk (TPM, no marker)
+RESULT native: Automatic Repair: not shown
+PASS: native: TPM unseals (booted without a prompt), protection on:     Protection Status:    Protection On
+PASS: native: no external key (the substitute was session-only)
+PASS: native: PaguroFlt not loaded (test-signed, testsigning off natively)
+PASS: native: the file written in the VM: paguro-vm 2026-09-28T03:17:33.9939095+00:00
+
+### results
+RESULT owned ranges: volume-header@0+16, metadata-0@297800+128, relocated-boot-sectors@297928+16, extra-region@297944+128, metadata-1@2168832+128, metadata-2@4311248+128
+PASS: view B: the image's first sectors through paguro-vmdisk: dd: /dev/mapper/paguro-vmdisk: Input/output error
+PASS: view B: the sectors after it: 8+0 records out
+PASS: view B: the sectors before it: 8+0 records out
+PASS: view C refused while view B is loaded: rc=1
+PASS: the guest is served substituted metadata, not the disk's: -FVE-FS- substituted 
+PASS: libbde opens the real volume through the stack with the session's .BEK: libbde NTFS
+PASS: dislocker too: dislocker NTFS
+PASS: L2: the distributions' tree for L:: l-ready
+RESULT boot to SSH: 74 s
+RESULT host workloads' memory.max while the VM runs: 99298398208 (paguro-vm: memory: /sys/fs/cgroup/paguro-vm-e2e-host/memory.max = 99298398208 paguro-vm: memory: QEMU oom_score_adj -1000 )
+PASS: the paguro service armed the driver: paguro-vm: driver: reported after 72.2s; armed: the tripwire is off, refusals reach Windows as EIO
+PASS: ... and recorded it: {"armed":true,"at_unix":1790565408,"detail":"armed after the host's ack"}
+PASS: the image is protected: another process cannot open it: refused
+paguro-vm: BEK: read by the guest after 4.5s (7 reads)
+paguro-vm: BEK: device_del sent
+paguro-vm: BEK: removed from the guest
+PASS: BitLocker protection in the VM: On
+PASS: the session's external key is a protector: RecoveryPassword={A97D9162-EC76-49E0-A920-F4D808295A31},Tpm={7A61477C-3E28-406D-B72F-C0801F7C3C29},ExternalKey={8F4B8586-3FB1-4C0F-8081-4D70C95A21C6}
+PASS: testsigning (synthetic ESP only): testsigning Yes
+PASS: the minifilter is loaded and attached: PaguroFlt 1 409010 0
+PASS: SMBIOS type 11 marker: paguro-vm/1
+PASS: SMBIOS UUID = the host's: e7ec21eb-4989-45f2-8c9a-cd06fbf5ee8c
+PASS: the NAT adapter carries the host's MAC: CHECK nic.paguro0: Red Hat VirtIO Ethernet Adapter #2 02-70-67-00-00-02 Up CHECK nic.Ethernet 2: Red Hat VirtIO Ethernet Adapter 52-54-00-12-34-56 Up 
+PASS: no WinRE, three partitions: 3
+PASS: no TPM in the VM: 0
+PASS: a guest write lands: paguro-vm 2026-09-28T03:17:33.9939095+00:00
+RESULT guest facts: smbios.vendor: QEMU / Standard PC (i440FX + PIIX, 1996);cpu: AMD EPYC 7K62 48-Core Processor                ;hypervisor.present: True;disk.0: serial=QM00001 size=22839050752 guid={62b43f7f-0037-4b9f-8ac3-8ee2fd6be5f8};winre:  Windows RE status: Disabled;secureboot: unsupported;activation: 1;disk.errors: Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Ntfs/98,Microsoft-Windows-Kernel-Boot/153,Microsoft-Windows-Ntfs/98,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Ntfs/98,Microsoft-Windows-Kernel-Boot/153,Microsoft-Windows-Ntfs/98,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Kernel-Processor-Power/55,Microsoft-Windows-Ntfs/98,Microsoft-Windows-Kernel-Boot/153;
+PASS: the service asked for the link's settings: paguro-vm: link: settings sent to the service
+PASS: ... and provisioned Windows' side: paguro-vm: link: Windows' side is ready
+PASS: the service exchanged SSH keys: paguro-vm: ssh-keys: Windows' keys folded in, replied with the host's
+PASS: the host pinned paguro-sshd's host key: 169.254.244.2 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPR14UxM82VOxfrYMvp5lnN/2BMGMNzTPZ5Xy2h8suh8 paguro-link@PAGURO-WINVM
+PASS: ... and authorized the Windows user's key, from the link only: from="169.254.244.2" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHfEZ3WgJuuuoNFEyvLqVkcwZptwyCXNpnbTz/q+fqd6 paguro@PAGURO-WINVM
+PASS: the Windows account it signs in as: paguro
+PASS: the service sent Windows' accounts; the host mapped them: paguro-vm: accounts: 2 Windows account(s) mapped
+PASS: ... as a Linux user marked with its SID: paguro:x:5000:5000:paguro S-1-5-21-413343020-2849516233-1589874559-1000:/home/paguro:/bin/sh
+PASS: paguro-sshd runs, started on demand: [SC] QueryServiceConfig SUCCESS  SERVICE_NAME: paguro-sshd         TYPE               : 10  WIN32_OWN_PROCESS          START_TYPE         : 3   DEMAND_START         ERROR_CONTROL      : 1   NORMAL         BINARY_PATH_NAME   : "C:\Program Files\OpenSSH\sshd.exe" -f "C:\ProgramData\paguro\link\sshd_config"         LOAD_ORDER_GROUP   :          TAG                : 0         DISPLAY_NAME       : paguro: SSH on the private link         DEPENDENCIES       :          SERVICE_START_NAME : LocalSystem  SERVICE_NAME: paguro-sshd          TYPE               : 10  WIN32_OWN_PROCESS           STATE              : 4  RUNNING                                  (STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)         WIN32_EXIT_CODE    : 0  (0x0)         SERVICE_EXIT_CODE  : 0  (0x0)         CHECKPOINT         : 0x0         WAIT_HINT          : 0x0 [SC] QueryServiceConfig SUCCESS  SERVICE_NAME: sshd         TYPE               : 10  WIN32_OWN_PROCESS          START_TYPE         : 2   AUTO_START         ERROR_CONTROL      : 3   CRITICAL         BINARY_PATH_NAME   : "C:\Program Files\OpenSSH\sshd.exe"         LOAD_ORDER_GROUP   :          TAG                : 0         DISPLAY_NAME       : OpenSSH SSH Server         DEPENDENCIES       :          SERVICE_START_NAME : LocalSystem   TCP    0.0.0.0:22             0.0.0.0:0              LISTENING   TCP    10.0.2.15:22           10.0.2.2:60696         ESTABLISHED   TCP    169.254.244.2:22       0.0.0.0:0              LISTENING 
+PASS: ... listening on the link address:   TCP    169.254.244.2:22       0.0.0.0:0              LISTENING
+PASS: Windows' own sshd keeps its own configuration:         BINARY_PATH_NAME   : "C:\Program Files\OpenSSH\sshd.exe"
+PASS: Samba in netns paguro, with the handshake's secret: samba-up
+PASS: /mnt/c: C: over SMB from the VM, mounted inside netns paguro: linux.efi linux.img written-in-vm.txt paguro-vm 2026-09-28T03:17:33.9939095+00:00
+ //169.254.244.2/paguro-c /mnt/c cifs rw,relatime,vers=3.1.1,cache=strict,username=paguro-smb,uid=0,forceuid,gid=0,forcegid,addr=169.254.244.2,file_mode=0644,dir_mode=0755,soft,nounix,mapposix,rsize=4194304,wsize=4194304,bsize=1048576,retrans=1,echo_interval=10,nosharesock,actimeo=1,closetimeo=1 0 0 
+PASS: the link exists only in netns paguro: lo               UNKNOWN        127.0.0.1/8 ::1/128  paguro0          UP             169.254.244.1/30 fe80::70:67ff:fe00:1/64  0 
+PASS: SSH Linux -> Windows over the link, host key pinned: paguro-winvm\paguro PAGURO-WINVM 
+PASS: L2: the host's link sshd (stand-in for the socket unit): sshd-up
+PASS: SSH Windows -> Linux over the link, host key pinned: {"key_path":"C:\\Users\\paguro\\.ssh\\paguro_link_ed25519","known_hosts":"C:\\ProgramData\\paguro\\link\\known_hosts","linux_user":"root"}hello from the Linux side 
+RESULT modefromsid: modes as first seen: 644 mode-lin.txt 1707 mode-win.txt 
+RESULT modefromsid: Linux's file after chmod 755 and a remount: 644 mode-lin.txt
+RESULT modefromsid: Windows' file after chmod 750 and a remount: chmod: mode-win.txt: Permission denied
+RESULT Windows' file ACL before chmod: BUILTIN\Administrators:(I)(F);NT AUTHORITY\SYSTEM:(I)(F);BUILTIN\Users:(I)(RX);NT AUTHORITY\Authenticated Users:(I)(M);
+RESULT ... after chmod 750: BUILTIN\Administrators:(I)(F);NT AUTHORITY\SYSTEM:(I)(F);BUILTIN\Users:(I)(RX);NT AUTHORITY\Authenticated Users:(I)(M);
+RESULT Linux's file ACL after chmod 755: S-1-5-88-3-493:(DENY);NT AUTHORITY\Authenticated Users:(F);
+RESULT Windows' own ACEs after chmod (the S-1-5-88 mode ACE aside): same
+PASS: Windows still reads its file: made by windows
+PASS: L: from Windows over the link: The command completed successfully.  hello from the Linux side 
+PASS: L: shows 'a:b.txt' with ':' as U+F03A: 97.61498.98.46.116.120.116 104.101.108.108.111.46.116.120.116 
+PASS: suspend in the session (clear key):     Protection Status:    Protection Off (1 reboots left)
+RESULT resume in the session:  Protection Status: Protection Off (1 reboots left) / ERROR: An error occurred (code 0x8028400f): A compatible Trusted Platform Module (TPM) Security Device cannot be found on this computer. 
+RESULT protector added in the session: {134C3E1B-503B-453C-BF27-63B8156EFC1B}
+RESULT S3: not offered by the guest:  Standby (S3) An internal system component has disabled this standby state. Graphics Standby (S3) is not available. Hibernation is not available. 
+PASS: an ordinary file reads: read 824 bytes: # Copyright (c) 1993-2009 Mi (1 s)
+PASS: the image's clusters do not: error: Access to the path 'C:\paguro\linux.img' is denied. (4 s)
+RESULT I/O errors reported to the guest: disk: 1 I/O error
+paguro-vm: memory: /sys/fs/cgroup/paguro-vm-e2e-host/memory.max = 99298398208
+paguro-vm: memory: QEMU oom_score_adj -1000
+paguro-vm: BEK: read by the guest after 4.5s (7 reads)
+paguro-vm: BEK: device_del sent
+paguro-vm: BEK: removed from the guest
+paguro-vm: agent: {"driver":"PaguroFlt","state":"ok","type":"driver"}
+paguro-vm: driver: reported after 72.2s; armed: the tripwire is off, refusals reach Windows as EIO
+paguro-vm: disk: 1 I/O error(s) reported to the guest (last: read Input/output error)
+paguro-vm: disk: 5 I/O error(s) reported to the guest in all
+paguro-vm: QEMU exited: exit status: 0
+PASS: memory.max restored after the VM: max
+RESULT absorbed (buffer vs served): [["metadata-0",0,1],["metadata-0",32,2],["metadata-1",0,1],["metadata-1",32,2],["metadata-2",0,1],["metadata-2",32,2]]
+PASS: every BitLocker-owned sector and the image's extents unchanged on disk (7 ranges)
+PASS: view C loads once view B is gone: view-c-loads
+PASS: the guest's file is on the volume: paguro-vm 2026-09-28T03:17:33.9939095+00:00
+PASS: the image's NTFS extent map is the one claimed at the start: fiemap-same
+RESULT native: Automatic Repair: not shown
+PASS: native: TPM unseals (booted without a prompt), protection on:     Protection Status:    Protection On
+PASS: native: no external key (the substitute was session-only)
+PASS: native: PaguroFlt not loaded (test-signed, testsigning off natively)
+PASS: native: the file written in the VM: paguro-vm 2026-09-28T03:17:33.9939095+00:00
+RESULT: ALL PASS

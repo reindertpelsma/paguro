@@ -1,0 +1,265 @@
+{
+  "instance": "53076605",
+  "archive_sha256": "9bd81194267c94d0e506ae041c74ece20db22d3f13ef8eeb01f64852ee013e9e",
+  "files": [
+    {
+      "path": "/data/paguro-work/vm/run/absorbed.json",
+      "sha256_original": "4964872d4282ba7817da5e75b87aebdf5bf5ba5fce7ffbe7f4019d0f6815c9a0",
+      "sha256_saved": "4964872d4282ba7817da5e75b87aebdf5bf5ba5fce7ffbe7f4019d0f6815c9a0",
+      "redactions": 0,
+      "original_bytes": 119
+    },
+    {
+      "path": "/data/paguro-work/vm/run/acl-lin.txt",
+      "sha256_original": "504620cbd1a124b04663f72d3e60f0f1d6287f20208a6564af0bd83fd722aa12",
+      "sha256_saved": "504620cbd1a124b04663f72d3e60f0f1d6287f20208a6564af0bd83fd722aa12",
+      "redactions": 0,
+      "original_bytes": 59
+    },
+    {
+      "path": "/data/paguro-work/vm/run/acl-win-after.txt",
+      "sha256_original": "45eb09b6ab4ddaed47055a88a3fc85bd48bc2c7e18fc4561ad44b521f1c410f7",
+      "sha256_saved": "45eb09b6ab4ddaed47055a88a3fc85bd48bc2c7e18fc4561ad44b521f1c410f7",
+      "redactions": 0,
+      "original_bytes": 119
+    },
+    {
+      "path": "/data/paguro-work/vm/run/acl-win-before.txt",
+      "sha256_original": "45eb09b6ab4ddaed47055a88a3fc85bd48bc2c7e18fc4561ad44b521f1c410f7",
+      "sha256_saved": "45eb09b6ab4ddaed47055a88a3fc85bd48bc2c7e18fc4561ad44b521f1c410f7",
+      "redactions": 0,
+      "original_bytes": 119
+    },
+    {
+      "path": "/data/paguro-work/vm/run/bde-resume.txt",
+      "sha256_original": "b1175cadfb9dfd79c9cb0aee706efc0e66b045269f28d1befd0693f3a520ffd0",
+      "sha256_saved": "b1175cadfb9dfd79c9cb0aee706efc0e66b045269f28d1befd0693f3a520ffd0",
+      "redactions": 0,
+      "original_bytes": 272
+    },
+    {
+      "path": "/data/paguro-work/vm/run/bde-suspend.txt",
+      "sha256_original": "4d3f448e0401cf40c1c5f917e63a78ddbd7728058baaa17f9c44aec8ef3edcb3",
+      "sha256_saved": "4d3f448e0401cf40c1c5f917e63a78ddbd7728058baaa17f9c44aec8ef3edcb3",
+      "redactions": 0,
+      "original_bytes": 177
+    },
+    {
+      "path": "/data/paguro-work/vm/run/eio.txt",
+      "sha256_original": "7f3d4364077d47d31184ca1d333b2960e6e485ce1471981a2ff1bd605394d5be",
+      "sha256_saved": "7f3d4364077d47d31184ca1d333b2960e6e485ce1471981a2ff1bd605394d5be",
+      "redactions": 0,
+      "original_bytes": 154
+    },
+    {
+      "path": "/data/paguro-work/vm/run/l2-post.txt",
+      "sha256_original": "069f1650662c97d206f1505ac75d3ae4b9dc5f21f01853d28a07076f76e8764e",
+      "sha256_saved": "069f1650662c97d206f1505ac75d3ae4b9dc5f21f01853d28a07076f76e8764e",
+      "redactions": 0,
+      "original_bytes": 1009
+    },
+    {
+      "path": "/data/paguro-work/vm/run/l2-serial.log",
+      "sha256_original": "ac77353e4f5941c02181a3ee472d5b908a65f1131a6994893631f284c777555c",
+      "sha256_saved": "ac77353e4f5941c02181a3ee472d5b908a65f1131a6994893631f284c777555c",
+      "redactions": 0,
+      "original_bytes": 691
+    },
+    {
+      "path": "/data/paguro-work/vm/run/l2-setup.txt",
+      "sha256_original": "b420eaf26f3c81ccd79bde174d7a0503e70f7dc6a1a92926eec74803c9bfbb2a",
+      "sha256_saved": "b420eaf26f3c81ccd79bde174d7a0503e70f7dc6a1a92926eec74803c9bfbb2a",
+      "redactions": 0,
+      "original_bytes": 650
+    },
+    {
+      "path": "/data/paguro-work/vm/run/launch.log",
+      "sha256_original": "54b180da3aba4942434b0a0055346d189c6c66ae26353c0be42842341666c66c",
+      "sha256_saved": "54b180da3aba4942434b0a0055346d189c6c66ae26353c0be42842341666c66c",
+      "redactions": 0,
+      "original_bytes": 1978
+    },
+    {
+      "path": "/data/paguro-work/vm/run/mnt-c.txt",
+      "sha256_original": "26dd958eb6b4af94cd290a2e73cd54bf2c65ae727bd08a36af74255bb4274a38",
+      "sha256_saved": "26dd958eb6b4af94cd290a2e73cd54bf2c65ae727bd08a36af74255bb4274a38",
+      "redactions": 0,
+      "original_bytes": 383
+    },
+    {
+      "path": "/data/paguro-work/vm/run/modefromsid.txt",
+      "sha256_original": "b6d6a05da81c17f5109c5feb33e73bf893a2baefe7b885047d2860c8481ac07b",
+      "sha256_saved": "b6d6a05da81c17f5109c5feb33e73bf893a2baefe7b885047d2860c8481ac07b",
+      "redactions": 0,
+      "original_bytes": 129
+    },
+    {
+      "path": "/data/paguro-work/vm/run/native.txt",
+      "sha256_original": "63cd1e4f32e3c87fa73e7ff3b2f3faeaa78523cb27a10315ccc6ebb081d104f6",
+      "sha256_saved": "bcd21a01342806ebfd8fcefffed270bec93029883f733bf40827588c89d43c49",
+      "redactions": 3,
+      "original_bytes": 2059
+    },
+    {
+      "path": "/data/paguro-work/vm/run/oracles-real.txt",
+      "sha256_original": "818ebdb9480503407836e8b183e18a509064b91736a45db907be17463012412e",
+      "sha256_saved": "818ebdb9480503407836e8b183e18a509064b91736a45db907be17463012412e",
+      "redactions": 0,
+      "original_bytes": 76
+    },
+    {
+      "path": "/data/paguro-work/vm/run/phases.txt",
+      "sha256_original": "e8b13293df301c5879fe1026479f3ace31a3aebaa4c5b61689917cf7cdebf4e4",
+      "sha256_saved": "e8b13293df301c5879fe1026479f3ace31a3aebaa4c5b61689917cf7cdebf4e4",
+      "redactions": 0,
+      "original_bytes": 115
+    },
+    {
+      "path": "/data/paguro-work/vm/run/post-hashes.txt",
+      "sha256_original": "1b8831f52dfe6afe4638be2f38eb33b45828f30b10768f0d422042ab0c7e2c9d",
+      "sha256_saved": "1b8831f52dfe6afe4638be2f38eb33b45828f30b10768f0d422042ab0c7e2c9d",
+      "redactions": 0,
+      "original_bytes": 217
+    },
+    {
+      "path": "/data/paguro-work/vm/run/powercfg.txt",
+      "sha256_original": "6e791473426d0f42546f0265e9a8834dd5bb548b5a8a8886467e16e66676388b",
+      "sha256_saved": "6e791473426d0f42546f0265e9a8834dd5bb548b5a8a8886467e16e66676388b",
+      "redactions": 0,
+      "original_bytes": 724
+    },
+    {
+      "path": "/data/paguro-work/vm/run/pre-hashes.txt",
+      "sha256_original": "1b8831f52dfe6afe4638be2f38eb33b45828f30b10768f0d422042ab0c7e2c9d",
+      "sha256_saved": "1b8831f52dfe6afe4638be2f38eb33b45828f30b10768f0d422042ab0c7e2c9d",
+      "redactions": 0,
+      "original_bytes": 217
+    },
+    {
+      "path": "/data/paguro-work/vm/run/q24.txt",
+      "sha256_original": "52208359a4b9046724179ce7968bc935c262cc717c195b1db7a40f1e6fc787c4",
+      "sha256_saved": "52208359a4b9046724179ce7968bc935c262cc717c195b1db7a40f1e6fc787c4",
+      "redactions": 0,
+      "original_bytes": 1020
+    },
+    {
+      "path": "/data/paguro-work/vm/run/results.txt",
+      "sha256_original": "3090d89f88bd570053f20c66deb30322883896580e81dfdefd3b128dc6b0cceb",
+      "sha256_saved": "3090d89f88bd570053f20c66deb30322883896580e81dfdefd3b128dc6b0cceb",
+      "redactions": 0,
+      "original_bytes": 10317
+    },
+    {
+      "path": "/data/paguro-work/vm/run/samba.txt",
+      "sha256_original": "623e8e01c8cc35555c31ae29c07dd70fbe4a528d74df1a689d6912a38944b6fb",
+      "sha256_saved": "623e8e01c8cc35555c31ae29c07dd70fbe4a528d74df1a689d6912a38944b6fb",
+      "redactions": 0,
+      "original_bytes": 800
+    },
+    {
+      "path": "/data/paguro-work/vm/run/ssh-l2w.txt",
+      "sha256_original": "af38f4b2fc7a552340720b0eaefb314f6657c106bf0576ae72fbfb4745882e49",
+      "sha256_saved": "af38f4b2fc7a552340720b0eaefb314f6657c106bf0576ae72fbfb4745882e49",
+      "redactions": 0,
+      "original_bytes": 33
+    },
+    {
+      "path": "/data/paguro-work/vm/run/ssh-service.txt",
+      "sha256_original": "1fcdcf8794e6069b6301ebf766ac31459cedb6903a45b8a93b4bd3b08feb3f91",
+      "sha256_saved": "1fcdcf8794e6069b6301ebf766ac31459cedb6903a45b8a93b4bd3b08feb3f91",
+      "redactions": 0,
+      "original_bytes": 1471
+    },
+    {
+      "path": "/data/paguro-work/vm/run/ssh-w2l.txt",
+      "sha256_original": "72542ec5211df5e00c2a32304f13801e0a40fcab27dc3bde26a25fe40bc6809d",
+      "sha256_saved": "72542ec5211df5e00c2a32304f13801e0a40fcab27dc3bde26a25fe40bc6809d",
+      "redactions": 0,
+      "original_bytes": 462
+    },
+    {
+      "path": "/data/paguro-work/winvm/logs/build-serial.log",
+      "sha256_original": "ab7b510c4d8b35804713dd0e52cd619216d4631a1d0c314f8548a176ce4dcdda",
+      "sha256_saved": "ab7b510c4d8b35804713dd0e52cd619216d4631a1d0c314f8548a176ce4dcdda",
+      "redactions": 0,
+      "original_bytes": 1749
+    },
+    {
+      "path": "/root/jobs/bde.log",
+      "sha256_original": "1891cc675b4705c86ce675149115fe3bcadffc0f32c817afc8950fa8d08a2b69",
+      "sha256_saved": "47d993ab2519b29315f8c0d270e4fbac223d6aee2ae0b0868c7f5074b608c1d3",
+      "redactions": 1,
+      "original_bytes": 1771
+    },
+    {
+      "path": "/root/jobs/e2e.log",
+      "sha256_original": "e36cf5fe5550f0300c615325925ccbcfed3e920131b8c9fbc7bd9c29f1ab587c",
+      "sha256_saved": "e36cf5fe5550f0300c615325925ccbcfed3e920131b8c9fbc7bd9c29f1ab587c",
+      "redactions": 0,
+      "original_bytes": 25272
+    },
+    {
+      "path": "/root/jobs/e2e.rc",
+      "sha256_original": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "sha256_saved": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "redactions": 0,
+      "original_bytes": 2
+    },
+    {
+      "path": "/root/jobs/e2e2.log",
+      "sha256_original": "a92de068327c60e3570f930c09294c0c608eecf0ac1c63e16e39222950a0e5d5",
+      "sha256_saved": "a92de068327c60e3570f930c09294c0c608eecf0ac1c63e16e39222950a0e5d5",
+      "redactions": 0,
+      "original_bytes": 23943
+    },
+    {
+      "path": "/root/jobs/e2e2.rc",
+      "sha256_original": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "sha256_saved": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "redactions": 0,
+      "original_bytes": 2
+    },
+    {
+      "path": "/root/jobs/hostsetup.log",
+      "sha256_original": "fa8e5c011597c233d5fce6acc5d3393da3110fc445454579ef9634df61c8e7bc",
+      "sha256_saved": "fa8e5c011597c233d5fce6acc5d3393da3110fc445454579ef9634df61c8e7bc",
+      "redactions": 0,
+      "original_bytes": 60836
+    },
+    {
+      "path": "/root/jobs/hostsetup.rc",
+      "sha256_original": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "sha256_saved": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "redactions": 0,
+      "original_bytes": 2
+    },
+    {
+      "path": "/root/jobs/inputs.log",
+      "sha256_original": "63b709311bb771de8ef35f3cc835ebb52154338d3feb6d10ef9e716191e1f7c3",
+      "sha256_saved": "63b709311bb771de8ef35f3cc835ebb52154338d3feb6d10ef9e716191e1f7c3",
+      "redactions": 0,
+      "original_bytes": 4677
+    },
+    {
+      "path": "/root/jobs/inputs.rc",
+      "sha256_original": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "sha256_saved": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "redactions": 0,
+      "original_bytes": 2
+    },
+    {
+      "path": "/root/jobs/setup2.log",
+      "sha256_original": "5a0b44ada5e07446fb1253197da8cb0d4789f90bb4b029290ec77b00e67ab303",
+      "sha256_saved": "5a0b44ada5e07446fb1253197da8cb0d4789f90bb4b029290ec77b00e67ab303",
+      "redactions": 0,
+      "original_bytes": 4038
+    },
+    {
+      "path": "/root/jobs/setup2.rc",
+      "sha256_original": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "sha256_saved": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "redactions": 0,
+      "original_bytes": 2
+    }
+  ]
+}

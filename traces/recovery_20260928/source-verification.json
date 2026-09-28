@@ -1,0 +1,47 @@
+{
+  "/root/paguro": {
+    "tracked_files": 1780,
+    "identical_to_latest": 1780,
+    "different_from_latest": [],
+    "blobs_absent_from_github_history": [],
+    "missing": []
+  },
+  "/root/paguro-new": {
+    "tracked_files": 1780,
+    "identical_to_latest": 1760,
+    "different_from_latest": [
+      ".github/workflows/loader.yml",
+      "crates/paguro-core/src/lib.rs",
+      "crates/paguro-core/src/pe.rs",
+      "crates/paguro-link/src/idmap.rs",
+      "crates/paguro-link/src/lib.rs",
+      "crates/paguro-link/src/paths.rs",
+      "crates/paguro-link/src/session.rs",
+      "crates/paguro-vm/src/net.rs",
+      "docs/DESIGN.md",
+      "docs/INTERFACES.md",
+      "fuzz/Cargo.toml",
+      "fuzz/README.md",
+      "fuzz/corpus/pe/console64",
+      "fuzz/corpus/pe/dll",
+      "fuzz/corpus/pe/gui32",
+      "fuzz/corpus/shllink/ansi-args",
+      "fuzz/corpus/shllink/explorer-like",
+      "fuzz/fuzz_targets/pe.rs",
+      "test/vm/host-setup-jammy.sh",
+      "test/vm/split-e2e.sh"
+    ],
+    "blobs_absent_from_github_history": [],
+    "missing": [
+      "crates/paguro-core/src/pe.rs",
+      "crates/paguro-link/src/paths.rs",
+      "crates/paguro-link/src/session.rs",
+      "fuzz/corpus/pe/console64",
+      "fuzz/corpus/pe/dll",
+      "fuzz/corpus/pe/gui32",
+      "fuzz/corpus/shllink/ansi-args",
+      "fuzz/corpus/shllink/explorer-like",
+      "fuzz/fuzz_targets/pe.rs"
+    ]
+  }
+}
