@@ -1,8 +1,13 @@
 # Paguro Vast 53076605 retirement audit
 
 Audited 2026-09-29, approximately 18:48–18:56 UTC, following the owner's explicit
-request to retire the Windows rental if unique work was safe. This audit does not
-itself prove destruction; the coordinating agent owns the final Vast operation.
+request to retire the Windows rental if unique work was safe.
+
+**Retirement complete:** after this audit and its artifacts were pushed as
+`bb8cf91`, the coordinating agent destroyed exact instance `53076605` and checked
+the Vast inventory: only Kayfabe instance `53004208` remained. The disposable
+Windows images, overlays and firmware/TPM state were not backed up; regenerate
+them using the preserved setup scripts. The source and evidence remain recoverable.
 
 ## Preservation result
 
